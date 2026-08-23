@@ -1,0 +1,13 @@
+node_modules/
+dist/
+build/
+coverage/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+.turbo/
+.vscode/*
+!.vscode/extensions.json
+pnpm-lock.yaml.bak

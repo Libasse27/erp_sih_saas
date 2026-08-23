@@ -1,0 +1,10 @@
+{
+  "name": "@sih/desktop",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Enveloppe desktop. Phase 7 (02-roadmap-migration.md) — non demarre.",
+  "scripts": {
+    "build": "echo \"@sih/desktop : Phase 7, pas encore demarre\" && exit 0",
+    "typecheck": "echo \"@sih/desktop : Phase 7, pas encore demarre\" && exit 0"
+  }
+}

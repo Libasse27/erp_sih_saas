@@ -1,0 +1,10 @@
+{
+  "name": "@sih/web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "React + Vite + Tailwind + TanStack Query + Zustand. Non demarre : consomme les contrats du SaaS Core (Phase 0), qui n'existent pas encore.",
+  "scripts": {
+    "build": "echo \"@sih/web : pas encore implemente (Phase 0 en cours)\" && exit 0",
+    "typecheck": "echo \"@sih/web : pas encore implemente (Phase 0 en cours)\" && exit 0"
+  }
+}
