@@ -12,7 +12,7 @@ module.exports = {
       severity: 'error',
       from: { path: '^src/(shared-kernel/domain|modules/[^/]+/domain)' },
       to: {
-        path: '^(express|pg|ioredis|bullmq|node_modules/(express|pg|ioredis|bullmq))',
+        path: '^(express|pg|ioredis|bullmq|@prisma/client|argon2|node_modules/(express|pg|ioredis|bullmq|@prisma/client|argon2))',
         dependencyTypes: ['npm', 'npm-dev'],
       },
     },

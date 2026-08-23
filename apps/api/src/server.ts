@@ -20,9 +20,16 @@ export function createApp(root: CompositionRoot): Express {
 function main(): void {
   const root = buildCompositionRoot();
   const app = createApp(root);
-  app.listen(root.env.PORT, () => {
+  const server = app.listen(root.env.PORT, () => {
     // eslint-disable-next-line no-console
     console.log(`apps/api ecoute sur le port ${root.env.PORT} (${root.env.NODE_ENV})`);
+  });
+
+  // Arret propre (§8 exploitation) : fin des requetes en cours, fermeture des connexions.
+  process.on('SIGTERM', () => {
+    server.close(() => {
+      void root.shutdown();
+    });
   });
 }
 

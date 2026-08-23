@@ -8,20 +8,27 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "test": "vitest run",
     "arch:check": "depcruise src --config .dependency-cruiser.cjs"
   },
   "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "argon2": "^0.45.1",
     "express": "^4.21.2",
+    "ioredis": "^6.0.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.2",
+    "@types/pg": "^8.23.1",
     "dependency-cruiser": "^16.9.0",
+    "dotenv": "^17.4.2",
+    "pg": "^8.23.0",
+    "prisma": "6.19.3",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.9"
   }
 }

@@ -1,0 +1,138 @@
+// Schema Prisma — Module Identity + RBAC + UserTenantMembership (Phase 0, etape 2/13).
+//
+// Deux schemas PostgreSQL, conformement a ADR-0001 / 01-target-architecture.md §3.3 :
+//   - "platform" : donnees de niveau plateforme, hors RLS tenant (UserAccount, Permission).
+//   - "public"   : donnees tenant-scoped, RLS FORCE (UserTenantMembership, MembershipRole),
+//                  et le catalogue de roles (Role — voir commentaire sur ce modele : les
+//                  lignes SYSTEM sont globales, les lignes TENANT sont RLS-isolees, une seule
+//                  table porte les deux via `tenant_id NULL` pour les roles systeme).
+//
+// Les politiques RLS elles-memes (ALTER TABLE ... FORCE ROW LEVEL SECURITY, CREATE POLICY) ne
+// sont pas exprimables en langage de schema Prisma : elles sont ajoutees a la main dans la
+// migration SQL generee (prisma/migrations/<ts>_identity_rbac_init/migration.sql), avec un
+// commentaire explicite les reperant.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["platform", "public"]
+}
+
+enum PlatformRole {
+  SUPER_ADMIN
+  NONE
+
+  @@schema("platform")
+}
+
+enum RoleScope {
+  SYSTEM
+  TENANT
+
+  @@schema("public")
+}
+
+enum MembershipStatus {
+  ACTIVE
+  SUSPENDED
+  REVOKED
+
+  @@schema("public")
+}
+
+/// Identite globale d'une personne (voir domain/UserAccount.ts). Aucun tenant_id : c'est ce
+/// qui permet de retrouver un compte par email au login, avant qu'un contexte tenant existe.
+model UserAccount {
+  id           String       @id @db.Uuid
+  email        String       @unique
+  passwordHash String       @map("password_hash")
+  platformRole PlatformRole @map("platform_role")
+  createdAt    DateTime     @map("created_at")
+
+  @@map("UserAccount")
+  @@schema("platform")
+}
+
+/// Catalogue de permissions — niveau plateforme, source de verite unique (01-target-architecture.md §7.2).
+model Permission {
+  code        String   @id
+  resource    String
+  action      String
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@schema("platform")
+}
+
+/// Role systeme (scope SYSTEM, tenant_id NULL, catalogue global immuable des 18 roles) OU role
+/// personnalise d'etablissement (scope TENANT, tenant_id obligatoire). Une seule table pour les
+/// deux : la politique RLS `tenant_isolation` couvre les lignes TENANT, une politique
+/// additionnelle `system_role_catalog_read` (voir migration) autorise la lecture des lignes
+/// SYSTEM (tenant_id NULL) quel que soit le contexte de session.
+model Role {
+  id              String    @id @db.Uuid
+  code            String
+  name            String
+  scope           RoleScope
+  tenantId        String?   @map("tenant_id") @db.Uuid
+  permissionCodes String[]  @map("permission_codes")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  membershipRoles MembershipRole[]
+
+  // Unicite des roles TENANT par (tenant_id, code) ; l'unicite globale des codes SYSTEM
+  // (tenant_id NULL) est imposee par un index partiel ajoute a la main en migration, car
+  // Postgres ne traite pas NULL comme une valeur egale a elle-meme dans une contrainte UNIQUE
+  // standard.
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("Role")
+  @@schema("public")
+}
+
+/// Appartenance d'un UserAccount a UN etablissement (voir domain/UserTenantMembership.ts).
+/// Table tenant-scoped, RLS FORCE.
+model UserTenantMembership {
+  id        String           @id @db.Uuid
+  userId    String           @map("user_id") @db.Uuid
+  tenantId  String           @map("tenant_id") @db.Uuid
+  status    MembershipStatus
+  joinedAt  DateTime         @map("joined_at")
+  leftAt    DateTime?        @map("left_at")
+  createdAt DateTime         @map("created_at")
+  createdBy String           @map("created_by") @db.Uuid
+
+  roles MembershipRole[]
+
+  // Pas de contrainte UNIQUE(user_id, tenant_id) globale : un membership REVOKED n'empeche pas
+  // un octroi ulterieur (nouvelle ligne). L'unicite porte uniquement sur les memberships ACTIFS
+  // — imposee par un index unique partiel ajoute a la main en migration (defense en profondeur
+  // en plus du controle applicatif de GrantMembershipHandler).
+  @@index([tenantId, status])
+  @@index([userId, tenantId])
+  @@map("UserTenantMembership")
+  @@schema("public")
+}
+
+/// Table de jonction membership <-> role (un membership peut porter plusieurs roles
+/// simultanes — decision non negociable de cette etape). `tenant_id` est denormalise depuis le
+/// membership pour que la politique RLS s'applique directement sur cette table sans jointure.
+model MembershipRole {
+  id           String   @id @db.Uuid
+  membershipId String   @map("membership_id") @db.Uuid
+  roleId       String   @map("role_id") @db.Uuid
+  tenantId     String   @map("tenant_id") @db.Uuid
+  assignedAt   DateTime @map("assigned_at")
+
+  membership UserTenantMembership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  role       Role                 @relation(fields: [roleId], references: [id], onDelete: Restrict)
+
+  @@unique([membershipId, roleId])
+  @@index([tenantId])
+  @@map("MembershipRole")
+  @@schema("public")
+}
