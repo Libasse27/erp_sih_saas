@@ -53,6 +53,17 @@ export class Money extends ValueObject<MoneyProps> {
     return new Money({ amount: this.props.amount + other.props.amount, currency: 'XOF' });
   }
 
+  /**
+   * Soustraction — ajoutee pour le module Subscription (O-02.6, calcul de proratisation
+   * d'upgrade). Delegue a `fromXOF` plutot que de dupliquer sa validation : un resultat negatif
+   * (soustraction d'un montant superieur) est un echec metier attendu (`Result`, pas une
+   * exception), pas une erreur de programmation — le meme invariant que la construction, donc
+   * la meme voie de validation.
+   */
+  subtract(other: Money): Result<Money, InvalidMoneyError> {
+    return Money.fromXOF(this.props.amount - other.props.amount);
+  }
+
   isZero(): boolean {
     return this.props.amount === 0;
   }

@@ -12,6 +12,10 @@ import type {
   TenantAccessStatus,
 } from './modules/identity/application/ports/TenantAccessChecker.js';
 import { buildTenantModule, type TenantModule } from './modules/tenant/infrastructure/TenantModule.js';
+import {
+  buildSubscriptionModule,
+  type SubscriptionModule,
+} from './modules/subscription/infrastructure/SubscriptionModule.js';
 
 /**
  * Adaptateur cross-module implementant le port `TenantAccessChecker` d'Identity en s'appuyant
@@ -50,6 +54,7 @@ export interface CompositionRoot {
   readonly redis: Redis;
   readonly tenant: TenantModule;
   readonly identity: IdentityModule;
+  readonly subscription: SubscriptionModule;
   /** Ferme proprement les connexions (SIGTERM) — appele une seule fois, jamais depuis un handler. */
   shutdown(): Promise<void>;
 }
@@ -68,6 +73,10 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
   const tenant = buildTenantModule({ prisma, clock, idGenerator });
   const tenantAccessChecker = new TenantModuleBackedAccessChecker(tenant);
   const identity = buildIdentityModule({ prisma, redis, clock, idGenerator, tenantAccessChecker });
+  // Subscription (Phase 0, etape 4/13) ne depend d'aucun autre module a ce stade — voir le
+  // residu documente dans SubscriptionModule.ts sur l'absence volontaire d'un port
+  // TenantAccessChecker cote Subscription (hors perimetre de cette etape).
+  const subscription = buildSubscriptionModule({ prisma, clock, idGenerator });
 
   return {
     env,
@@ -77,6 +86,7 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
     redis,
     tenant,
     identity,
+    subscription,
     async shutdown(): Promise<void> {
       await prisma.$disconnect();
       redis.disconnect();

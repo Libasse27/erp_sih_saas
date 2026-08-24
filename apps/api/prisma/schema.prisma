@@ -145,6 +145,132 @@ enum FacilityStatus {
   @@schema("public")
 }
 
+// =================================================================================================
+// Module Subscription (Phase 0, etape 4/13) — Plan / PlanPrice / Subscription / SubscriptionPlanChange.
+//
+// Toutes ces tables vivent dans le schema "platform", EXPLICITEMENT SANS RLS (ADR-0001 §3.3 :
+// "Les donnees de niveau plateforme vivent dans un schema platform distinct, hors RLS tenant" —
+// abonnements et forfaits sont cites nommement dans cette decision). Ne JAMAIS ajouter de
+// politique RLS ni de FORCE ROW LEVEL SECURITY sur ces tables : ce serait contraire a la
+// conception actee, et romprait la coherence documentee ici. `Subscription` et
+// `SubscriptionPlanChange` portent tout de meme `tenant_id` (colonne simple, sans politique) : ce
+// n'est PAS un oubli d'y ajouter du RLS, c'est un choix — le filtrage tenant sur ces deux tables
+// est PUREMENT APPLICATIF (voir PrismaSubscriptionRepository.ts / PrismaPlanChangeRepository.ts,
+// qui filtrent explicitement par tenant_id sur CHAQUE methode ; couvert par
+// test/subscription/integration/subscriptionRepositoryTenantIsolation.test.ts, qui joue le meme
+// role que rls.test.ts pour les tables du schema public).
+//
+// `Plan` et `PlanPrice` n'ont, eux, aucune notion de tenant : catalogue global visible de tous.
+//
+// Aucune contrainte FOREIGN KEY declaree via `@relation` Prisma sur les colonnes planId /
+// planPriceId / fromPlanId / toPlanId / fromPlanPriceId / toPlanPriceId : choix deliberement
+// minimal pour eviter la prolifération de relations nommees (plusieurs FK vers le meme modele
+// sur SubscriptionPlanChange). L'integrite referentielle est appliquee a la main en migration
+// SQL (ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY), meme pattern que les ajouts manuels deja
+// presents dans ce schema (politiques RLS, index partiels) — voir le commentaire en tete de la
+// migration correspondante.
+// =================================================================================================
+
+enum PlanCode {
+  STANDARD
+  PROFESSIONNEL
+  COMPLET
+
+  @@schema("platform")
+}
+
+enum BillingPeriod {
+  MENSUEL
+  ANNUEL
+
+  @@schema("platform")
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+
+  @@schema("platform")
+}
+
+/// Une seule valeur en V1 : le downgrade reste differe a la fin de periode et n'est pas
+/// implemente par cette etape (O-02.6) — voir domain/value-objects/PlanChangeType.ts.
+enum SubscriptionPlanChangeType {
+  UPGRADE
+
+  @@schema("platform")
+}
+
+/// Catalogue global de forfaits (voir domain/Plan.ts). Aucun tenant_id : visible de tous.
+model Plan {
+  id        String   @id @db.Uuid
+  code      PlanCode @unique
+  name      String
+  maxUsers  Int      @map("max_users")
+  maxBeds   Int      @map("max_beds")
+  createdAt DateTime @map("created_at")
+
+  @@map("Plan")
+  @@schema("platform")
+}
+
+/// Tarif historise d'un Plan, DISTINCT du Plan lui-meme (voir domain/PlanPrice.ts). Append-only :
+/// aucune ligne existante n'est jamais mise a jour, un nouveau tarif = une nouvelle ligne.
+model PlanPrice {
+  id            String        @id @db.Uuid
+  planId        String        @map("plan_id") @db.Uuid
+  amount        Int
+  period        BillingPeriod
+  effectiveFrom DateTime      @map("effective_from")
+  createdAt     DateTime      @default(now()) @map("created_at")
+
+  @@index([planId, period, effectiveFrom])
+  @@map("PlanPrice")
+  @@schema("platform")
+}
+
+/// Agregat racine liant un tenant a un forfait via le PlanPrice reellement applique (voir
+/// domain/Subscription.ts). `tenant_id` colonne simple, SANS RLS (voir commentaire de tete de
+/// section) — filtrage explicite obligatoire dans chaque methode du repository.
+/// `@@unique([tenantId])` impose l'invariant "un Tenant a exactement un Subscription" au niveau
+/// base, en plus de la verification applicative.
+model Subscription {
+  id                 String             @id @db.Uuid
+  tenantId           String             @map("tenant_id") @db.Uuid
+  planId             String             @map("plan_id") @db.Uuid
+  currentPlanPriceId String             @map("current_plan_price_id") @db.Uuid
+  period             BillingPeriod
+  status             SubscriptionStatus
+  trialEndsAt        DateTime?          @map("trial_ends_at")
+  periodStartsAt     DateTime           @map("period_starts_at")
+  periodEndsAt       DateTime           @map("period_ends_at")
+  createdAt          DateTime           @map("created_at")
+
+  @@unique([tenantId])
+  @@map("Subscription")
+  @@schema("platform")
+}
+
+/// Historique APPEND-ONLY des changements de forfait (voir domain/PlanChange.ts). `tenant_id`
+/// colonne simple, SANS RLS, meme regime que Subscription ci-dessus.
+model SubscriptionPlanChange {
+  id              String                     @id @db.Uuid
+  subscriptionId  String                     @map("subscription_id") @db.Uuid
+  tenantId        String                     @map("tenant_id") @db.Uuid
+  changeType      SubscriptionPlanChangeType @map("change_type")
+  fromPlanId      String                     @map("from_plan_id") @db.Uuid
+  fromPlanPriceId String                     @map("from_plan_price_id") @db.Uuid
+  toPlanId        String                     @map("to_plan_id") @db.Uuid
+  toPlanPriceId   String                     @map("to_plan_price_id") @db.Uuid
+  proratedAmount  Int                        @map("prorated_amount")
+  occurredAt      DateTime                   @map("occurred_at")
+
+  @@index([subscriptionId])
+  @@index([tenantId])
+  @@map("SubscriptionPlanChange")
+  @@schema("platform")
+}
+
 /// Agregat racine du tenant (voir domain/HealthFacility.ts, 01-target-architecture.md §6.4).
 /// Module Tenant (Phase 0, etape 3/13) — perimetre volontairement minimal : isolation RLS,
 /// pas le modele metier complet de l'etablissement (FacilityType, Service, Building, Room, Bed
