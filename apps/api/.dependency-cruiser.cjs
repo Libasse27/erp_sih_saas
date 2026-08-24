@@ -23,9 +23,20 @@ module.exports = {
       from: { path: '^src/modules/[^/]+/application' },
       to: { path: '^src/modules/[^/]+/infrastructure' },
     },
-    // La regle "un module n'importe jamais le domain/ d'un autre module" (§5) sera ajoutee
-    // avec le deuxieme module (Phase 0, etape 3 : Tenant), verifiee contre un cas reel plutot
-    // qu'ecrite a l'aveugle avant qu'un module cross-reference n'existe.
+    {
+      name: 'no-cross-module-domain-import',
+      comment:
+        'Un module n\'importe jamais le domain/ d\'un autre module (§5) : les echanges passent ' +
+        'par des evenements de domaine ou des ports explicites (contrat publie, ex. ' +
+        'modules/identity/application/ports/TenantExistenceChecker.ts, cable uniquement dans ' +
+        'composition-root.ts). Ajoutee avec le module Tenant (Phase 0, etape 3), verifiee contre ' +
+        'un cas reel (Identity -> Tenant) plutot qu\'ecrite a l\'aveugle. `$1` capture le nom du ' +
+        'module source ; le `to.path` exclut ce meme nom pour n\'interdire QUE les imports ' +
+        'domain/ d\'un AUTRE module (le domain/ de son propre module reste evidemment autorise).',
+      severity: 'error',
+      from: { path: '^src/modules/([^/]+)/' },
+      to: { path: '^src/modules/(?!$1/)[^/]+/domain' },
+    },
   ],
   options: {
     tsPreCompilationDeps: true,

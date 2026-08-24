@@ -15,6 +15,7 @@ import { UserAccountId } from '../../../src/modules/identity/domain/value-object
 import { UserTenantMembershipId } from '../../../src/modules/identity/domain/value-objects/UserTenantMembershipId.js';
 import { RoleId } from '../../../src/modules/identity/domain/value-objects/RoleId.js';
 import type { SessionContext, SessionStore } from '../../../src/modules/identity/application/ports/SessionStore.js';
+import type { TenantExistenceChecker } from '../../../src/modules/identity/application/ports/TenantExistenceChecker.js';
 import { Result } from '../../../src/shared-kernel/domain/Result.js';
 
 export class FixedClock implements Clock {
@@ -186,6 +187,24 @@ export class InMemorySessionStore implements SessionStore {
 
   size(): number {
     return this.byId.size;
+  }
+}
+
+/**
+ * Fake du port cross-module `TenantExistenceChecker` (voir composition-root.ts pour
+ * l'implementation reelle, qui delegue au module Tenant). Par defaut aucun tenant n'existe —
+ * comportement volontairement restrictif (refus par defaut), a l'image du RLS : un test doit
+ * seed() explicitement les tenants qu'il attend voir resolus avec succes.
+ */
+export class InMemoryTenantExistenceChecker implements TenantExistenceChecker {
+  private readonly existingTenantIds = new Set<string>();
+
+  seed(tenantId: TenantId): void {
+    this.existingTenantIds.add(tenantId.toString());
+  }
+
+  async exists(tenantId: TenantId): Promise<boolean> {
+    return this.existingTenantIds.has(tenantId.toString());
   }
 }
 

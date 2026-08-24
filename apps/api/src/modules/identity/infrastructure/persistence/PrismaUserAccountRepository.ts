@@ -5,8 +5,8 @@ import { Email } from '../../domain/value-objects/Email.js';
 import { PasswordHash } from '../../domain/value-objects/PasswordHash.js';
 import { UserAccountId } from '../../domain/value-objects/UserAccountId.js';
 import type { PlatformRole } from '../../domain/value-objects/PlatformRole.js';
-import { assertValid } from './assertValid.js';
-import { resolvePrismaClient } from './PrismaTransactionContext.js';
+import { assertValid } from '../../../../shared-kernel/infrastructure/persistence/assertValid.js';
+import { resolvePrismaClient } from '../../../../shared-kernel/infrastructure/persistence/PrismaTransactionContext.js';
 
 interface UserAccountRow {
   id: string;

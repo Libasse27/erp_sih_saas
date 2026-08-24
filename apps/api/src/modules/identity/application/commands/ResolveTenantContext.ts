@@ -10,6 +10,7 @@ import type { UserAccountRepository } from '../../domain/ports/UserAccountReposi
 import type { UserTenantMembershipRepository } from '../../domain/ports/UserTenantMembershipRepository.js';
 import { UserAccountId } from '../../domain/value-objects/UserAccountId.js';
 import type { SessionContext, SessionStore } from '../ports/SessionStore.js';
+import type { TenantExistenceChecker } from '../ports/TenantExistenceChecker.js';
 
 export type ContextIntent = { readonly kind: 'PLATFORM' } | { readonly kind: 'TENANT'; readonly tenantId: string };
 
@@ -33,6 +34,7 @@ export type ResolveTenantContextError =
   | 'INVALID_TENANT_ID'
   | 'ACCOUNT_NOT_FOUND'
   | 'NOT_SUPER_ADMIN'
+  | 'TENANT_NOT_FOUND'
   | 'MEMBERSHIP_NOT_FOUND_OR_INACTIVE';
 
 export interface ResolveTenantContextResult {
@@ -45,6 +47,7 @@ export class ResolveTenantContextHandler {
     private readonly membershipRepository: UserTenantMembershipRepository,
     private readonly roleRepository: RoleRepository,
     private readonly sessionStore: SessionStore,
+    private readonly tenantExistenceChecker: TenantExistenceChecker,
     private readonly unitOfWork: UnitOfWork,
     private readonly clock: Clock,
     private readonly idGenerator: IdGenerator,
@@ -84,16 +87,31 @@ export class ResolveTenantContextHandler {
       }
       const tenantId = tenantIdResult.getValue();
 
+      // Verification d'existence du tenant AVANT le membership (ajoutee avec le module Tenant,
+      // Phase 0 etape 3) : un membership ne prouve pas a lui seul que l'etablissement existe
+      // encore (ex. tenant supprime par une voie hors perimetre de ce module) — defense en
+      // profondeur supplementaire, distincte du RLS qui isole mais ne verifie pas l'existence.
+      // Cette etape ne verifie que l'EXISTENCE, jamais le statut ACTIVE/SUSPENDED de
+      // l'etablissement : lier le statut du tenant a la resolution de session serait une regle
+      // metier non specifiee (aucun comportement de suspension d'acces n'est invente ici, voir
+      // rapport de l'etape — a valider par l'architecte si un jour necessaire).
       const resolved = await this.unitOfWork.withTransaction(async () => {
+        const tenantExists = await this.tenantExistenceChecker.exists(tenantId);
+        if (!tenantExists) {
+          return { kind: 'TENANT_NOT_FOUND' as const };
+        }
         const membership = await this.membershipRepository.findActiveByUserAndTenant(userId, tenantId);
         if (membership === null) {
-          return null;
+          return { kind: 'MEMBERSHIP_NOT_FOUND' as const };
         }
         const roles = await this.roleRepository.findByIds(tenantId, membership.roleIds);
-        return { membership, roles };
+        return { kind: 'OK' as const, membership, roles };
       }, { tenantId });
 
-      if (resolved === null) {
+      if (resolved.kind === 'TENANT_NOT_FOUND') {
+        return Result.failure('TENANT_NOT_FOUND');
+      }
+      if (resolved.kind === 'MEMBERSHIP_NOT_FOUND') {
         return Result.failure('MEMBERSHIP_NOT_FOUND_OR_INACTIVE');
       }
 

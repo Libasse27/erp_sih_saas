@@ -8,8 +8,8 @@ import type { MembershipStatus } from '../../domain/value-objects/MembershipStat
 import { RoleId } from '../../domain/value-objects/RoleId.js';
 import { UserAccountId } from '../../domain/value-objects/UserAccountId.js';
 import { UserTenantMembershipId } from '../../domain/value-objects/UserTenantMembershipId.js';
-import { assertValid } from './assertValid.js';
-import { resolvePrismaClient } from './PrismaTransactionContext.js';
+import { assertValid } from '../../../../shared-kernel/infrastructure/persistence/assertValid.js';
+import { resolvePrismaClient } from '../../../../shared-kernel/infrastructure/persistence/PrismaTransactionContext.js';
 
 interface MembershipRow {
   id: string;

@@ -5,6 +5,7 @@ import {
   idFor,
   InMemoryRoleRepository,
   InMemorySessionStore,
+  InMemoryTenantExistenceChecker,
   InMemoryUnitOfWork,
   InMemoryUserAccountRepository,
   InMemoryUserTenantMembershipRepository,
@@ -32,6 +33,7 @@ describe('ResolveTenantContextHandler', () => {
   let memberships: InMemoryUserTenantMembershipRepository;
   let roles: InMemoryRoleRepository;
   let sessions: InMemorySessionStore;
+  let tenants: InMemoryTenantExistenceChecker;
   let handler: ResolveTenantContextHandler;
   let clock: FixedClock;
   let idGenerator: SequentialIdGenerator;
@@ -41,9 +43,24 @@ describe('ResolveTenantContextHandler', () => {
     memberships = new InMemoryUserTenantMembershipRepository();
     roles = new InMemoryRoleRepository();
     sessions = new InMemorySessionStore();
+    tenants = new InMemoryTenantExistenceChecker();
+    // Les tenants utilises par la grande majorite des scenarios de cette suite existent deja
+    // (le comportement "tenant absent" a sa propre suite dediee ci-dessous, sur un tenant non
+    // seed ici).
+    tenants.seed(TENANT_A);
+    tenants.seed(TENANT_B);
     clock = new FixedClock('2026-08-23T10:00:00Z');
     idGenerator = new SequentialIdGenerator();
-    handler = new ResolveTenantContextHandler(accounts, memberships, roles, sessions, new InMemoryUnitOfWork(), clock, idGenerator);
+    handler = new ResolveTenantContextHandler(
+      accounts,
+      memberships,
+      roles,
+      sessions,
+      tenants,
+      new InMemoryUnitOfWork(),
+      clock,
+      idGenerator,
+    );
   });
 
   async function registerStandardUser(): Promise<UserAccount> {
@@ -107,6 +124,23 @@ describe('ResolveTenantContextHandler', () => {
     const session = result.getValue().session as TenantSessionContext;
     expect(new Set(session.permissionCodes)).toEqual(new Set(['patient:read', 'membership:administer']));
     expect(session.requiresMfa).toBe(true);
+  });
+
+  it("refuse un tenantId qui ne correspond a aucun HealthFacility existant (TENANT_NOT_FOUND avant meme la verification du membership)", async () => {
+    const account = await registerStandardUser();
+    const ghostTenant = TenantId.create(uuidAt(6099)).getValue();
+    // Volontairement NON seed dans `tenants` : simule un tenant inexistant (ou un membership
+    // orphelin d'un tenant supprime par une voie hors perimetre de ce module).
+    const medecin = Role.system({ id: idFor.role(5), code: 'MEDECIN', name: 'Medecin', permissions: [permission('patient:read')] });
+    roles.seed(medecin);
+    await memberships.save(
+      UserTenantMembership.grant({ userId: account.id, tenantId: ghostTenant, createdBy: account.id, initialRoleIds: [medecin.id], clock, idGenerator }),
+      ghostTenant,
+    );
+
+    const result = await handler.execute({ userId: account.id.toString(), intent: { kind: 'TENANT', tenantId: ghostTenant.toString() } });
+    expect(result.isFailure()).toBe(true);
+    expect(result.getError()).toBe('TENANT_NOT_FOUND');
   });
 
   it('refuse un tenantId dont l_utilisateur n_est pas membre', async () => {

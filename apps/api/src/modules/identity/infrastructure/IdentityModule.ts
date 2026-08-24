@@ -9,10 +9,12 @@ import { CreateUserAccountHandler } from '../application/commands/CreateUserAcco
 import { GrantMembershipHandler } from '../application/commands/GrantMembership.js';
 import { ResolveTenantContextHandler } from '../application/commands/ResolveTenantContext.js';
 import { RevokeMembershipHandler } from '../application/commands/RevokeMembership.js';
+import { ServerContextResolver } from '../application/services/ServerContextResolver.js';
 import type { RoleRepository } from '../domain/ports/RoleRepository.js';
 import type { UserAccountRepository } from '../domain/ports/UserAccountRepository.js';
 import type { UserTenantMembershipRepository } from '../domain/ports/UserTenantMembershipRepository.js';
-import { PgUnitOfWork } from './persistence/PgUnitOfWork.js';
+import type { TenantExistenceChecker } from '../application/ports/TenantExistenceChecker.js';
+import { PgUnitOfWork } from '../../../shared-kernel/infrastructure/persistence/PgUnitOfWork.js';
 import { PrismaRoleRepository } from './persistence/PrismaRoleRepository.js';
 import { PrismaUserAccountRepository } from './persistence/PrismaUserAccountRepository.js';
 import { PrismaUserTenantMembershipRepository } from './persistence/PrismaUserTenantMembershipRepository.js';
@@ -34,14 +36,24 @@ export interface IdentityModule {
     readonly resolveTenantContext: ResolveTenantContextHandler;
     readonly closeSession: CloseSessionHandler;
   };
+  /** Contexte serveur (Phase 0, etape 3) — voir application/services/ServerContextResolver.ts pour la justification de son emplacement dans Identity. */
+  readonly serverContextResolver: ServerContextResolver;
 }
 
-/** Cablage du module Identity + RBAC + UserTenantMembership (Phase 0, etape 2/13). */
+/**
+ * Cablage du module Identity + RBAC + UserTenantMembership (Phase 0, etape 2/13).
+ *
+ * `tenantExistenceChecker` est fourni par l'appelant (composition-root.ts) : c'est un port
+ * cross-module (voir application/ports/TenantExistenceChecker.ts) dont l'implementation reelle
+ * depend du module Tenant (Phase 0, etape 3) — Identity ne construit jamais lui-meme cette
+ * implementation, pour ne jamais avoir a importer quoi que ce soit de `modules/tenant/`.
+ */
 export function buildIdentityModule(deps: {
   prisma: PrismaClient;
   redis: Redis;
   clock: Clock;
   idGenerator: IdGenerator;
+  tenantExistenceChecker: TenantExistenceChecker;
 }): IdentityModule {
   const userAccounts = new PrismaUserAccountRepository(deps.prisma);
   const memberships = new PrismaUserTenantMembershipRepository(deps.prisma, deps.clock, deps.idGenerator);
@@ -82,11 +94,13 @@ export function buildIdentityModule(deps: {
         memberships,
         roles,
         sessionStore,
+        deps.tenantExistenceChecker,
         unitOfWork,
         deps.clock,
         deps.idGenerator,
       ),
       closeSession: new CloseSessionHandler(sessionStore),
     },
+    serverContextResolver: new ServerContextResolver(sessionStore),
   };
 }

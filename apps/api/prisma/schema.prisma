@@ -2,10 +2,11 @@
 //
 // Deux schemas PostgreSQL, conformement a ADR-0001 / 01-target-architecture.md §3.3 :
 //   - "platform" : donnees de niveau plateforme, hors RLS tenant (UserAccount, Permission).
-//   - "public"   : donnees tenant-scoped, RLS FORCE (UserTenantMembership, MembershipRole),
-//                  et le catalogue de roles (Role — voir commentaire sur ce modele : les
-//                  lignes SYSTEM sont globales, les lignes TENANT sont RLS-isolees, une seule
-//                  table porte les deux via `tenant_id NULL` pour les roles systeme).
+//   - "public"   : donnees tenant-scoped, RLS FORCE (UserTenantMembership, MembershipRole,
+//                  HealthFacility), et le catalogue de roles (Role — voir commentaire sur ce
+//                  modele : les lignes SYSTEM sont globales, les lignes TENANT sont
+//                  RLS-isolees, une seule table porte les deux via `tenant_id NULL` pour les
+//                  roles systeme).
 //
 // Les politiques RLS elles-memes (ALTER TABLE ... FORCE ROW LEVEL SECURITY, CREATE POLICY) ne
 // sont pas exprimables en langage de schema Prisma : elles sont ajoutees a la main dans la
@@ -134,5 +135,37 @@ model MembershipRole {
   @@unique([membershipId, roleId])
   @@index([tenantId])
   @@map("MembershipRole")
+  @@schema("public")
+}
+
+enum FacilityStatus {
+  ACTIVE
+  SUSPENDED
+
+  @@schema("public")
+}
+
+/// Agregat racine du tenant (voir domain/HealthFacility.ts, 01-target-architecture.md §6.4).
+/// Module Tenant (Phase 0, etape 3/13) — perimetre volontairement minimal : isolation RLS,
+/// pas le modele metier complet de l'etablissement (FacilityType, Service, Building, Room, Bed
+/// restent hors perimetre).
+///
+/// `tenant_id` DUPLIQUE INTENTIONNELLEMENT `id` — ce n'est pas une redondance accidentelle.
+/// Cette table EST le tenant lui-meme (contrairement a toutes les autres tables tenant-scoped
+/// de ce schema, ou `tenant_id` reference un tenant distinct de la ligne). Le garde-fou
+/// generique de non-fuite RLS impose par ADR-0001 (section "Consequences") enumere TOUTES les
+/// tables du schema "public" et echoue si l'une d'elles n'a pas `tenant_id NOT NULL` **et** une
+/// politique RLS active, SANS exception pour l'agregat racine — voir
+/// test/tenant/integration/rlsGuard.test.ts. Omettre `tenant_id` sur cette table pour la seule
+/// raison qu'elle "est" le tenant serait exactement le genre d'exception ad hoc que ce
+/// garde-fou generique est cense rendre impossible d'oublier.
+model HealthFacility {
+  id        String         @id @db.Uuid
+  tenantId  String         @map("tenant_id") @db.Uuid
+  name      String
+  status    FacilityStatus
+  createdAt DateTime       @map("created_at")
+
+  @@map("HealthFacility")
   @@schema("public")
 }

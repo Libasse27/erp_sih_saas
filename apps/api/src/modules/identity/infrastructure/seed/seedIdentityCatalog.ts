@@ -4,7 +4,7 @@ import { Role } from '../../domain/Role.js';
 import { PERMISSION_CATALOG_CODES, SYSTEM_ROLE_CATALOG } from '../../domain/SystemRoleCatalog.js';
 import { Permission } from '../../domain/value-objects/Permission.js';
 import { RoleId } from '../../domain/value-objects/RoleId.js';
-import { assertValid } from '../persistence/assertValid.js';
+import { assertValid } from '../../../../shared-kernel/infrastructure/persistence/assertValid.js';
 
 /** Seed du catalogue de permissions (niveau plateforme, table `platform.Permission`). Idempotent. */
 export async function seedPermissionCatalog(prisma: PrismaClient): Promise<void> {

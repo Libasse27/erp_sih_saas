@@ -5,8 +5,8 @@ import { Role } from '../../domain/Role.js';
 import { Permission } from '../../domain/value-objects/Permission.js';
 import { RoleId } from '../../domain/value-objects/RoleId.js';
 import type { RoleScope } from '../../domain/value-objects/RoleScope.js';
-import { assertValid } from './assertValid.js';
-import { resolvePrismaClient } from './PrismaTransactionContext.js';
+import { assertValid } from '../../../../shared-kernel/infrastructure/persistence/assertValid.js';
+import { resolvePrismaClient } from '../../../../shared-kernel/infrastructure/persistence/PrismaTransactionContext.js';
 
 interface RoleRow {
   id: string;
