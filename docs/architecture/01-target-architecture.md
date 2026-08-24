@@ -324,8 +324,9 @@ Invariants notables :
   55 000 FCFA/mois · 550 000 FCFA/an — COMPLET 75 000 FCFA/mois · 750 000 FCFA/an (remise
   annuelle ~16,7 %, soit 2 mois offerts).
 - **Unité de facturation : par établissement** (Option D, hybride) — un `Subscription` par
-  `Tenant`, capacités et limites (`maxUsers`, `maxBeds`, etc.) rattachées au `Plan`. *Seuils
-  numériques exacts non fixés — reliquat technique, voir 03, point O-02-résiduel.*
+  `Tenant`, capacités et limites (`maxUsers`, `maxBeds` — seules limites V1) rattachées au
+  `Plan`. Valeurs exactes et règle de dépassement : voir
+  [03-open-decisions.md, O-02](03-open-decisions.md#o-02--modèle-de-tarification-des-forfaits).
 - **Dépassement de limite : comportement différencié par type de ressource**, piloté par la
   donnée du `Plan` (pas un comportement uniforme codé en dur). Règle absolue : aucune donnée
   clinique existante n'est supprimée ni rendue inaccessible pour cause de dépassement ; aucun
@@ -339,7 +340,8 @@ Invariants notables :
 - **Changement de forfait** : upgrade immédiat et proratisé (nouvelles capacités disponibles
   aussitôt) ; downgrade différé à la fin de la période en cours (le forfait actuel reste actif
   jusqu'au renouvellement — cohérent avec la règle de non-régression clinique ci-dessus).
-  *Méthode exacte de proratisation non fixée — reliquat technique.*
+  Méthode exacte de proratisation (calcul au jour près, arrondi, upgrades multiples) : voir
+  [03-open-decisions.md, O-02](03-open-decisions.md#o-02--modèle-de-tarification-des-forfaits).
 - **Remises** : administrées par le Super Admin via un agrégat `DiscountCoupon` (montant ou
   pourcentage, période de validité, forfait concerné, nombre d'utilisations) — traçable, sans
   modification directe du prix catalogue ni du prix d'une souscription individuelle.

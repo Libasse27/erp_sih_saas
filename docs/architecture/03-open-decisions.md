@@ -31,7 +31,7 @@ strictement limitée, sous un nouvel ADR.
 ---
 
 ### O-02 — Modèle de tarification des forfaits
-**MÉTIER · CLOS le 2026-08-23 · Détail dans [01-target-architecture.md §6.3](01-target-architecture.md#63-saas-core)**
+**MÉTIER · CLOS le 2026-08-23 (reliquat technique clos le 2026-08-24) · Détail dans [01-target-architecture.md §6.3](01-target-architecture.md#63-saas-core)**
 
 Sept sous-décisions fermées :
 
@@ -45,14 +45,46 @@ Sept sous-décisions fermées :
 | O-02.6 | Changement de forfait | Upgrade immédiat proratisé ; downgrade différé à la fin de période |
 | O-02.7 | Remises / TVA | Remises via coupons Super Admin traçables ; TVA configurable, non présumée (lié à O-13) |
 
-**Reliquat technique (non bloquant pour la clôture métier d'O-02, bloquant pour
-l'implémentation du module Subscription avant la fin de Phase 0)** :
-- Valeurs numériques exactes des limites par forfait (`maxUsers`, `maxBeds`, etc.)
-- Méthode exacte de proratisation (calcul au jour près, règle d'arrondi XOF, traitement des
-  upgrades multiples dans une même période)
+**Reliquat technique — CLOS le 2026-08-24, avant le démarrage de l'étape 4 (Plan/PlanPrice/Subscription)** :
 
-Ces deux points devront être fermés avant le développement du module Subscription en Phase 0,
-sans bloquer la suite de la séquence O-03 → O-07.
+Limites V1 par forfait (O-02.3) — seules `maxUsers` et `maxBeds` sont plafonnées en V1 ; aucune
+autre ressource (pas de `maxPatients`, `maxConsultations`, `maxStorage`, `maxServices`... pour
+l'instant) :
+
+| Forfait | maxUsers | maxBeds |
+|---|---:|---:|
+| STANDARD | 10 | 20 |
+| PROFESSIONNEL | 30 | 50 |
+| COMPLET | 100 | 200 |
+
+- `maxUsers` compte les `UserTenantMembership` **actifs** (O-05, déjà acté — jamais les rôles).
+- `maxBeds` compte les lits configurés pour l'établissement. La vérification effective de cette
+  limite attend le module qui gère `Building`/`Room`/`Bed` (hors périmètre avant Phase 4, voir
+  [01 §6.4](01-target-architecture.md#64-tenant--établissement)) ; la limite elle-même existe
+  dès le `Plan`, à l'étape 4.
+- Les limites appartiennent exclusivement au `Plan`, jamais au `Subscription`.
+- Dépassement (O-02.4) : **alerte, jamais blocage** — cohérent avec l'option D hybride déjà
+  retenue et la règle de non-régression clinique (aucune donnée ni acte de prise en charge
+  bloqué par un dépassement de quota).
+
+Méthode de proratisation (O-02.6, **upgrade uniquement** — le downgrade reste différé à la fin
+de période, jamais proratisé) :
+
+- Calcul **au jour calendaire près** :
+  `montant = (nouveau_prix − ancien_prix) × jours_restants / jours_dans_la_période`.
+- Arrondi à l'entier FCFA le plus proche ; un `.5` arrondit **au supérieur**.
+- Minimum d'encaissement : **1 FCFA** si le calcul produit un montant positif inférieur à 1 FCFA.
+- Plusieurs upgrades dans la même période : chaque upgrade se calcule depuis le **forfait
+  actuellement actif**, jamais depuis le `PlanPrice` initial de la période
+  (`STANDARD → PROFESSIONNEL → COMPLET` facture `COMPLET − PROFESSIONNEL`, pas
+  `COMPLET − STANDARD`). Chaque changement est historisé, indépendant et idempotent.
+- Contrainte d'implémentation actée : le prix appliqué à un `Subscription` ne se lit **jamais**
+  via `subscription.plan.price` (le `Plan` courant peut avoir changé de tarif depuis la
+  souscription) — le `PlanPrice` réellement applicable est résolu, puis sa référence est
+  conservée sur la transaction historisée, jamais recalculée après coup depuis le `Plan`
+  courant.
+
+**Décideur** : Direction (2026-08-24).
 
 ---
 
@@ -385,7 +417,7 @@ une conception dédiée.
 | ID | Sujet | Type | Bloque | Statut | Décideur |
 |---|---|---|---|---|---|
 | O-01 | Base de données | TECHNIQUE | P0 | **Clos (2026-08-23) — Option B** | Resp. technique |
-| O-02 | Tarification forfaits (7 sous-points) | MÉTIER | P0 | **Clos (2026-08-23)** — reliquat technique tracé | Direction |
+| O-02 | Tarification forfaits (7 sous-points) | MÉTIER | P0 | **Clos (2026-08-23), reliquat technique clos (2026-08-24)** | Direction |
 | O-03 | Impayé / suspension | MÉTIER | P0 | **Clos sous réserve juridique (2026-08-23)** | Direction + juridique |
 | O-04 | Périmètre MFA (7 sous-points) | MIXTE | P0 | **Clos structurellement (2026-08-23)** — 3 résidus tracés | Direction + technique |
 | O-05 | Multi-établissement / utilisateur | MÉTIER | P0 | **Clos (2026-08-23)** | Direction |
