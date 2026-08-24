@@ -6,7 +6,7 @@ import { SystemClock } from '../../../src/shared-kernel/infrastructure/SystemClo
 import { TenantId } from '../../../src/shared-kernel/domain/value-objects/TenantId.js';
 import { UuidGenerator } from '../../../src/shared-kernel/infrastructure/UuidGenerator.js';
 import { buildIdentityModule, type IdentityModule } from '../../../src/modules/identity/infrastructure/IdentityModule.js';
-import type { TenantExistenceChecker } from '../../../src/modules/identity/application/ports/TenantExistenceChecker.js';
+import type { TenantAccessChecker } from '../../../src/modules/identity/application/ports/TenantAccessChecker.js';
 import { seedPermissionCatalog, seedSystemRoles } from '../../../src/modules/identity/infrastructure/seed/seedIdentityCatalog.js';
 import type { TenantSessionContext } from '../../../src/modules/identity/application/ports/SessionStore.js';
 import { buildTenantModule, type TenantModule } from '../../../src/modules/tenant/infrastructure/TenantModule.js';
@@ -36,15 +36,24 @@ describe('Identity — flux integres (Prisma + Redis reels)', () => {
     prisma = createTestPrismaClient();
     redis = createTestRedisClient();
     tenant = buildTenantModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator() });
-    const tenantExistenceChecker: TenantExistenceChecker = {
-      exists: (tenantId) => tenant.repositories.healthFacilities.existsByTenantId(tenantId),
+    // Reproduit fidelement TenantModuleBackedAccessChecker de composition-root.ts (voir ce
+    // fichier pour la justification) — duplique plutot qu'importe pour ne pas faire dependre ce
+    // test du reste du cablage applicatif (env, Express...).
+    const tenantAccessChecker: TenantAccessChecker = {
+      checkAccess: async (tenantId) => {
+        const facility = await tenant.repositories.healthFacilities.findByTenantId(tenantId);
+        if (facility === null) {
+          return 'NOT_FOUND';
+        }
+        return facility.isActive() ? 'ACCESSIBLE' : 'SUSPENDED';
+      },
     };
     identity = buildIdentityModule({
       prisma,
       redis,
       clock: new SystemClock(),
       idGenerator: new UuidGenerator(),
-      tenantExistenceChecker,
+      tenantAccessChecker,
     });
 
     await seedPermissionCatalog(prisma);

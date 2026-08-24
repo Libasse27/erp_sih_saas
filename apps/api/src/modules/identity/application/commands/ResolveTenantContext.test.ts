@@ -5,7 +5,7 @@ import {
   idFor,
   InMemoryRoleRepository,
   InMemorySessionStore,
-  InMemoryTenantExistenceChecker,
+  InMemoryTenantAccessChecker,
   InMemoryUnitOfWork,
   InMemoryUserAccountRepository,
   InMemoryUserTenantMembershipRepository,
@@ -33,7 +33,7 @@ describe('ResolveTenantContextHandler', () => {
   let memberships: InMemoryUserTenantMembershipRepository;
   let roles: InMemoryRoleRepository;
   let sessions: InMemorySessionStore;
-  let tenants: InMemoryTenantExistenceChecker;
+  let tenants: InMemoryTenantAccessChecker;
   let handler: ResolveTenantContextHandler;
   let clock: FixedClock;
   let idGenerator: SequentialIdGenerator;
@@ -43,7 +43,7 @@ describe('ResolveTenantContextHandler', () => {
     memberships = new InMemoryUserTenantMembershipRepository();
     roles = new InMemoryRoleRepository();
     sessions = new InMemorySessionStore();
-    tenants = new InMemoryTenantExistenceChecker();
+    tenants = new InMemoryTenantAccessChecker();
     // Les tenants utilises par la grande majorite des scenarios de cette suite existent deja
     // (le comportement "tenant absent" a sa propre suite dediee ci-dessous, sur un tenant non
     // seed ici).
@@ -141,6 +141,22 @@ describe('ResolveTenantContextHandler', () => {
     const result = await handler.execute({ userId: account.id.toString(), intent: { kind: 'TENANT', tenantId: ghostTenant.toString() } });
     expect(result.isFailure()).toBe(true);
     expect(result.getError()).toBe('TENANT_NOT_FOUND');
+  });
+
+  it("refuse l'ouverture d'un NOUVEAU contexte pour un tenant SUSPENDED, meme avec un membership actif valide (arbitrage architecte, 2026-08-24)", async () => {
+    const account = await registerStandardUser();
+    const suspendedTenant = TenantId.create(uuidAt(6098)).getValue();
+    tenants.seed(suspendedTenant, 'SUSPENDED');
+    const medecin = Role.system({ id: idFor.role(6), code: 'MEDECIN', name: 'Medecin', permissions: [permission('patient:read')] });
+    roles.seed(medecin);
+    await memberships.save(
+      UserTenantMembership.grant({ userId: account.id, tenantId: suspendedTenant, createdBy: account.id, initialRoleIds: [medecin.id], clock, idGenerator }),
+      suspendedTenant,
+    );
+
+    const result = await handler.execute({ userId: account.id.toString(), intent: { kind: 'TENANT', tenantId: suspendedTenant.toString() } });
+    expect(result.isFailure()).toBe(true);
+    expect(result.getError()).toBe('TENANT_SUSPENDED');
   });
 
   it('refuse un tenantId dont l_utilisateur n_est pas membre', async () => {

@@ -10,7 +10,7 @@ import type { UserAccountRepository } from '../../domain/ports/UserAccountReposi
 import type { UserTenantMembershipRepository } from '../../domain/ports/UserTenantMembershipRepository.js';
 import { UserAccountId } from '../../domain/value-objects/UserAccountId.js';
 import type { SessionContext, SessionStore } from '../ports/SessionStore.js';
-import type { TenantExistenceChecker } from '../ports/TenantExistenceChecker.js';
+import type { TenantAccessChecker } from '../ports/TenantAccessChecker.js';
 
 export type ContextIntent = { readonly kind: 'PLATFORM' } | { readonly kind: 'TENANT'; readonly tenantId: string };
 
@@ -35,6 +35,7 @@ export type ResolveTenantContextError =
   | 'ACCOUNT_NOT_FOUND'
   | 'NOT_SUPER_ADMIN'
   | 'TENANT_NOT_FOUND'
+  | 'TENANT_SUSPENDED'
   | 'MEMBERSHIP_NOT_FOUND_OR_INACTIVE';
 
 export interface ResolveTenantContextResult {
@@ -47,7 +48,7 @@ export class ResolveTenantContextHandler {
     private readonly membershipRepository: UserTenantMembershipRepository,
     private readonly roleRepository: RoleRepository,
     private readonly sessionStore: SessionStore,
-    private readonly tenantExistenceChecker: TenantExistenceChecker,
+    private readonly tenantAccessChecker: TenantAccessChecker,
     private readonly unitOfWork: UnitOfWork,
     private readonly clock: Clock,
     private readonly idGenerator: IdGenerator,
@@ -87,18 +88,20 @@ export class ResolveTenantContextHandler {
       }
       const tenantId = tenantIdResult.getValue();
 
-      // Verification d'existence du tenant AVANT le membership (ajoutee avec le module Tenant,
-      // Phase 0 etape 3) : un membership ne prouve pas a lui seul que l'etablissement existe
-      // encore (ex. tenant supprime par une voie hors perimetre de ce module) — defense en
-      // profondeur supplementaire, distincte du RLS qui isole mais ne verifie pas l'existence.
-      // Cette etape ne verifie que l'EXISTENCE, jamais le statut ACTIVE/SUSPENDED de
-      // l'etablissement : lier le statut du tenant a la resolution de session serait une regle
-      // metier non specifiee (aucun comportement de suspension d'acces n'est invente ici, voir
-      // rapport de l'etape — a valider par l'architecte si un jour necessaire).
+      // Verification d'acces au tenant AVANT le membership (etendue lors de l'arbitrage
+      // architecte du 2026-08-24, en continuite de l'etape 3) : un membership actif ne suffit
+      // pas a ouvrir un NOUVEAU contexte si le tenant n'existe plus (TENANT_NOT_FOUND) OU si
+      // son statut interdit l'ouverture d'un nouveau contexte (TENANT_SUSPENDED) — defense en
+      // profondeur supplementaire, distincte du RLS qui isole mais ne verifie ni l'existence ni
+      // l'accessibilite. TENANT_SUSPENDED ne bloque QUE cette ouverture : il ne ferme jamais une
+      // session deja ouverte et n'affecte aucune donnee medicale — voir TenantAccessChecker.ts.
       const resolved = await this.unitOfWork.withTransaction(async () => {
-        const tenantExists = await this.tenantExistenceChecker.exists(tenantId);
-        if (!tenantExists) {
+        const access = await this.tenantAccessChecker.checkAccess(tenantId);
+        if (access === 'NOT_FOUND') {
           return { kind: 'TENANT_NOT_FOUND' as const };
+        }
+        if (access === 'SUSPENDED') {
+          return { kind: 'TENANT_SUSPENDED' as const };
         }
         const membership = await this.membershipRepository.findActiveByUserAndTenant(userId, tenantId);
         if (membership === null) {
@@ -110,6 +113,9 @@ export class ResolveTenantContextHandler {
 
       if (resolved.kind === 'TENANT_NOT_FOUND') {
         return Result.failure('TENANT_NOT_FOUND');
+      }
+      if (resolved.kind === 'TENANT_SUSPENDED') {
+        return Result.failure('TENANT_SUSPENDED');
       }
       if (resolved.kind === 'MEMBERSHIP_NOT_FOUND') {
         return Result.failure('MEMBERSHIP_NOT_FOUND_OR_INACTIVE');

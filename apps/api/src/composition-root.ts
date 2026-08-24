@@ -7,23 +7,32 @@ import { SystemClock } from './shared-kernel/infrastructure/SystemClock.js';
 import { UuidGenerator } from './shared-kernel/infrastructure/UuidGenerator.js';
 import { loadEnv, type Env } from './config/env.js';
 import { buildIdentityModule, type IdentityModule } from './modules/identity/infrastructure/IdentityModule.js';
-import type { TenantExistenceChecker } from './modules/identity/application/ports/TenantExistenceChecker.js';
+import type {
+  TenantAccessChecker,
+  TenantAccessStatus,
+} from './modules/identity/application/ports/TenantAccessChecker.js';
 import { buildTenantModule, type TenantModule } from './modules/tenant/infrastructure/TenantModule.js';
 
 /**
- * Adaptateur cross-module implementant le port `TenantExistenceChecker` d'Identity en
- * s'appuyant sur le `HealthFacilityRepository` de Tenant. Vit ICI et nulle part ailleurs :
- * c'est le seul point du code autorise a connaitre les deux modules a la fois
- * (01-target-architecture.md §5 — "un module n'importe jamais le domain/ d'un autre module ;
- * les echanges passent par des evenements ou des ports explicites"). Ni Identity ni Tenant
- * n'importent l'un le domain/ de l'autre : Identity ne connait que son propre port, Tenant ne
- * connait meme pas l'existence d'Identity.
+ * Adaptateur cross-module implementant le port `TenantAccessChecker` d'Identity en s'appuyant
+ * sur le `HealthFacilityRepository` de Tenant. Vit ICI et nulle part ailleurs : c'est le seul
+ * point du code autorise a connaitre les deux modules a la fois (01-target-architecture.md §5
+ * — "un module n'importe jamais le domain/ d'un autre module ; les echanges passent par des
+ * evenements ou des ports explicites"). Ni Identity ni Tenant n'importent l'un le domain/ de
+ * l'autre : Identity ne connait que son propre port, Tenant ne connait meme pas l'existence
+ * d'Identity. C'est ICI, et nulle part ailleurs, que le statut `FacilityStatus` du domain
+ * Tenant (`ACTIVE`/`SUSPENDED`) est traduit vers le vocabulaire propre a Identity
+ * (`TenantAccessStatus`) — la seule methode autorisee a lire `HealthFacility.isActive()`.
  */
-class TenantModuleBackedExistenceChecker implements TenantExistenceChecker {
+class TenantModuleBackedAccessChecker implements TenantAccessChecker {
   constructor(private readonly tenant: TenantModule) {}
 
-  async exists(tenantId: TenantId): Promise<boolean> {
-    return this.tenant.repositories.healthFacilities.existsByTenantId(tenantId);
+  async checkAccess(tenantId: TenantId): Promise<TenantAccessStatus> {
+    const facility = await this.tenant.repositories.healthFacilities.findByTenantId(tenantId);
+    if (facility === null) {
+      return 'NOT_FOUND';
+    }
+    return facility.isActive() ? 'ACCESSIBLE' : 'SUSPENDED';
   }
 }
 
@@ -52,13 +61,13 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
   const prisma = new PrismaClient({ datasourceUrl: env.DATABASE_URL });
   const redis = new Redis(env.REDIS_URL, { maxRetriesPerRequest: 3, lazyConnect: false });
 
-  // Tenant cable avant Identity : Identity depend du port `TenantExistenceChecker`
+  // Tenant cable avant Identity : Identity depend du port `TenantAccessChecker`
   // (ResolveTenantContextHandler, Phase 0 etape 3), dont l'implementation ci-dessus a besoin du
   // module Tenant deja construit. L'inverse n'est jamais vrai : Tenant ne depend de rien
   // d'Identity.
   const tenant = buildTenantModule({ prisma, clock, idGenerator });
-  const tenantExistenceChecker = new TenantModuleBackedExistenceChecker(tenant);
-  const identity = buildIdentityModule({ prisma, redis, clock, idGenerator, tenantExistenceChecker });
+  const tenantAccessChecker = new TenantModuleBackedAccessChecker(tenant);
+  const identity = buildIdentityModule({ prisma, redis, clock, idGenerator, tenantAccessChecker });
 
   return {
     env,

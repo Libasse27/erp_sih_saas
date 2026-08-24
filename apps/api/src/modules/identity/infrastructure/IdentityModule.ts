@@ -13,7 +13,7 @@ import { ServerContextResolver } from '../application/services/ServerContextReso
 import type { RoleRepository } from '../domain/ports/RoleRepository.js';
 import type { UserAccountRepository } from '../domain/ports/UserAccountRepository.js';
 import type { UserTenantMembershipRepository } from '../domain/ports/UserTenantMembershipRepository.js';
-import type { TenantExistenceChecker } from '../application/ports/TenantExistenceChecker.js';
+import type { TenantAccessChecker } from '../application/ports/TenantAccessChecker.js';
 import { PgUnitOfWork } from '../../../shared-kernel/infrastructure/persistence/PgUnitOfWork.js';
 import { PrismaRoleRepository } from './persistence/PrismaRoleRepository.js';
 import { PrismaUserAccountRepository } from './persistence/PrismaUserAccountRepository.js';
@@ -43,8 +43,8 @@ export interface IdentityModule {
 /**
  * Cablage du module Identity + RBAC + UserTenantMembership (Phase 0, etape 2/13).
  *
- * `tenantExistenceChecker` est fourni par l'appelant (composition-root.ts) : c'est un port
- * cross-module (voir application/ports/TenantExistenceChecker.ts) dont l'implementation reelle
+ * `tenantAccessChecker` est fourni par l'appelant (composition-root.ts) : c'est un port
+ * cross-module (voir application/ports/TenantAccessChecker.ts) dont l'implementation reelle
  * depend du module Tenant (Phase 0, etape 3) — Identity ne construit jamais lui-meme cette
  * implementation, pour ne jamais avoir a importer quoi que ce soit de `modules/tenant/`.
  */
@@ -53,7 +53,7 @@ export function buildIdentityModule(deps: {
   redis: Redis;
   clock: Clock;
   idGenerator: IdGenerator;
-  tenantExistenceChecker: TenantExistenceChecker;
+  tenantAccessChecker: TenantAccessChecker;
 }): IdentityModule {
   const userAccounts = new PrismaUserAccountRepository(deps.prisma);
   const memberships = new PrismaUserTenantMembershipRepository(deps.prisma, deps.clock, deps.idGenerator);
@@ -94,7 +94,7 @@ export function buildIdentityModule(deps: {
         memberships,
         roles,
         sessionStore,
-        deps.tenantExistenceChecker,
+        deps.tenantAccessChecker,
         unitOfWork,
         deps.clock,
         deps.idGenerator,

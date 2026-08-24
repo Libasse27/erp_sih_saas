@@ -15,7 +15,7 @@ import { UserAccountId } from '../../../src/modules/identity/domain/value-object
 import { UserTenantMembershipId } from '../../../src/modules/identity/domain/value-objects/UserTenantMembershipId.js';
 import { RoleId } from '../../../src/modules/identity/domain/value-objects/RoleId.js';
 import type { SessionContext, SessionStore } from '../../../src/modules/identity/application/ports/SessionStore.js';
-import type { TenantExistenceChecker } from '../../../src/modules/identity/application/ports/TenantExistenceChecker.js';
+import type { TenantAccessChecker, TenantAccessStatus } from '../../../src/modules/identity/application/ports/TenantAccessChecker.js';
 import { Result } from '../../../src/shared-kernel/domain/Result.js';
 
 export class FixedClock implements Clock {
@@ -191,20 +191,22 @@ export class InMemorySessionStore implements SessionStore {
 }
 
 /**
- * Fake du port cross-module `TenantExistenceChecker` (voir composition-root.ts pour
+ * Fake du port cross-module `TenantAccessChecker` (voir composition-root.ts pour
  * l'implementation reelle, qui delegue au module Tenant). Par defaut aucun tenant n'existe —
- * comportement volontairement restrictif (refus par defaut), a l'image du RLS : un test doit
- * seed() explicitement les tenants qu'il attend voir resolus avec succes.
+ * comportement volontairement restrictif (refus par defaut, `NOT_FOUND`), a l'image du RLS :
+ * un test doit seed() explicitement les tenants qu'il attend voir resolus avec succes. Le
+ * second parametre optionnel de `seed` permet de simuler un tenant `SUSPENDED` sans passer par
+ * une commande applicative de suspension (qui n'existe pas encore — voir HealthFacility.ts).
  */
-export class InMemoryTenantExistenceChecker implements TenantExistenceChecker {
-  private readonly existingTenantIds = new Set<string>();
+export class InMemoryTenantAccessChecker implements TenantAccessChecker {
+  private readonly statuses = new Map<string, TenantAccessStatus>();
 
-  seed(tenantId: TenantId): void {
-    this.existingTenantIds.add(tenantId.toString());
+  seed(tenantId: TenantId, status: TenantAccessStatus = 'ACCESSIBLE'): void {
+    this.statuses.set(tenantId.toString(), status);
   }
 
-  async exists(tenantId: TenantId): Promise<boolean> {
-    return this.existingTenantIds.has(tenantId.toString());
+  async checkAccess(tenantId: TenantId): Promise<TenantAccessStatus> {
+    return this.statuses.get(tenantId.toString()) ?? 'NOT_FOUND';
   }
 }
 

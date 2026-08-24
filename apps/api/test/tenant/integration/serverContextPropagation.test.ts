@@ -5,7 +5,7 @@ import { SystemClock } from '../../../src/shared-kernel/infrastructure/SystemClo
 import { TenantId } from '../../../src/shared-kernel/domain/value-objects/TenantId.js';
 import { UuidGenerator } from '../../../src/shared-kernel/infrastructure/UuidGenerator.js';
 import { buildIdentityModule, type IdentityModule } from '../../../src/modules/identity/infrastructure/IdentityModule.js';
-import type { TenantExistenceChecker } from '../../../src/modules/identity/application/ports/TenantExistenceChecker.js';
+import type { TenantAccessChecker } from '../../../src/modules/identity/application/ports/TenantAccessChecker.js';
 import { seedPermissionCatalog, seedSystemRoles } from '../../../src/modules/identity/infrastructure/seed/seedIdentityCatalog.js';
 import type { TenantSessionContext } from '../../../src/modules/identity/application/ports/SessionStore.js';
 import { buildTenantModule, type TenantModule } from '../../../src/modules/tenant/infrastructure/TenantModule.js';
@@ -30,15 +30,22 @@ describe('Contexte serveur — de sessionId a une requete RLS-scopee reelle (Ide
     prisma = createTestPrismaClient();
     redis = createTestRedisClient();
     tenant = buildTenantModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator() });
-    const tenantExistenceChecker: TenantExistenceChecker = {
-      exists: (tenantId) => tenant.repositories.healthFacilities.existsByTenantId(tenantId),
+    // Reproduit fidelement TenantModuleBackedAccessChecker de composition-root.ts.
+    const tenantAccessChecker: TenantAccessChecker = {
+      checkAccess: async (tenantId) => {
+        const facility = await tenant.repositories.healthFacilities.findByTenantId(tenantId);
+        if (facility === null) {
+          return 'NOT_FOUND';
+        }
+        return facility.isActive() ? 'ACCESSIBLE' : 'SUSPENDED';
+      },
     };
     identity = buildIdentityModule({
       prisma,
       redis,
       clock: new SystemClock(),
       idGenerator: new UuidGenerator(),
-      tenantExistenceChecker,
+      tenantAccessChecker,
     });
 
     await seedPermissionCatalog(prisma);
@@ -116,5 +123,46 @@ describe('Contexte serveur — de sessionId a une requete RLS-scopee reelle (Ide
       tenant.repositories.healthFacilities.findByTenantId(TenantId.create(tenantId).getValue()),
     );
     expect(facility).toBeNull();
+  });
+
+  it("un tenant SUSPENDED refuse l'ouverture d'un NOUVEAU contexte (TENANT_SUSPENDED), verifie contre le vrai statut Postgres (arbitrage architecte, 2026-08-24)", async () => {
+    const facilityResult = await tenant.handlers.createHealthFacility.execute({
+      name: uniqueFacilityName('Etablissement A Suspendre'),
+    });
+    const tenantId = facilityResult.getValue().tenantId;
+    const tenantIdVo = TenantId.create(tenantId).getValue();
+
+    // Suspend directement via le domain + repository (aucune commande applicative de suspension
+    // n'existe encore — voir HealthFacility.ts) : c'est exactement ce que ferait le futur module
+    // Subscription/mode degrade (O-03), sans qu'il faille l'anticiper ici.
+    await tenant.unitOfWork.withTransaction(async () => {
+      const facility = await tenant.repositories.healthFacilities.findByTenantId(tenantIdVo);
+      if (facility === null) {
+        throw new Error('HealthFacility introuvable juste apres sa creation.');
+      }
+      facility.suspend();
+      await tenant.repositories.healthFacilities.save(facility, tenantIdVo);
+    }, { tenantId: tenantIdVo });
+
+    const accountResult = await identity.handlers.createUserAccount.execute({
+      email: uniqueEmail('suspended-tenant'),
+      plainPassword: 'mot-de-passe-suffisant-1',
+      platformRole: 'NONE',
+    });
+    const userId = accountResult.getValue().userAccountId;
+
+    await identity.handlers.grantMembership.execute({
+      userId,
+      tenantId,
+      createdBy: userId,
+      initialRoleCodes: ['MEDECIN'],
+    });
+
+    const contextResult = await identity.handlers.resolveTenantContext.execute({
+      userId,
+      intent: { kind: 'TENANT', tenantId },
+    });
+    expect(contextResult.isFailure()).toBe(true);
+    expect(contextResult.getError()).toBe('TENANT_SUSPENDED');
   });
 });
