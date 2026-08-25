@@ -61,7 +61,7 @@ describe('Subscription', () => {
     expect(events[0]?.aggregateId).toBe(subscription.id.toString());
   });
 
-  it('changePlan() met a jour planId/currentPlanPriceId sans modifier la periode en cours', () => {
+  it('applyPlanUpgrade() met a jour planId/currentPlanPriceId sans modifier la periode en cours', () => {
     const subscription = Subscription.startTrial({
       tenantId: tenantId(),
       standardPlanId: planId(10),
@@ -76,7 +76,7 @@ describe('Subscription', () => {
 
     const newPlanId = planId(30);
     const newPlanPriceId = planPriceId(40);
-    subscription.changePlan({
+    subscription.applyPlanUpgrade({
       newPlanId,
       newPlanPriceId,
       clock: new FixedClock('2026-08-30T10:00:00Z'),
@@ -89,7 +89,7 @@ describe('Subscription', () => {
     expect(subscription.periodEndsAt).toEqual(periodEndsAtBefore);
   });
 
-  it('changePlan() emet SubscriptionPlanChanged avec fromPlanId/toPlanId corrects', () => {
+  it('applyPlanUpgrade() emet SubscriptionPlanChanged avec fromPlanId/toPlanId corrects', () => {
     const initialPlanId = planId(10);
     const subscription = Subscription.startTrial({
       tenantId: tenantId(),
@@ -101,7 +101,7 @@ describe('Subscription', () => {
     subscription.pullDomainEvents();
 
     const targetPlanId = planId(30);
-    subscription.changePlan({
+    subscription.applyPlanUpgrade({
       newPlanId: targetPlanId,
       newPlanPriceId: planPriceId(40),
       clock: new FixedClock('2026-08-30T10:00:00Z'),

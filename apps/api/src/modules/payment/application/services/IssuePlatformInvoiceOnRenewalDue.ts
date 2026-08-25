@@ -64,6 +64,10 @@ export function createIssuePlatformInvoiceOnRenewalDueHandler(deps: {
           tenantId,
           subscriptionId: envelope.aggregateId,
           planPriceId: payload.planPriceId,
+          // Explicite depuis la passe 2 : ce chemin n'est plus le seul a emettre des factures
+          // (voir IssuePlatformInvoiceOnUpgradeRequested.ts). Aucune `sourceReference` ici — le
+          // couple `(subscriptionId, purpose, periodStartsAt)` identifie deja une periode due.
+          purpose: 'RENEWAL',
           amount: amountResult.getValue(),
           periodStartsAt: new Date(payload.newPeriodStartsAt),
           periodEndsAt: new Date(payload.newPeriodEndsAt),

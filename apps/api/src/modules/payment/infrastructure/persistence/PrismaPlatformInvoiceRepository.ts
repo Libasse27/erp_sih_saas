@@ -1,4 +1,4 @@
-import { Prisma, type PrismaClient } from '@prisma/client';
+import type { PrismaClient } from '@prisma/client';
 import { resolvePrismaClient } from '../../../../shared-kernel/infrastructure/persistence/PrismaTransactionContext.js';
 import { writeDomainEventsToOutbox } from '../../../../shared-kernel/infrastructure/persistence/OutboxWriter.js';
 import { assertValid } from '../../../../shared-kernel/infrastructure/persistence/assertValid.js';
@@ -7,6 +7,7 @@ import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantI
 import { PlatformInvoice } from '../../domain/PlatformInvoice.js';
 import type { PlatformInvoiceRepository } from '../../domain/ports/PlatformInvoiceRepository.js';
 import { PlatformInvoiceId } from '../../domain/value-objects/PlatformInvoiceId.js';
+import type { PlatformInvoicePurpose } from '../../domain/value-objects/PlatformInvoicePurpose.js';
 import type { PlatformInvoiceStatus } from '../../domain/value-objects/PlatformInvoiceStatus.js';
 
 interface PlatformInvoiceRow {
@@ -14,6 +15,8 @@ interface PlatformInvoiceRow {
   tenantId: string;
   subscriptionId: string;
   planPriceId: string;
+  purpose: string;
+  sourceReference: string | null;
   amount: number;
   periodStartsAt: Date;
   periodEndsAt: Date;
@@ -39,23 +42,48 @@ export class PrismaPlatformInvoiceRepository implements PlatformInvoiceRepositor
     return row === null ? null : this.toDomain(row);
   }
 
+  async findBySourceReference(sourceReference: string, tenantId: TenantId): Promise<PlatformInvoice | null> {
+    const client = resolvePrismaClient(this.prisma);
+    const row = await client.platformInvoice.findFirst({
+      where: { sourceReference, tenantId: tenantId.toString() },
+    });
+    return row === null ? null : this.toDomain(row);
+  }
+
   /**
-   * IDEMPOTENT (contrat du port) : si la contrainte UNIQUE `(subscription_id, period_starts_at)`
-   * est violee (Prisma `P2002`), une facture existe deja pour cette periode — on la RENVOIE au
-   * lieu de propager l'erreur. C'est la barriere reelle contre la double-facturation lors de
-   * renouvellements concurrents (voir domain/ports/PlatformInvoiceRepository.ts).
+   * IDEMPOTENT (contrat du port). La table porte DEUX contraintes UNIQUE, chacune couvrant un
+   * chemin d'emission : `(subscription_id, purpose, period_starts_at)` pour le renouvellement,
+   * `source_reference` pour une facture declenchee par un fait metier identifie (upgrade).
+   *
+   * `createMany({ skipDuplicates: true })` — donc `INSERT ... ON CONFLICT DO NOTHING` — PLUTOT
+   * qu'un `create()` dont on rattraperait le `P2002` : ce choix N'EST PAS cosmetique. Cette methode
+   * est appelee DANS une transaction deja ouverte (voir `IssuePlatformInvoiceOnRenewalDue.ts` /
+   * `IssuePlatformInvoiceOnUpgradeRequested.ts`, tous deux sous `unitOfWork.withTransaction`), et
+   * en PostgreSQL une violation de contrainte AVORTE la transaction entiere : toute requete
+   * suivante — y compris la relecture de la ligne en conflit — echoue alors avec
+   * `25P02 current transaction is aborted`. Rattraper le `P2002` pour relire etait donc
+   * structurellement impossible dans ce contexte. `ON CONFLICT DO NOTHING` ne leve rien, laisse la
+   * transaction saine, et permet la relecture qui suit.
+   *
+   * `count === 0` signifie qu'une ligne en conflit existe deja : on la RELIT par
+   * `sourceReference` quand la facture en porte une (seule contrainte qui puisse alors avoir
+   * joue pour ce chemin), sinon par le triplet du renouvellement. Une relecture infructueuse
+   * signalerait une contrainte inattendue : l'incoherence est alors levee explicitement, jamais
+   * masquee par un retour silencieux.
    */
   async issue(invoice: PlatformInvoice): Promise<PlatformInvoice> {
     const client = resolvePrismaClient(this.prisma);
     const tenantIdStr = invoice.tenantId.toString();
 
-    try {
-      await client.platformInvoice.create({
-        data: {
+    const insertResult = await client.platformInvoice.createMany({
+      data: [
+        {
           id: invoice.id.toString(),
           tenantId: tenantIdStr,
           subscriptionId: invoice.subscriptionId,
           planPriceId: invoice.planPriceId,
+          purpose: invoice.purpose,
+          sourceReference: invoice.sourceReference,
           amount: invoice.amount.amount,
           periodStartsAt: invoice.periodStartsAt,
           periodEndsAt: invoice.periodEndsAt,
@@ -63,23 +91,41 @@ export class PrismaPlatformInvoiceRepository implements PlatformInvoiceRepositor
           issuedAt: invoice.issuedAt,
           paidAt: invoice.paidAt,
         },
-      });
+      ],
+      skipDuplicates: true,
+    });
+
+    if (insertResult.count === 1) {
       await writeDomainEventsToOutbox(client, invoice.pullDomainEvents());
       return invoice;
-    } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-        const existingRow = await client.platformInvoice.findFirst({
-          where: { subscriptionId: invoice.subscriptionId, periodStartsAt: invoice.periodStartsAt },
-        });
-        if (existingRow === null) {
-          // Ne devrait pas arriver (le P2002 vient forcement de cette contrainte) — remonte
-          // l'erreur d'origine plutot que de masquer une incoherence.
-          throw error;
-        }
-        return this.toDomain(existingRow);
-      }
-      throw error;
     }
+
+    // Relecture par `sourceReference` D'ABORD quand la facture en porte une : c'est la contrainte
+    // la plus specifique, et la seule qui identifie le FAIT METIER a l'origine de la facture.
+    // Repli sur le triplet de renouvellement sinon (ou si la reference ne designe rien, cas d'un
+    // conflit sur l'autre contrainte).
+    const bySourceReference =
+      invoice.sourceReference === null
+        ? null
+        : await client.platformInvoice.findFirst({ where: { sourceReference: invoice.sourceReference } });
+    const existingRow =
+      bySourceReference ??
+      (await client.platformInvoice.findFirst({
+        where: {
+          subscriptionId: invoice.subscriptionId,
+          purpose: invoice.purpose,
+          periodStartsAt: invoice.periodStartsAt,
+        },
+      }));
+
+    if (existingRow === null) {
+      throw new Error(
+        `PlatformInvoice ${invoice.id.toString()} : insertion ignoree pour cause de conflit, mais aucune ligne en conflit retrouvee (incoherence de contrainte).`,
+      );
+    }
+    // Aucun evenement a ecrire : la facture existait deja, celui qui l'a emise a deja publie les
+    // siens. Les evenements accumules sur CETTE instance sont abandonnes avec elle.
+    return this.toDomain(existingRow);
   }
 
   async save(invoice: PlatformInvoice, tenantId: TenantId): Promise<void> {
@@ -105,6 +151,8 @@ export class PrismaPlatformInvoiceRepository implements PlatformInvoiceRepositor
       tenantId,
       subscriptionId: row.subscriptionId,
       planPriceId: row.planPriceId,
+      purpose: row.purpose as PlatformInvoicePurpose,
+      sourceReference: row.sourceReference,
       amount,
       periodStartsAt: row.periodStartsAt,
       periodEndsAt: row.periodEndsAt,

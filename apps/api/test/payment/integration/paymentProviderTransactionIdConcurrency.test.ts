@@ -5,6 +5,7 @@ import { SystemClock } from '../../../src/shared-kernel/infrastructure/SystemClo
 import { UuidGenerator } from '../../../src/shared-kernel/infrastructure/UuidGenerator.js';
 import { Money } from '../../../src/shared-kernel/domain/value-objects/Money.js';
 import { TenantId } from '../../../src/shared-kernel/domain/value-objects/TenantId.js';
+import { PgUnitOfWork } from '../../../src/shared-kernel/infrastructure/persistence/PgUnitOfWork.js';
 import { Payment } from '../../../src/modules/payment/domain/Payment.js';
 import { PlatformInvoice } from '../../../src/modules/payment/domain/PlatformInvoice.js';
 import { PrismaPaymentRepository } from '../../../src/modules/payment/infrastructure/persistence/PrismaPaymentRepository.js';
@@ -54,6 +55,7 @@ describe('Payment — deux agregats DISTINCTS forces sur le MEME providerTransac
       tenantId: tenant,
       subscriptionId: uniqueId(),
       planPriceId: uniqueId(),
+      purpose: 'RENEWAL',
       amount,
       periodStartsAt: new Date('2026-09-01T00:00:00Z'),
       periodEndsAt: new Date('2026-10-01T00:00:00Z'),
@@ -105,16 +107,29 @@ describe('Payment — deux agregats DISTINCTS forces sur le MEME providerTransac
       paymentBId = paymentB.id.toString();
       expect(paymentAId).not.toBe(paymentBId);
 
-      // Vraie concurrence : les deux ecritures partent EN MEME TEMPS (Promise.allSettled — l'un
-      // des deux DOIT echouer ici, contrairement au test d'idempotence de PlatformInvoice.issue()).
+      // Vraie concurrence, ENVELOPPEE DANS DE VRAIES TRANSACTIONS Postgres (comme le fait
+      // reellement InitiatePaymentHandler.execute() sous unitOfWork.withTransaction) — pas un
+      // detail cosmetique : c'est justement DANS ce contexte transactionnel qu'un `create()` +
+      // catch `P2002` serait structurellement casse (la violation de contrainte avorte la
+      // transaction, la relecture de rattrapage echouerait avec `25P02`). Un appel a save() HORS
+      // transaction ne l'aurait jamais revele. Promise.allSettled — l'un des deux DOIT echouer
+      // ici, contrairement au test d'idempotence de PlatformInvoice.issue().
+      const uowA = new PgUnitOfWork(prisma);
+      const uowB = new PgUnitOfWork(prisma);
       const [resultA, resultB] = await Promise.allSettled([
-        paymentRepository.save(paymentA, tenant),
-        paymentRepository.save(paymentB, tenant),
+        uowA.withTransaction(() => paymentRepository.save(paymentA, tenant), { tenantId: tenant }),
+        uowB.withTransaction(() => paymentRepository.save(paymentB, tenant), { tenantId: tenant }),
       ]);
 
       const outcomes = [resultA, resultB];
       expect(outcomes.filter((o) => o.status === 'fulfilled')).toHaveLength(1);
-      expect(outcomes.filter((o) => o.status === 'rejected')).toHaveLength(1);
+      const rejected = outcomes.filter((o): o is PromiseRejectedResult => o.status === 'rejected');
+      expect(rejected).toHaveLength(1);
+      // Le perdant doit recevoir NOTRE erreur explicite (anomalie reelle, deux id distincts),
+      // jamais une exception Prisma/Postgres brute (`25P02`) qui signalerait que le catch de
+      // rattrapage a tente une requete dans une transaction deja avortee.
+      expect(String(rejected[0]?.reason)).not.toMatch(/25P02|current transaction is aborted/);
+      expect(rejected[0]?.reason).toBeInstanceOf(Error);
 
       const rows = await rawClient.query('SELECT id FROM "platform"."Payment" WHERE provider_transaction_id = $1', [
         sharedProviderTransactionId,

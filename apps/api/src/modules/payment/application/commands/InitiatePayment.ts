@@ -8,7 +8,21 @@ import type { PaymentRepository } from '../../domain/ports/PaymentRepository.js'
 import type { PaymentProvider } from '../../domain/ports/PaymentProvider.js';
 import type { PlatformInvoiceRepository } from '../../domain/ports/PlatformInvoiceRepository.js';
 import { isPaymentMethod } from '../../domain/value-objects/PaymentMethod.js';
+import type { PaymentPurpose } from '../../domain/value-objects/PaymentPurpose.js';
 import { PlatformInvoiceId } from '../../domain/value-objects/PlatformInvoiceId.js';
+import type { PlatformInvoicePurpose } from '../../domain/value-objects/PlatformInvoicePurpose.js';
+
+/**
+ * Mapping 1-1 entre la nature de la FACTURE et celle du PAIEMENT qui la regle. Deux enumerations
+ * distinctes malgre des valeurs homonymes : `PlatformInvoicePurpose` ne declare que des chemins
+ * d'emission REELLEMENT existants, tandis que `PaymentPurpose` porte en plus le residu `'INITIAL'`
+ * documente dans son propre fichier. Ce mapping explicite est le seul point du code qui les relie,
+ * et il est exhaustif par construction (le compilateur echoue si une valeur de facture apparait
+ * sans traduction).
+ */
+function toPaymentPurpose(invoicePurpose: PlatformInvoicePurpose): PaymentPurpose {
+  return invoicePurpose === 'UPGRADE' ? 'UPGRADE' : 'RENEWAL';
+}
 
 export interface InitiatePaymentCommand {
   readonly tenantId: string;
@@ -43,10 +57,11 @@ export interface InitiatePaymentResult {
  * verifie une premiere fois avant l'appel externe, puis REVERIFIE dans la transaction qui
  * persiste le `Payment`, pour absorber une facture payee entre-temps par un autre chemin.
  *
- * `purpose` fixe a `'RENEWAL'` pour cette etape (voir PaymentPurpose.ts : toute `PlatformInvoice`
- * emise par ce module a cette etape provient du chemin unique de renouvellement/echeance, y
- * compris la conversion de fin d'essai — confirme par l'architecte). `'INITIAL'`/`'UPGRADE'`
- * restent definis mais non atteints par ce code (residus documentes).
+ * `purpose` est DERIVE de `invoice.purpose` (voir `toPaymentPurpose` ci-dessus), jamais code en
+ * dur : depuis la passe 2, deux chemins d'emission de facture coexistent (renouvellement/echeance
+ * et upgrade proratise), et c'est la FACTURE qui porte la verite sur la nature de ce qui est du —
+ * la deduire ici serait rejouer une decision deja prise en amont. `'INITIAL'` (PaymentPurpose)
+ * reste non atteint par ce code (residu documente dans PaymentPurpose.ts).
  */
 export class InitiatePaymentHandler {
   constructor(
@@ -106,7 +121,7 @@ export class InitiatePaymentHandler {
           tenantId,
           platformInvoiceId: invoiceId,
           subscriptionId: invoice.subscriptionId,
-          purpose: 'RENEWAL',
+          purpose: toPaymentPurpose(invoice.purpose),
           method,
           amount: invoice.amount,
           providerTransactionId: providerResult.providerTransactionId,

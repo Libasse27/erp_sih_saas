@@ -96,6 +96,9 @@ export class ReconcilePendingPaymentsHandler {
                 confirmedAt: now,
                 newPeriodStartsAt: invoice.periodStartsAt,
                 newPeriodEndsAt: invoice.periodEndsAt,
+                // Meme discipline que ConfirmPayment.ts : la reference opaque vient de la facture
+                // deja chargee, jamais recalculee (voir PlatformInvoice.ts).
+                sourceReference: invoice.sourceReference,
                 clock: this.clock,
                 idGenerator: this.idGenerator,
               });

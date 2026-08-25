@@ -6,16 +6,22 @@ import type { OutboxEventHandler } from '../../../shared-kernel/application/Outb
 import { PgUnitOfWork } from '../../../shared-kernel/infrastructure/persistence/PgUnitOfWork.js';
 import { StartTrialSubscriptionHandler } from '../application/commands/StartTrialSubscription.js';
 import { UpgradeSubscriptionPlanHandler } from '../application/commands/UpgradeSubscriptionPlan.js';
+import {
+  createApplyPlanUpgradeOnPaymentSucceededHandler,
+  type ApplyPlanUpgradeLogger,
+} from '../application/services/ApplyPlanUpgradeOnPaymentSucceeded.js';
 import { CheckUsersQuotaHandler } from '../application/services/CheckUsersQuota.js';
 import { ProcessSubscriptionRenewalsHandler } from '../application/services/ProcessSubscriptionRenewals.js';
 import { createReactivateSubscriptionOnPaymentSucceededHandler } from '../application/services/ReactivateSubscriptionOnPaymentSucceeded.js';
 import type { PlanChangeRepository } from '../domain/ports/PlanChangeRepository.js';
 import type { PlanPriceRepository } from '../domain/ports/PlanPriceRepository.js';
 import type { PlanRepository } from '../domain/ports/PlanRepository.js';
+import type { PlanUpgradeRequestRepository } from '../domain/ports/PlanUpgradeRequestRepository.js';
 import type { SubscriptionRepository } from '../domain/ports/SubscriptionRepository.js';
 import { PrismaPlanChangeRepository } from './persistence/PrismaPlanChangeRepository.js';
 import { PrismaPlanPriceRepository } from './persistence/PrismaPlanPriceRepository.js';
 import { PrismaPlanRepository } from './persistence/PrismaPlanRepository.js';
+import { PrismaPlanUpgradeRequestRepository } from './persistence/PrismaPlanUpgradeRequestRepository.js';
 import { PrismaSubscriptionRepository } from './persistence/PrismaSubscriptionRepository.js';
 import { seedPlanCatalog } from './seed/seedSubscriptionCatalog.js';
 
@@ -25,6 +31,7 @@ export interface SubscriptionModule {
     readonly planPrices: PlanPriceRepository;
     readonly subscriptions: SubscriptionRepository;
     readonly planChanges: PlanChangeRepository;
+    readonly planUpgradeRequests: PlanUpgradeRequestRepository;
   };
   readonly unitOfWork: UnitOfWork;
   readonly handlers: {
@@ -39,6 +46,8 @@ export interface SubscriptionModule {
   /** Consommateurs Outbox exposes par ce module — cables UNIQUEMENT dans composition-root.ts. */
   readonly outboxHandlers: {
     readonly reactivateSubscriptionOnPaymentSucceeded: OutboxEventHandler;
+    /** Applique enfin un upgrade proratise, une fois son paiement confirme — SEUL appelant de `Subscription.applyPlanUpgrade()`. */
+    readonly applyPlanUpgradeOnPaymentSucceeded: OutboxEventHandler;
   };
 }
 
@@ -56,15 +65,18 @@ export function buildSubscriptionModule(deps: {
   prisma: PrismaClient;
   clock: Clock;
   idGenerator: IdGenerator;
+  /** Trace les paiements d'upgrade sans demande applicable (regularisation manuelle) — voir ApplyPlanUpgradeOnPaymentSucceeded.ts. */
+  applyPlanUpgradeLogger?: ApplyPlanUpgradeLogger;
 }): SubscriptionModule {
   const plans = new PrismaPlanRepository(deps.prisma);
   const planPrices = new PrismaPlanPriceRepository(deps.prisma);
   const subscriptions = new PrismaSubscriptionRepository(deps.prisma);
   const planChanges = new PrismaPlanChangeRepository(deps.prisma);
+  const planUpgradeRequests = new PrismaPlanUpgradeRequestRepository(deps.prisma);
   const unitOfWork = new PgUnitOfWork(deps.prisma);
 
   return {
-    repositories: { plans, planPrices, subscriptions, planChanges },
+    repositories: { plans, planPrices, subscriptions, planChanges, planUpgradeRequests },
     unitOfWork,
     handlers: {
       startTrialSubscription: new StartTrialSubscriptionHandler(
@@ -79,7 +91,7 @@ export function buildSubscriptionModule(deps: {
         plans,
         planPrices,
         subscriptions,
-        planChanges,
+        planUpgradeRequests,
         unitOfWork,
         deps.clock,
         deps.idGenerator,
@@ -101,6 +113,18 @@ export function buildSubscriptionModule(deps: {
         unitOfWork,
         clock: deps.clock,
         idGenerator: deps.idGenerator,
+      }),
+      applyPlanUpgradeOnPaymentSucceeded: createApplyPlanUpgradeOnPaymentSucceededHandler({
+        subscriptionRepository: subscriptions,
+        planUpgradeRequestRepository: planUpgradeRequests,
+        planChangeRepository: planChanges,
+        unitOfWork,
+        clock: deps.clock,
+        idGenerator: deps.idGenerator,
+        // Spread conditionnel : `exactOptionalPropertyTypes` distingue "propriete absente" de
+        // "propriete presente valant undefined" — passer explicitement `undefined` a un parametre
+        // optionnel serait rejete.
+        ...(deps.applyPlanUpgradeLogger === undefined ? {} : { logger: deps.applyPlanUpgradeLogger }),
       }),
     },
   };

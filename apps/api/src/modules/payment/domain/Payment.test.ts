@@ -27,9 +27,16 @@ function makePayment(params: { purpose?: 'INITIAL' | 'RENEWAL' | 'UPGRADE'; prov
   });
 }
 
+/**
+ * Arguments de `confirmSucceeded()` communs a tous les cas testes ici. `sourceReference: null` :
+ * ces scenarios portent tous sur des paiements de renouvellement, dont la facture n'en porte
+ * aucune (voir PlatformInvoice.ts) — sa propagation dans l'evenement est verifiee separement, avec
+ * une valeur non nulle.
+ */
 const NEW_PERIOD = {
   newPeriodStartsAt: new Date('2026-09-01T00:00:00Z'),
   newPeriodEndsAt: new Date('2026-10-01T00:00:00Z'),
+  sourceReference: null,
 };
 
 describe('Payment', () => {
@@ -78,6 +85,29 @@ describe('Payment', () => {
     const event = events[0] as unknown as { providerTransactionId: string; subscriptionId: string };
     expect(event.providerTransactionId).toBe('tx-1');
     expect(event.subscriptionId).toBe(payment.subscriptionId);
+  });
+
+  it('confirmSucceeded() propage purpose (depuis le Payment) et sourceReference (fourni par l_appelant) dans SaaSPaymentSucceeded', () => {
+    // Ces deux champs sont l'UNIQUE fil permettant au module `subscription` de rattacher un
+    // paiement confirme a la demande d'upgrade precise qu'il regle (voir ADR-0003) : ils doivent
+    // traverser l'evenement intacts, sans etre recalcules ni devines.
+    const payment = makePayment({ purpose: 'UPGRADE', providerTransactionId: 'tx-upgrade' });
+    payment.confirmSucceeded({
+      providerTransactionId: 'tx-upgrade',
+      confirmedAt: new Date('2026-09-01T00:05:00Z'),
+      newPeriodStartsAt: new Date('2026-09-01T00:00:00Z'),
+      newPeriodEndsAt: new Date('2026-10-01T00:00:00Z'),
+      sourceReference: uuidAt(77),
+      clock: new FixedClock('2026-09-01T00:05:00Z'),
+      idGenerator: new SequentialIdGenerator(),
+    });
+
+    const events = payment.pullDomainEvents();
+    const event = events[0] as unknown as { purpose: string; sourceReference: string | null };
+    expect(event.purpose).toBe('UPGRADE');
+    expect(event.sourceReference).toBe(uuidAt(77));
+    // `UPGRADE` n'est pas un renouvellement : le statut terminal est SUCCEEDED, pas RENEWED.
+    expect(payment.status).toBe('SUCCEEDED');
   });
 
   // --- Adversarial : webhook recu 2 fois (idempotence) ---

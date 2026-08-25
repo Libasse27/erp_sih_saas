@@ -74,11 +74,30 @@ export class InMemoryPlatformInvoiceRepository implements PlatformInvoiceReposit
     return invoice;
   }
 
-  /** Reproduit le contrat reel (voir PrismaPlatformInvoiceRepository.issue()) : idempotent sur `(subscriptionId, periodStartsAt)`. */
+  async findBySourceReference(sourceReference: string, tenantId: TenantId): Promise<PlatformInvoice | null> {
+    for (const invoice of this.byId.values()) {
+      if (invoice.sourceReference === sourceReference && invoice.tenantId.equals(tenantId)) {
+        return invoice;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Reproduit le contrat reel (voir PrismaPlatformInvoiceRepository.issue()) : idempotent sur les
+   * DEUX contraintes UNIQUE de la table — `sourceReference` (verifiee EN PREMIER, comme la
+   * discrimination par `error.meta.target` cote Prisma) puis
+   * `(subscriptionId, purpose, periodStartsAt)`. `purpose` fait bien partie de la seconde cle : une
+   * facture d'UPGRADE et une facture de RENOUVELLEMENT peuvent coexister sur la meme periode.
+   */
   async issue(invoice: PlatformInvoice): Promise<PlatformInvoice> {
     for (const existing of this.byId.values()) {
+      if (invoice.sourceReference !== null && existing.sourceReference === invoice.sourceReference) {
+        return existing;
+      }
       if (
         existing.subscriptionId === invoice.subscriptionId &&
+        existing.purpose === invoice.purpose &&
         existing.periodStartsAt.getTime() === invoice.periodStartsAt.getTime()
       ) {
         return existing;

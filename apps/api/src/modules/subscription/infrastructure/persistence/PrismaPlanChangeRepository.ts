@@ -21,6 +21,8 @@ interface PlanChangeRow {
   toPlanId: string;
   toPlanPriceId: string;
   proratedAmount: number;
+  requestedAt: Date | null;
+  platformInvoiceId: string | null;
   occurredAt: Date;
 }
 
@@ -32,25 +34,57 @@ interface PlanChangeRow {
 export class PrismaPlanChangeRepository implements PlanChangeRepository {
   constructor(private readonly prisma: PrismaClient) {}
 
+  /**
+   * IDEMPOTENT PAR CLE PRIMAIRE (contrat du port, passe 2) : une ligne portant deja cet `id` est un
+   * NO-OP SILENCIEUX — re-livraison at-least-once du meme `SaaSPaymentSucceeded` (l'identifiant est
+   * desormais PRE-ATTRIBUE a la demande, donc previsible). L'entite etant immuable, "la ligne existe
+   * deja avec cet id" signifie necessairement "avec exactement ce contenu".
+   *
+   * `createMany({ skipDuplicates: true })` — soit `INSERT ... ON CONFLICT DO NOTHING` — et NON un
+   * `create()` dont on rattraperait le `P2002` : cette methode est appelee DANS une transaction qui
+   * ecrit ENSUITE (suppression de la `PlanUpgradeRequest`, sauvegarde de l'agregat), et en
+   * PostgreSQL une violation de contrainte avorte la transaction entiere — toute requete suivante
+   * echouerait alors en `25P02`. Meme raisonnement et meme correctif que
+   * `PrismaPlatformInvoiceRepository.issue()`.
+   */
   async append(change: PlanChange, tenantId: TenantId): Promise<void> {
     if (!change.tenantId.equals(tenantId)) {
       throw new Error("Tentative d'ajout d'un PlanChange hors du tenant du contexte courant.");
     }
     const client = resolvePrismaClient(this.prisma);
-    await client.subscriptionPlanChange.create({
-      data: {
-        id: change.id.toString(),
-        subscriptionId: change.subscriptionId.toString(),
-        tenantId: tenantId.toString(),
-        changeType: change.changeType,
-        fromPlanId: change.fromPlanId.toString(),
-        fromPlanPriceId: change.fromPlanPriceId.toString(),
-        toPlanId: change.toPlanId.toString(),
-        toPlanPriceId: change.toPlanPriceId.toString(),
-        proratedAmount: change.proratedAmount.amount,
-        occurredAt: change.occurredAt,
-      },
+    await client.subscriptionPlanChange.createMany({
+      data: [
+        {
+          id: change.id.toString(),
+          subscriptionId: change.subscriptionId.toString(),
+          tenantId: tenantId.toString(),
+          changeType: change.changeType,
+          fromPlanId: change.fromPlanId.toString(),
+          fromPlanPriceId: change.fromPlanPriceId.toString(),
+          toPlanId: change.toPlanId.toString(),
+          toPlanPriceId: change.toPlanPriceId.toString(),
+          proratedAmount: change.proratedAmount.amount,
+          requestedAt: change.requestedAt,
+          platformInvoiceId: change.platformInvoiceId,
+          occurredAt: change.occurredAt,
+        },
+      ],
+      skipDuplicates: true,
     });
+  }
+
+  async findById(id: string, tenantId: TenantId): Promise<PlanChange | null> {
+    // Meme garde que `PrismaPlanUpgradeRequestRepository.findById` : `id` provient d'un payload
+    // d'evenement Outbox, une valeur non-UUID doit produire `null`, pas une erreur SQL.
+    const idResult = PlanChangeId.create(id);
+    if (idResult.isFailure()) {
+      return null;
+    }
+    const client = resolvePrismaClient(this.prisma);
+    const row = await client.subscriptionPlanChange.findFirst({
+      where: { id: idResult.getValue().toString(), tenantId: tenantId.toString() },
+    });
+    return row === null ? null : this.toDomain(row);
   }
 
   async listBySubscriptionId(subscriptionId: SubscriptionId, tenantId: TenantId): Promise<readonly PlanChange[]> {
@@ -80,6 +114,11 @@ export class PrismaPlanChangeRepository implements PlanChangeRepository {
       toPlanId,
       toPlanPriceId,
       proratedAmount,
+      // Lignes anterieures a la passe 2 : demande et application etaient simultanees, `occurred_at`
+      // est donc la valeur exacte de `requestedAt` (voir le backfill de la migration 20260825090000
+      // — ce repli couvre le cas d'une ligne ecrite hors de ce chemin).
+      requestedAt: row.requestedAt ?? row.occurredAt,
+      platformInvoiceId: row.platformInvoiceId,
       occurredAt: row.occurredAt,
     });
   }

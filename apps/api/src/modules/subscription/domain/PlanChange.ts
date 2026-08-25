@@ -1,9 +1,8 @@
 import { Entity } from '../../../shared-kernel/domain/Entity.js';
 import type { Clock } from '../../../shared-kernel/domain/ports/Clock.js';
-import type { IdGenerator } from '../../../shared-kernel/domain/ports/IdGenerator.js';
 import type { Money } from '../../../shared-kernel/domain/value-objects/Money.js';
 import type { TenantId } from '../../../shared-kernel/domain/value-objects/TenantId.js';
-import { PlanChangeId } from './value-objects/PlanChangeId.js';
+import type { PlanChangeId } from './value-objects/PlanChangeId.js';
 import type { PlanChangeType } from './value-objects/PlanChangeType.js';
 import type { PlanId } from './value-objects/PlanId.js';
 import type { PlanPriceId } from './value-objects/PlanPriceId.js';
@@ -18,6 +17,11 @@ interface PlanChangeProps {
   readonly toPlanId: PlanId;
   readonly toPlanPriceId: PlanPriceId;
   readonly proratedAmount: Money;
+  /** Date de la DEMANDE, desormais distincte de `occurredAt` : entre les deux, le tenant a du payer. */
+  readonly requestedAt: Date;
+  /** Facture plateforme qui a paye ce changement — `null` pour les lignes anterieures a la passe 2, ou aucun paiement n'etait exige. */
+  readonly platformInvoiceId: string | null;
+  /** Date d'APPLICATION effective du changement de forfait (paiement deja confirme a cet instant). */
   readonly occurredAt: Date;
 }
 
@@ -37,8 +41,16 @@ interface PlanChangeProps {
  * Immuable par construction, memes garanties qu'`PlanPrice` : AUCUNE methode de mutation
  * n'existe sur cette classe — un "changement du changement historise" n'a pas de sens.
  * `Entity` (pas `AggregateRoot`) : pas de cycle de vie propre au-dela de sa creation, n'emet
- * aucun evenement de domaine (celui-ci est porte par `Subscription.changePlan`, l'agregat qui
- * décide du changement).
+ * aucun evenement de domaine (celui-ci est porte par `Subscription.applyPlanUpgrade`, l'agregat
+ * qui decide du changement).
+ *
+ * DEPUIS LA PASSE 2, cette ligne n'est ecrite QU'A L'APPLICATION EFFECTIVE d'un upgrade, une fois
+ * le paiement confirme (`application/services/ApplyPlanUpgradeOnPaymentSucceeded.ts`) — plus au
+ * moment de la demande. Elle porte donc DEUX instants distincts (`requestedAt` / `occurredAt`) et
+ * la facture qui l'a payee (`platformInvoiceId`). Son `id` n'est plus genere ici : il est
+ * PRE-ATTRIBUE des la demande (voir PlanUpgradeRequest.ts) et transmis par l'appelant — ce qui
+ * rend l'ecriture idempotente par cle primaire face a une re-livraison Outbox (voir
+ * `domain/ports/PlanChangeRepository.ts`).
  */
 export class PlanChange extends Entity<PlanChangeId> {
   private readonly props: PlanChangeProps;
@@ -49,6 +61,8 @@ export class PlanChange extends Entity<PlanChangeId> {
   }
 
   static create(params: {
+    /** PRE-ATTRIBUE a la demande d'upgrade, jamais genere ici (voir commentaire de tete). */
+    id: PlanChangeId;
     subscriptionId: SubscriptionId;
     tenantId: TenantId;
     changeType: PlanChangeType;
@@ -57,14 +71,11 @@ export class PlanChange extends Entity<PlanChangeId> {
     toPlanId: PlanId;
     toPlanPriceId: PlanPriceId;
     proratedAmount: Money;
+    requestedAt: Date;
+    platformInvoiceId: string | null;
     clock: Clock;
-    idGenerator: IdGenerator;
   }): PlanChange {
-    const idResult = PlanChangeId.create(params.idGenerator.generate());
-    if (idResult.isFailure()) {
-      throw new Error('IdGenerator a produit un identifiant invalide pour PlanChange.');
-    }
-    return new PlanChange(idResult.getValue(), {
+    return new PlanChange(params.id, {
       subscriptionId: params.subscriptionId,
       tenantId: params.tenantId,
       changeType: params.changeType,
@@ -73,6 +84,8 @@ export class PlanChange extends Entity<PlanChangeId> {
       toPlanId: params.toPlanId,
       toPlanPriceId: params.toPlanPriceId,
       proratedAmount: params.proratedAmount,
+      requestedAt: params.requestedAt,
+      platformInvoiceId: params.platformInvoiceId,
       occurredAt: params.clock.now(),
     });
   }
@@ -112,6 +125,14 @@ export class PlanChange extends Entity<PlanChangeId> {
 
   get proratedAmount(): Money {
     return this.props.proratedAmount;
+  }
+
+  get requestedAt(): Date {
+    return this.props.requestedAt;
+  }
+
+  get platformInvoiceId(): string | null {
+    return this.props.platformInvoiceId;
   }
 
   get occurredAt(): Date {

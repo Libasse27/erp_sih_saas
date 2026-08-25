@@ -258,6 +258,11 @@ model Subscription {
   gracePeriodStartedAt           DateTime? @map("grace_period_started_at")
   degradedModeEnteredAt          DateTime? @map("degraded_mode_entered_at")
   degradedModeSustainedNotifiedAt DateTime? @map("degraded_mode_sustained_notified_at")
+  /// Verrouillage optimiste PUREMENT technique (voir PrismaSubscriptionRepository.ts), replique du
+  /// meme mecanisme sur Payment : trois writers peuvent desormais ecrire ce MEME abonnement
+  /// concurremment (application d'un upgrade paye, reactivation sur paiement, scheduler de
+  /// renouvellement). N'est PAS un concept de domaine : absent de Subscription/SubscriptionProps.
+  version                        Int       @default(0)
 
   @@unique([tenantId])
   @@map("Subscription")
@@ -276,11 +281,45 @@ model SubscriptionPlanChange {
   toPlanId        String                     @map("to_plan_id") @db.Uuid
   toPlanPriceId   String                     @map("to_plan_price_id") @db.Uuid
   proratedAmount  Int                        @map("prorated_amount")
+  /// Date de la DEMANDE d'upgrade, desormais distincte de `occurred_at` (date d'APPLICATION
+  /// effective, apres confirmation du paiement). NULLABLE pour les lignes anterieures a la passe 2,
+  /// ou les deux instants coincidaient — backfillees a `occurred_at` (voir migration
+  /// 20260825090000).
+  requestedAt     DateTime?                  @map("requested_at")
+  /// Facture plateforme ayant paye cet upgrade. SANS FOREIGN KEY : `PlatformInvoice` appartient au
+  /// module `payment`, aucune contrainte cross-module en base (voir migration 20260825090000).
+  platformInvoiceId String?                  @map("platform_invoice_id") @db.Uuid
   occurredAt      DateTime                   @map("occurred_at")
 
   @@index([subscriptionId])
   @@index([tenantId])
   @@map("SubscriptionPlanChange")
+  @@schema("platform")
+}
+
+/// Demande d'upgrade EN ATTENTE DE PAIEMENT (voir domain/PlanUpgradeRequest.ts). `id` = le
+/// PlanChangeId PRE-ATTRIBUE a la demande, qui voyage comme `source_reference` jusqu'a la facture
+/// plateforme puis revient dans `SaaSPaymentSucceeded`. `@@unique([subscriptionId])` : LA barriere
+/// anti-double-soumission (une seule demande en attente par abonnement, imposee en base). Aucune
+/// colonne `status` : la PRESENCE de la ligne est le fait "upgrade en attente" ; elle est supprimee
+/// a l'application, l'historique definitif etant `SubscriptionPlanChange`.
+model SubscriptionPlanUpgradeRequest {
+  id                    String   @id @db.Uuid
+  subscriptionId        String   @map("subscription_id") @db.Uuid
+  tenantId              String   @map("tenant_id") @db.Uuid
+  fromPlanId            String   @map("from_plan_id") @db.Uuid
+  fromPlanPriceId       String   @map("from_plan_price_id") @db.Uuid
+  toPlanId              String   @map("to_plan_id") @db.Uuid
+  toPlanPriceId         String   @map("to_plan_price_id") @db.Uuid
+  proratedAmount        Int      @map("prorated_amount")
+  coveredPeriodStartsAt DateTime @map("covered_period_starts_at")
+  coveredPeriodEndsAt   DateTime @map("covered_period_ends_at")
+  requestedAt           DateTime @map("requested_at")
+  expiresAt             DateTime @map("expires_at")
+
+  @@unique([subscriptionId])
+  @@index([tenantId])
+  @@map("SubscriptionPlanUpgradeRequest")
   @@schema("platform")
 }
 
@@ -381,6 +420,17 @@ enum PaymentPurpose {
   @@schema("platform")
 }
 
+/// A quoi correspond une facture PLATEFORME. Deux chemins d'emission, et deux seulement :
+/// l'echeance de renouvellement (IssuePlatformInvoiceOnRenewalDue.ts) et l'upgrade proratise
+/// (IssuePlatformInvoiceOnUpgradeRequested.ts). Volontairement SANS valeur 'INITIAL' : aucune
+/// valeur non emise n'est declaree ici (voir domain/value-objects/PlatformInvoicePurpose.ts).
+enum PlatformInvoicePurpose {
+  RENEWAL
+  UPGRADE
+
+  @@schema("platform")
+}
+
 /// Minimal V1 : une facture plateforme est emise puis payee. Pas d'annulation/avoir — hors
 /// perimetre V1 (O-25.1 : remboursement d'abonnement SaaS explicitement hors V1).
 enum PlatformInvoiceStatus {
@@ -393,25 +443,34 @@ enum PlatformInvoiceStatus {
 /// Registre de ce qui est du a la plateforme pour UNE periode de facturation d'UN abonnement
 /// (voir domain/PlatformInvoice.ts). `planPriceId` : reference au `PlanPrice` REELLEMENT resolu
 /// au moment de l'emission (jamais recalcule depuis `Plan`, meme discipline que
-/// `SubscriptionPlanChange`, O-02.6). `@@unique([subscriptionId, periodStartsAt])` : empeche
-/// deux factures pour la MEME periode d'un MEME abonnement — c'est la barriere qui rend
-/// l'emission concurrente idempotente (voir application/commands/IssuePlatformInvoice.ts et le
-/// test adversarial "deux renouvellements concurrents").
+/// `SubscriptionPlanChange`, O-02.6). `@@unique([subscriptionId, purpose, periodStartsAt])` :
+/// empeche deux factures de MEME NATURE pour la MEME periode d'un MEME abonnement — c'est la
+/// barriere qui rend l'emission concurrente idempotente (voir
+/// application/services/IssuePlatformInvoiceOnRenewalDue.ts et le test adversarial "deux
+/// renouvellements concurrents"). `purpose` y a ete ajoute a la passe 2 pour qu'une facture
+/// d'UPGRADE puisse coexister avec la facture de RENOUVELLEMENT de la meme periode ;
+/// generalisation stricte pour le chemin de renouvellement, ou `purpose` est constant.
 model PlatformInvoice {
-  id             String                @id @db.Uuid
-  tenantId       String                @map("tenant_id") @db.Uuid
-  subscriptionId String                @map("subscription_id") @db.Uuid
-  planPriceId    String                @map("plan_price_id") @db.Uuid
+  id             String                 @id @db.Uuid
+  tenantId       String                 @map("tenant_id") @db.Uuid
+  subscriptionId String                 @map("subscription_id") @db.Uuid
+  planPriceId    String                 @map("plan_price_id") @db.Uuid
+  purpose        PlatformInvoicePurpose
+  /// Reference OPAQUE du fait metier a l'origine de cette facture (a la passe 2 : le PlanChangeId
+  /// d'une demande d'upgrade). NULL pour les factures de renouvellement — en PostgreSQL, les NULL
+  /// ne collisionnent jamais entre eux dans un index UNIQUE. Le module `payment` ne sait rien de
+  /// ce que cette chaine designe : c'est precisement ce qui evite tout couplage a `subscription`.
+  sourceReference String?               @unique @map("source_reference")
   amount         Int
-  periodStartsAt DateTime              @map("period_starts_at")
-  periodEndsAt   DateTime              @map("period_ends_at")
+  periodStartsAt DateTime               @map("period_starts_at")
+  periodEndsAt   DateTime               @map("period_ends_at")
   status         PlatformInvoiceStatus
-  issuedAt       DateTime              @map("issued_at")
-  paidAt         DateTime?             @map("paid_at")
+  issuedAt       DateTime               @map("issued_at")
+  paidAt         DateTime?              @map("paid_at")
 
   payments Payment[]
 
-  @@unique([subscriptionId, periodStartsAt])
+  @@unique([subscriptionId, purpose, periodStartsAt])
   @@index([tenantId])
   @@map("PlatformInvoice")
   @@schema("platform")

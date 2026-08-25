@@ -3,7 +3,10 @@ import type { IdGenerator } from '../../../../shared-kernel/domain/ports/IdGener
 import type { UnitOfWork } from '../../../../shared-kernel/application/UnitOfWork.js';
 import { addBillingPeriod } from '../../domain/services/CalendarDays.js';
 import type { PlanPriceRepository } from '../../domain/ports/PlanPriceRepository.js';
-import type { SubscriptionRepository } from '../../domain/ports/SubscriptionRepository.js';
+import {
+  SubscriptionConcurrencyConflictError,
+  type SubscriptionRepository,
+} from '../../domain/ports/SubscriptionRepository.js';
 
 export interface ProcessSubscriptionRenewalsResult {
   readonly scanned: number;
@@ -11,7 +14,16 @@ export interface ProcessSubscriptionRenewalsResult {
   readonly gracePeriodsStarted: number;
   readonly degradedModeEntries: number;
   readonly degradedModeSustainedNotifications: number;
+  /** Abonnements sautes ce cycle pour cause d'ecriture concurrente (voir le commentaire de `execute`) — le prochain tick les reevaluera. */
+  readonly skippedOnConflict: number;
 }
+
+/**
+ * Ce qui a effectivement ete applique a UN abonnement dans son cycle. Retourne par la transaction
+ * plutot qu'incremente a l'interieur : un conflit de verrouillage optimiste annule la transaction,
+ * et des compteurs deja incrementes rapporteraient alors un travail qui n'a jamais ete commite.
+ */
+type CycleOutcome = 'RENEWAL_DUE' | 'DEGRADED_ENTERED' | 'SUSTAIN_NOTIFIED' | 'NONE';
 
 /**
  * Scheduler autonome de renouvellement d'abonnement (O-25.6, catalogue d'evenements) —
@@ -60,6 +72,16 @@ export class ProcessSubscriptionRenewalsHandler {
     private readonly idGenerator: IdGenerator,
   ) {}
 
+  /**
+   * SAUTE un abonnement (et lui seul) en cas d'ecriture concurrente perdue
+   * (`SubscriptionConcurrencyConflictError`, voir domain/ports/SubscriptionRepository.ts) plutot
+   * que de faire echouer tout le lot : un autre writer (confirmation de paiement, application d'un
+   * upgrade paye) vient d'ecrire cet abonnement, et son etat n'est plus celui sur lequel ce cycle
+   * a raisonne. AUCUN retry immediat ici, contrairement aux consommateurs Outbox : ce scheduler
+   * repasse periodiquement et toutes les transitions de `Subscription` sont gardees/idempotentes —
+   * le prochain tick reevaluera l'abonnement sur un etat frais, ce qui est plus sur que de
+   * reappliquer des decisions prises sur une lecture perimee.
+   */
   async execute(): Promise<ProcessSubscriptionRenewalsResult> {
     const now = this.clock.now();
     const candidates = await this.subscriptionRepository.listSchedulerCandidates(now);
@@ -68,49 +90,70 @@ export class ProcessSubscriptionRenewalsHandler {
     let gracePeriodsStarted = 0;
     let degradedModeEntries = 0;
     let degradedModeSustainedNotifications = 0;
+    let skippedOnConflict = 0;
 
     for (const candidate of candidates) {
-      await this.unitOfWork.withTransaction(
-        async () => {
-          const subscription = await this.subscriptionRepository.findById(candidate.id, candidate.tenantId);
-          if (subscription === null) {
-            return;
-          }
-
-          if (subscription.isRenewalDue(now)) {
-            const currentPrice = await this.planPriceRepository.findById(subscription.currentPlanPriceId);
-            if (currentPrice === null) {
-              throw new Error(
-                `PlanPrice ${subscription.currentPlanPriceId.toString()} introuvable pour l'abonnement ${subscription.id.toString()} (etat incoherent, append-only).`,
-              );
+      let outcome: CycleOutcome;
+      try {
+        outcome = await this.unitOfWork.withTransaction(
+          async (): Promise<CycleOutcome> => {
+            const subscription = await this.subscriptionRepository.findById(candidate.id, candidate.tenantId);
+            if (subscription === null) {
+              return 'NONE';
             }
-            const newPeriodStartsAt = subscription.periodEndsAt;
-            const newPeriodEndsAt = addBillingPeriod(newPeriodStartsAt, subscription.period);
 
-            subscription.markRenewalDue({
-              amountXof: currentPrice.amount.amount,
-              newPeriodStartsAt,
-              newPeriodEndsAt,
-              clock: this.clock,
-              idGenerator: this.idGenerator,
-            });
-            subscription.startGracePeriod({ now, clock: this.clock, idGenerator: this.idGenerator });
-            renewalsDue += 1;
-            gracePeriodsStarted += 1;
-          } else if (subscription.isGracePeriodExpired(now)) {
-            subscription.enterDegradedMode({ now, clock: this.clock, idGenerator: this.idGenerator });
-            degradedModeEntries += 1;
-          } else if (subscription.isDegradedModeSustainDue(now)) {
-            subscription.sustainDegradedMode({ clock: this.clock, idGenerator: this.idGenerator });
-            degradedModeSustainedNotifications += 1;
-          } else {
-            return;
-          }
+            let cycleOutcome: CycleOutcome;
 
-          await this.subscriptionRepository.save(subscription, subscription.tenantId);
-        },
-        { tenantId: candidate.tenantId },
-      );
+            if (subscription.isRenewalDue(now)) {
+              const currentPrice = await this.planPriceRepository.findById(subscription.currentPlanPriceId);
+              if (currentPrice === null) {
+                throw new Error(
+                  `PlanPrice ${subscription.currentPlanPriceId.toString()} introuvable pour l'abonnement ${subscription.id.toString()} (etat incoherent, append-only).`,
+                );
+              }
+              const newPeriodStartsAt = subscription.periodEndsAt;
+              const newPeriodEndsAt = addBillingPeriod(newPeriodStartsAt, subscription.period);
+
+              subscription.markRenewalDue({
+                amountXof: currentPrice.amount.amount,
+                newPeriodStartsAt,
+                newPeriodEndsAt,
+                clock: this.clock,
+                idGenerator: this.idGenerator,
+              });
+              subscription.startGracePeriod({ now, clock: this.clock, idGenerator: this.idGenerator });
+              cycleOutcome = 'RENEWAL_DUE';
+            } else if (subscription.isGracePeriodExpired(now)) {
+              subscription.enterDegradedMode({ now, clock: this.clock, idGenerator: this.idGenerator });
+              cycleOutcome = 'DEGRADED_ENTERED';
+            } else if (subscription.isDegradedModeSustainDue(now)) {
+              subscription.sustainDegradedMode({ clock: this.clock, idGenerator: this.idGenerator });
+              cycleOutcome = 'SUSTAIN_NOTIFIED';
+            } else {
+              return 'NONE';
+            }
+
+            await this.subscriptionRepository.save(subscription, subscription.tenantId);
+            return cycleOutcome;
+          },
+          { tenantId: candidate.tenantId },
+        );
+      } catch (error) {
+        if (!(error instanceof SubscriptionConcurrencyConflictError)) {
+          throw error;
+        }
+        skippedOnConflict += 1;
+        continue;
+      }
+
+      if (outcome === 'RENEWAL_DUE') {
+        renewalsDue += 1;
+        gracePeriodsStarted += 1;
+      } else if (outcome === 'DEGRADED_ENTERED') {
+        degradedModeEntries += 1;
+      } else if (outcome === 'SUSTAIN_NOTIFIED') {
+        degradedModeSustainedNotifications += 1;
+      }
     }
 
     return {
@@ -119,6 +162,7 @@ export class ProcessSubscriptionRenewalsHandler {
       gracePeriodsStarted,
       degradedModeEntries,
       degradedModeSustainedNotifications,
+      skippedOnConflict,
     };
   }
 }

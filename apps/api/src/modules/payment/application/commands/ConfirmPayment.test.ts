@@ -41,6 +41,7 @@ async function buildScenario(params: { purpose?: 'INITIAL' | 'RENEWAL' } = {}): 
     tenantId: TENANT,
     subscriptionId: uuidAt(20),
     planPriceId: uuidAt(30),
+    purpose: 'RENEWAL',
     amount: Money.fromXOF(35_000).getValue(),
     periodStartsAt: new Date('2026-09-01T00:00:00Z'),
     periodEndsAt: new Date('2026-10-01T00:00:00Z'),

@@ -4,6 +4,7 @@ import type { IdGenerator } from '../../../shared-kernel/domain/ports/IdGenerato
 import type { Money } from '../../../shared-kernel/domain/value-objects/Money.js';
 import type { TenantId } from '../../../shared-kernel/domain/value-objects/TenantId.js';
 import { PlatformInvoiceId } from './value-objects/PlatformInvoiceId.js';
+import type { PlatformInvoicePurpose } from './value-objects/PlatformInvoicePurpose.js';
 import type { PlatformInvoiceStatus } from './value-objects/PlatformInvoiceStatus.js';
 
 /**
@@ -17,6 +18,17 @@ interface PlatformInvoiceProps {
   readonly tenantId: TenantId;
   readonly subscriptionId: string;
   readonly planPriceId: string;
+  readonly purpose: PlatformInvoicePurpose;
+  /**
+   * Reference OPAQUE du fait metier a l'origine de cette facture, fournie par le module emetteur
+   * via le payload de l'evenement consomme — `null` pour une facture de renouvellement (le
+   * couple `(subscriptionId, periodStartsAt)` suffit deja a l'identifier). Ce module ne sait RIEN
+   * de ce que cette chaine designe cote emetteur (a la passe 2 : un `PlanChangeId` du module
+   * `subscription`) : il se contente de la conserver et de la restituer dans
+   * `SaaSPaymentSucceeded`, ce qui permet a l'emetteur de retrouver SON fait metier sans
+   * qu'aucun concept de son domaine ne fuie ici (regle `no-cross-module-domain-import`).
+   */
+  readonly sourceReference: string | null;
   readonly amount: Money;
   readonly periodStartsAt: Date;
   readonly periodEndsAt: Date;
@@ -50,6 +62,9 @@ export class PlatformInvoice extends AggregateRoot<PlatformInvoiceId> {
     tenantId: TenantId;
     subscriptionId: string;
     planPriceId: string;
+    purpose: PlatformInvoicePurpose;
+    /** Optionnel : les factures de renouvellement n'en portent aucune (voir `sourceReference` dans les props). */
+    sourceReference?: string | null;
     amount: Money;
     periodStartsAt: Date;
     periodEndsAt: Date;
@@ -64,6 +79,8 @@ export class PlatformInvoice extends AggregateRoot<PlatformInvoiceId> {
       tenantId: params.tenantId,
       subscriptionId: params.subscriptionId,
       planPriceId: params.planPriceId,
+      purpose: params.purpose,
+      sourceReference: params.sourceReference ?? null,
       amount: params.amount,
       periodStartsAt: params.periodStartsAt,
       periodEndsAt: params.periodEndsAt,
@@ -88,6 +105,14 @@ export class PlatformInvoice extends AggregateRoot<PlatformInvoiceId> {
 
   get planPriceId(): string {
     return this.props.planPriceId;
+  }
+
+  get purpose(): PlatformInvoicePurpose {
+    return this.props.purpose;
+  }
+
+  get sourceReference(): string | null {
+    return this.props.sourceReference;
   }
 
   get amount(): Money {

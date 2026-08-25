@@ -13,6 +13,7 @@ function makeInvoice(): PlatformInvoice {
     tenantId: tenantId(),
     subscriptionId: uuidAt(20),
     planPriceId: uuidAt(30),
+    purpose: 'RENEWAL',
     amount: Money.fromXOF(35_000).getValue(),
     periodStartsAt: new Date('2026-09-01T00:00:00Z'),
     periodEndsAt: new Date('2026-10-01T00:00:00Z'),
@@ -41,5 +42,28 @@ describe('PlatformInvoice', () => {
     invoice.markPaid(new Date('2026-09-02T00:00:00Z'));
     invoice.markPaid(new Date('2026-09-05T00:00:00Z'));
     expect(invoice.paidAt).toEqual(new Date('2026-09-02T00:00:00Z'));
+  });
+
+  it('issue() sans sourceReference explicite en pose une a null : une facture de renouvellement ne se rattache a aucun fait metier identifie', () => {
+    expect(makeInvoice().sourceReference).toBeNull();
+  });
+
+  it('issue() conserve la sourceReference opaque telle quelle, sans l_interpreter', () => {
+    // Ce module ne sait pas que cette chaine designe un changement de forfait cote `subscription` :
+    // il la stocke et la restituera dans SaaSPaymentSucceeded (voir ADR-0003).
+    const invoice = PlatformInvoice.issue({
+      tenantId: tenantId(),
+      subscriptionId: uuidAt(20),
+      planPriceId: uuidAt(30),
+      purpose: 'UPGRADE',
+      sourceReference: uuidAt(99),
+      amount: Money.fromXOF(10_000).getValue(),
+      periodStartsAt: new Date('2026-09-16T00:00:00Z'),
+      periodEndsAt: new Date('2026-10-01T00:00:00Z'),
+      clock: new FixedClock('2026-09-16T10:00:00Z'),
+      idGenerator: new SequentialIdGenerator(),
+    });
+    expect(invoice.purpose).toBe('UPGRADE');
+    expect(invoice.sourceReference).toBe(uuidAt(99));
   });
 });

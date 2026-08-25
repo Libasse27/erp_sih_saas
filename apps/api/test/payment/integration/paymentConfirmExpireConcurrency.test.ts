@@ -66,6 +66,7 @@ describe('Payment — race webhook SUCCEEDED vs rapprochement EXPIRED (verrouill
       tenantId: tenant,
       subscriptionId: uniqueId(),
       planPriceId: uniqueId(),
+      purpose: 'RENEWAL',
       amount,
       periodStartsAt: new Date('2026-09-01T00:00:00Z'),
       periodEndsAt: new Date('2026-10-01T00:00:00Z'),

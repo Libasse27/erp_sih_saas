@@ -5,7 +5,9 @@ import type { UnitOfWork } from '../../../shared-kernel/application/UnitOfWork.j
 import { PgUnitOfWork } from '../../../shared-kernel/infrastructure/persistence/PgUnitOfWork.js';
 import { ConfirmPaymentHandler, type ConfirmPaymentLogger } from '../application/commands/ConfirmPayment.js';
 import { InitiatePaymentHandler } from '../application/commands/InitiatePayment.js';
+import { GetPlatformInvoiceBySourceReferenceHandler } from '../application/queries/GetPlatformInvoiceBySourceReference.js';
 import { createIssuePlatformInvoiceOnRenewalDueHandler } from '../application/services/IssuePlatformInvoiceOnRenewalDue.js';
+import { createIssuePlatformInvoiceOnUpgradeRequestedHandler } from '../application/services/IssuePlatformInvoiceOnUpgradeRequested.js';
 import { createMarkPlatformInvoicePaidOnPaymentSucceededHandler } from '../application/services/MarkPlatformInvoicePaidOnPaymentSucceeded.js';
 import { ReconcilePendingPaymentsHandler } from '../application/services/ReconcilePendingPayments.js';
 import type { PaymentProvider } from '../domain/ports/PaymentProvider.js';
@@ -25,6 +27,10 @@ export interface PaymentModule {
     readonly initiatePayment: InitiatePaymentHandler;
     readonly confirmPayment: ConfirmPaymentHandler;
   };
+  /** Lectures exposees par ce module — separees des `handlers` (commandes, mutantes) pour que la frontiere lecture/ecriture reste lisible depuis le composition-root. */
+  readonly queries: {
+    readonly getPlatformInvoiceBySourceReference: GetPlatformInvoiceBySourceReferenceHandler;
+  };
   readonly services: {
     readonly reconcilePendingPayments: ReconcilePendingPaymentsHandler;
   };
@@ -35,6 +41,7 @@ export interface PaymentModule {
    */
   readonly outboxHandlers: {
     readonly issuePlatformInvoiceOnRenewalDue: ReturnType<typeof createIssuePlatformInvoiceOnRenewalDueHandler>;
+    readonly issuePlatformInvoiceOnUpgradeRequested: ReturnType<typeof createIssuePlatformInvoiceOnUpgradeRequestedHandler>;
     readonly markPlatformInvoicePaidOnPaymentSucceeded: ReturnType<typeof createMarkPlatformInvoicePaidOnPaymentSucceededHandler>;
   };
   readonly presentation: {
@@ -91,6 +98,12 @@ export function buildPaymentModule(deps: {
     clock: deps.clock,
     idGenerator: deps.idGenerator,
   });
+  const issuePlatformInvoiceOnUpgradeRequested = createIssuePlatformInvoiceOnUpgradeRequestedHandler({
+    platformInvoiceRepository: platformInvoices,
+    unitOfWork,
+    clock: deps.clock,
+    idGenerator: deps.idGenerator,
+  });
   const markPlatformInvoicePaidOnPaymentSucceeded = createMarkPlatformInvoicePaidOnPaymentSucceededHandler({
     platformInvoiceRepository: platformInvoices,
     unitOfWork,
@@ -101,8 +114,15 @@ export function buildPaymentModule(deps: {
     repositories: { payments, platformInvoices },
     unitOfWork,
     handlers: { initiatePayment, confirmPayment },
+    queries: {
+      getPlatformInvoiceBySourceReference: new GetPlatformInvoiceBySourceReferenceHandler(platformInvoices),
+    },
     services: { reconcilePendingPayments },
-    outboxHandlers: { issuePlatformInvoiceOnRenewalDue, markPlatformInvoicePaidOnPaymentSucceeded },
+    outboxHandlers: {
+      issuePlatformInvoiceOnRenewalDue,
+      issuePlatformInvoiceOnUpgradeRequested,
+      markPlatformInvoicePaidOnPaymentSucceeded,
+    },
     presentation: {
       webhookController: new PaymentWebhookController(confirmPayment, deps.webhookControllerLogger),
     },

@@ -96,7 +96,7 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
   // Subscription (Phase 0, etape 4/13) ne depend d'aucun autre module a ce stade — voir le
   // residu documente dans SubscriptionModule.ts sur l'absence volontaire d'un port
   // TenantAccessChecker cote Subscription (hors perimetre de cette etape).
-  const subscription = buildSubscriptionModule({ prisma, clock, idGenerator });
+  const subscription = buildSubscriptionModule({ prisma, clock, idGenerator, applyPlanUpgradeLogger: logger });
 
   // Prestataire de paiement SANDBOX (O-25.3, residu : "fournisseur de paiement SaaS" non
   // choisi) — SEUL point du code qui construit cet adaptateur ; Payment ne connait que le port
@@ -113,19 +113,29 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
 
   // Registre `eventType -> handlers[]` du relais Outbox : SEUL point du code autorise a
   // connaitre les consommateurs de PLUSIEURS modules a la fois (01-target-architecture.md §5 —
-  // meme raisonnement que `TenantModuleBackedAccessChecker` ci-dessus). Deux consommateurs pour
-  // `SaaSPaymentSucceeded` (module `payment` -> `subscription`), un consommateur pour
-  // `SubscriptionRenewalDue` (module `subscription` -> `payment`) — voir le catalogue
-  // d'evenements O-25.6.
+  // meme raisonnement que `TenantModuleBackedAccessChecker` ci-dessus). TROIS consommateurs pour
+  // `SaaSPaymentSucceeded` (module `payment` -> `payment` + `subscription`), un pour
+  // `SubscriptionRenewalDue` et un pour `SubscriptionUpgradeRequested` (module `subscription` ->
+  // `payment`) — voir le catalogue d'evenements O-25.6 et l'ADR-0003.
+  //
+  // Le routage reste un simple `eventType -> handlers[]` : les TROIS consommateurs de
+  // `SaaSPaymentSucceeded` tournent sur CHAQUE message et se filtrent EUX-MEMES sur `purpose`
+  // (`reactivate...` ignore les upgrades, `applyPlanUpgrade...` ne traite qu'eux). Aiguiller ici
+  // sur le contenu du payload dupliquerait cette regle metier hors des modules qui la portent.
   const outboxHandlers = new Map<string, readonly OutboxEventHandler[]>([
     [
       'payment.payment.saas-payment-succeeded',
       [
         payment.outboxHandlers.markPlatformInvoicePaidOnPaymentSucceeded,
         subscription.outboxHandlers.reactivateSubscriptionOnPaymentSucceeded,
+        subscription.outboxHandlers.applyPlanUpgradeOnPaymentSucceeded,
       ],
     ],
     ['subscription.subscription.renewal-due', [payment.outboxHandlers.issuePlatformInvoiceOnRenewalDue]],
+    [
+      'subscription.subscription.upgrade-requested',
+      [payment.outboxHandlers.issuePlatformInvoiceOnUpgradeRequested],
+    ],
   ]);
 
   let outboxRelayJob: PeriodicJobHandle | undefined;

@@ -140,12 +140,19 @@ export class Payment extends AggregateRoot<PaymentId> {
    * `providerTransactionId` a ete mal resolu en amont).
    *
    * Choisit `RENEWED` plutot que `SUCCEEDED` si `purpose === 'RENEWAL'` (voir PaymentStatus.ts).
+   *
+   * `sourceReference` est FOURNI par l'appelant (resolu depuis la `PlatformInvoice` liee, qu'il a
+   * deja chargee pour en tirer `newPeriodStartsAt`/`newPeriodEndsAt`) et jamais recalcule ici : cet
+   * agregat ne fait aucune I/O et ne connait de la facture que son identifiant. `purpose`, lui, est
+   * une prop de CE `Payment` (fixee a l'initiation, derivee du `purpose` de la facture) : il est
+   * propage dans l'evenement depuis l'etat interne, sans parametre.
    */
   confirmSucceeded(params: {
     providerTransactionId: string;
     confirmedAt: Date;
     newPeriodStartsAt: Date;
     newPeriodEndsAt: Date;
+    sourceReference: string | null;
     clock: Clock;
     idGenerator: IdGenerator;
   }): void {
@@ -170,6 +177,8 @@ export class Payment extends AggregateRoot<PaymentId> {
         tenantId: this.props.tenantId.toString(),
         platformInvoiceId: this.props.platformInvoiceId.toString(),
         subscriptionId: this.props.subscriptionId,
+        purpose: this.props.purpose,
+        sourceReference: params.sourceReference,
         providerTransactionId: this.props.providerTransactionId,
         newPeriodStartsAt: params.newPeriodStartsAt,
         newPeriodEndsAt: params.newPeriodEndsAt,

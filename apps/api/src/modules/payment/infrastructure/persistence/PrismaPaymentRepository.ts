@@ -1,4 +1,4 @@
-import { Prisma, type PrismaClient } from '@prisma/client';
+import type { PrismaClient } from '@prisma/client';
 import { resolvePrismaClient } from '../../../../shared-kernel/infrastructure/persistence/PrismaTransactionContext.js';
 import { writeDomainEventsToOutbox } from '../../../../shared-kernel/infrastructure/persistence/OutboxWriter.js';
 import { assertValid } from '../../../../shared-kernel/infrastructure/persistence/assertValid.js';
@@ -66,13 +66,22 @@ export class PrismaPaymentRepository implements PaymentRepository {
    * qui lui reste sur un simple `create()`) : le controle de version optimiste DOIT etre applique
    * AVANT de decider la branche, un `upsert()` ne laisse pas ce point d'insertion.
    *
-   * Branche CREATE : `version` demarre a 0, protegee par le meme mecanisme P2002 que
+   * Branche CREATE : `version` demarre a 0, protegee par le meme mecanisme que
    * `PrismaPlatformInvoiceRepository.issue()` (meme regime "cle d'idempotence webhook",
-   * `provider_transaction_id` UNIQUE) — un P2002 signifie qu'un AUTRE writer vient d'inserer une
-   * ligne pour ce `providerTransactionId` : si c'est LA MEME ligne (meme `id`, course benigne
-   * entre deux ecritures du meme `Payment`), rien a refaire (write idempotent, deja ecrit) ; si
-   * c'est un `id` DIFFERENT, deux agregats `Payment` distincts pretendent au meme
-   * `providerTransactionId` — anomalie reelle, jamais masquee.
+   * `provider_transaction_id` UNIQUE) — `createMany({ skipDuplicates: true })`
+   * (`INSERT ... ON CONFLICT DO NOTHING`) PLUTOT qu'un `create()` rattrapant le `P2002` : cette
+   * methode est appelee DANS une transaction deja ouverte (`InitiatePaymentHandler`, sous
+   * `unitOfWork.withTransaction`), et en PostgreSQL une violation de contrainte AVORTE la
+   * transaction entiere — toute requete suivante, y compris la relecture de la ligne en conflit,
+   * echouerait alors avec `25P02 current transaction is aborted`. Rattraper un `P2002` pour relire
+   * ensuite est donc structurellement impossible dans ce contexte ; `ON CONFLICT DO NOTHING` ne
+   * leve rien et laisse la transaction saine.
+   *
+   * `count === 0` signifie qu'une ligne en conflit existe deja pour ce `providerTransactionId` :
+   * si c'est LA MEME ligne (meme `id`, course benigne entre deux ecritures du meme `Payment`),
+   * rien a refaire (write idempotent, deja ecrit) ; si c'est un `id` DIFFERENT, deux agregats
+   * `Payment` distincts pretendent au meme `providerTransactionId` — anomalie reelle, jamais
+   * masquee.
    *
    * Branche UPDATE : `updateMany({ where: { id, version: expectedVersion } })` — conditionnee sur
    * la version LUE par CETTE instance (`versionsByInstance`). `count === 0` alors que la ligne
@@ -91,9 +100,9 @@ export class PrismaPaymentRepository implements PaymentRepository {
     const existingRow = await client.payment.findUnique({ where: { id: idStr }, select: { id: true } });
 
     if (existingRow === null) {
-      try {
-        await client.payment.create({
-          data: {
+      const insertResult = await client.payment.createMany({
+        data: [
+          {
             id: idStr,
             tenantId: tenantIdStr,
             platformInvoiceId: payment.platformInvoiceId.toString(),
@@ -107,30 +116,34 @@ export class PrismaPaymentRepository implements PaymentRepository {
             confirmedAt: payment.confirmedAt,
             version: 0,
           },
-        });
-      } catch (error) {
-        if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
-          throw error;
-        }
+        ],
+        skipDuplicates: true,
+      });
+
+      if (insertResult.count === 0) {
         const conflicting = await client.payment.findUnique({
           where: { providerTransactionId: payment.providerTransactionId },
           select: { id: true },
         });
         if (conflicting === null) {
-          // Ne devrait pas arriver (le P2002 vient forcement de cette contrainte, voir
-          // PrismaPlatformInvoiceRepository.issue() pour la meme discipline) — remonte l'erreur
-          // d'origine plutot que de masquer une incoherence.
-          throw error;
+          // Ne devrait pas arriver (l'insertion ignoree vient forcement de cette contrainte, voir
+          // PrismaPlatformInvoiceRepository.issue() pour la meme discipline) — signale
+          // l'incoherence plutot que de la masquer.
+          throw new Error(
+            `Payment ${idStr} : insertion ignoree pour cause de conflit, mais aucune ligne en conflit retrouvee (incoherence de contrainte).`,
+          );
         }
         if (conflicting.id !== idStr) {
           // Deux agregats Payment DISTINCTS pretendent au meme providerTransactionId : ne
           // devrait jamais arriver si le prestataire attribue des identifiants uniques — anomalie
           // reelle, jamais masquee.
-          throw error;
+          throw new Error(
+            `Payment ${idStr} et Payment ${conflicting.id} pretendent tous deux au providerTransactionId ${payment.providerTransactionId} (anomalie reelle).`,
+          );
         }
-        // Course benigne : un autre writer concurrent vient d'inserer/mettre a jour EXACTEMENT
-        // cette ligne juste avant nous — write idempotent, le contenu vise etait deja ecrit.
-        // Aucun evenement a rejouer ici : celui qui a gagne la course a deja ecrit les siens.
+        // Course benigne : un autre writer concurrent vient d'inserer EXACTEMENT cette ligne juste
+        // avant nous — write idempotent, le contenu vise etait deja ecrit. Aucun evenement a
+        // rejouer ici : celui qui a gagne la course a deja ecrit les siens.
         return;
       }
       // Version connue de CETTE instance des maintenant (evite qu'un futur `save()` ulterieur sur

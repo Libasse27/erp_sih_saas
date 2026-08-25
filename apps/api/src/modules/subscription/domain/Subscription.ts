@@ -1,7 +1,9 @@
 import { AggregateRoot } from '../../../shared-kernel/domain/AggregateRoot.js';
 import type { Clock } from '../../../shared-kernel/domain/ports/Clock.js';
 import type { IdGenerator } from '../../../shared-kernel/domain/ports/IdGenerator.js';
+import type { Money } from '../../../shared-kernel/domain/value-objects/Money.js';
 import type { TenantId } from '../../../shared-kernel/domain/value-objects/TenantId.js';
+import { PlanUpgradeRequest } from './PlanUpgradeRequest.js';
 import { addCalendarDays } from './services/CalendarDays.js';
 import { SubscriptionDegradedModeEntered } from './events/SubscriptionDegradedModeEntered.js';
 import { SubscriptionDegradedModeSustained } from './events/SubscriptionDegradedModeSustained.js';
@@ -11,6 +13,8 @@ import { SubscriptionReactivated } from './events/SubscriptionReactivated.js';
 import { SubscriptionRenewalDue } from './events/SubscriptionRenewalDue.js';
 import { SubscriptionRenewed } from './events/SubscriptionRenewed.js';
 import { SubscriptionStarted } from './events/SubscriptionStarted.js';
+import { SubscriptionUpgradeRequested } from './events/SubscriptionUpgradeRequested.js';
+import { PlanChangeId } from './value-objects/PlanChangeId.js';
 import { SubscriptionId } from './value-objects/SubscriptionId.js';
 import type { BillingPeriod } from './value-objects/BillingPeriod.js';
 import type { PlanId } from './value-objects/PlanId.js';
@@ -25,6 +29,18 @@ export const GRACE_PERIOD_DAYS = 7;
 
 /** Duree du mode degrade AVANT maintien indefini (J+7 a J+37) — O-03.2, valeur close par la decision. */
 export const DEGRADED_MODE_DAYS = 30;
+
+/**
+ * Delai laisse au tenant pour regler une demande d'upgrade proratise — valeur tranchee par le
+ * product owner (24 heures), pas une valeur par defaut inventee. Passe ce delai, la demande est
+ * consideree abandonnee et une NOUVELLE demande peut la remplacer (voir
+ * `PlanUpgradeRequestRepository.replaceExpiredAndInsert`). Elle n'est PAS supprimee d'office :
+ * un paiement confirme apres le TTL mais avant tout remplacement reste honore (voir
+ * `PlanUpgradeRequest.isExpired`).
+ */
+export const UPGRADE_REQUEST_TTL_HOURS = 24;
+
+const MS_PER_HOUR = 60 * 60 * 1000;
 
 interface SubscriptionProps {
   readonly tenantId: TenantId;
@@ -379,18 +395,118 @@ export class Subscription extends AggregateRoot<SubscriptionId> {
   }
 
   /**
-   * Applique un changement de forfait DEJA VALIDE comme upgrade et DEJA PRORATISE par
-   * l'appelant (`UpgradeSubscriptionPlan.ts`, via `ProrationCalculator.ts`) : cette methode ne
-   * refait aucun calcul, elle ne fait qu'appliquer la transition d'etat. `periodStartsAt` /
-   * `periodEndsAt` restent INCHANGES (O-02.6 : "nouvelles capacites disponibles aussitot", le
-   * cycle de facturation en cours n'est pas reinitialise par un upgrade).
+   * DEMANDE un upgrade proratise — NE CHANGE PAS le forfait (`planId`/`currentPlanPriceId` restent
+   * intacts). Produit une `PlanUpgradeRequest` figeant toutes les valeurs financieres, et emet
+   * `SubscriptionUpgradeRequested` pour que le module `payment` emette la facture correspondante.
+   * Le forfait ne changera qu'a la confirmation du paiement, via `applyPlanUpgrade()` — c'est CE
+   * decoupage, et lui seul, qui rend impossible "monter en gamme sans payer".
+   *
+   * L'evenement est emis sur CET agregat (et non sur `PlanUpgradeRequest`, qui n'est pas un
+   * `AggregateRoot`) : c'est `Subscription` qui decide, la demande n'est que le fait resultant.
+   *
+   * PRECONDITION `status === 'ACTIVE'`, verifiee ici par une EXCEPTION et non par un `Result` :
+   * l'appelant (`UpgradeSubscriptionPlanHandler`) a DEJA verifie ce statut en amont et renvoie
+   * `SUBSCRIPTION_NOT_UPGRADABLE` sans jamais atteindre cette methode — un appel depuis un autre
+   * statut est donc un bug de programmation, pas un echec metier attendu (meme discipline que
+   * `startGracePeriod`/`enterDegradedMode`). Rappel de la decision produit sur ce refus :
+   *   - `TRIALING` : la base de calcul du prorata serait un prix jamais reellement paye ;
+   *   - `GRACE_PERIOD`/`DEGRADED` : les "jours restants" n'ont pas de sens sur une periode deja
+   *     impayee, et vendre une montee en gamme a un compte en defaut est incoherent.
+   *
+   * La periode COUVERTE par le prorata va de `now` a `periodEndsAt` — decision de conception non
+   * explicitee par le brief : c'est exactement l'assiette du calcul de `ProrationCalculator`
+   * ("jours restants sur la periode en cours"), la facture d'upgrade doit donc porter cette meme
+   * fenetre, et non le cycle de facturation complet, qui laisserait croire que l'upgrade couvre
+   * des jours deja factures au tarif precedent.
    */
-  changePlan(params: {
+  requestUpgrade(params: {
+    planChangeId: string;
+    toPlanId: PlanId;
+    toPlanPriceId: PlanPriceId;
+    proratedAmount: Money;
+    now: Date;
+    clock: Clock;
+    idGenerator: IdGenerator;
+  }): PlanUpgradeRequest {
+    if (this.props.status !== 'ACTIVE') {
+      throw new Error(`Transition invalide : requestUpgrade() appele depuis le statut ${this.props.status}.`);
+    }
+
+    const planChangeIdResult = PlanChangeId.create(params.planChangeId);
+    if (planChangeIdResult.isFailure()) {
+      throw new Error('planChangeId invalide fourni a requestUpgrade() (bug applicatif).');
+    }
+
+    // Addition directe en millisecondes : un TTL de 24h est une DUREE exacte, pas un decalage
+    // "au jour calendaire pres" comme la grace ou l'essai — aucune abstraction supplementaire a
+    // cote de CalendarDays.ts ne se justifie pour une seule addition.
+    const expiresAt = new Date(params.now.getTime() + UPGRADE_REQUEST_TTL_HOURS * MS_PER_HOUR);
+
+    const request = PlanUpgradeRequest.create(planChangeIdResult.getValue(), {
+      subscriptionId: this.id,
+      tenantId: this.props.tenantId,
+      fromPlanId: this.props.planId,
+      fromPlanPriceId: this.props.currentPlanPriceId,
+      toPlanId: params.toPlanId,
+      toPlanPriceId: params.toPlanPriceId,
+      proratedAmount: params.proratedAmount,
+      coveredPeriodStartsAt: params.now,
+      coveredPeriodEndsAt: this.props.periodEndsAt,
+      requestedAt: params.now,
+      expiresAt,
+    });
+
+    this.addDomainEvent(
+      SubscriptionUpgradeRequested.create({
+        subscriptionId: this.id.toString(),
+        tenantId: this.props.tenantId.toString(),
+        planChangeId: params.planChangeId,
+        fromPlanId: this.props.planId.toString(),
+        fromPlanPriceId: this.props.currentPlanPriceId.toString(),
+        toPlanId: params.toPlanId.toString(),
+        toPlanPriceId: params.toPlanPriceId.toString(),
+        proratedAmountXof: params.proratedAmount.amount,
+        coveredPeriodStartsAt: params.now,
+        coveredPeriodEndsAt: this.props.periodEndsAt,
+        expiresAt,
+        clock: params.clock,
+        idGenerator: params.idGenerator,
+      }),
+    );
+
+    return request;
+  }
+
+  /**
+   * Applique un changement de forfait DEJA VALIDE comme upgrade, DEJA PRORATISE **et DEJA PAYE** :
+   * cette methode ne refait aucun calcul, elle ne fait qu'appliquer la transition d'etat.
+   * `periodStartsAt` / `periodEndsAt` restent INCHANGES (O-02.6 : "nouvelles capacites disponibles
+   * aussitot", le cycle de facturation en cours n'est pas reinitialise par un upgrade).
+   *
+   * N'EST APPELEE QUE DEPUIS `application/services/ApplyPlanUpgradeOnPaymentSucceeded.ts` (le
+   * consommateur Outbox de `SaaSPaymentSucceeded`), JAMAIS depuis `UpgradeSubscriptionPlanHandler`
+   * — c'est la meme discipline "impossible par construction" que `ConfirmPaymentHandler` pour
+   * l'activation webhook-only : il n'existe aucun chemin de code par lequel une demande d'upgrade
+   * puisse appliquer elle-meme le changement.
+   *
+   * IDEMPOTENTE, meme garde que `renew()`/`reactivate()` : si l'abonnement est DEJA sur le forfait
+   * ET le tarif cibles, ne fait rien et n'emet AUCUN evenement — indispensable face a une
+   * re-livraison at-least-once du meme `SaaSPaymentSucceeded` par l'Outbox, qui produirait sinon un
+   * second `SubscriptionPlanChanged` pour un changement unique.
+   */
+  applyPlanUpgrade(params: {
     newPlanId: PlanId;
     newPlanPriceId: PlanPriceId;
     clock: Clock;
     idGenerator: IdGenerator;
   }): void {
+    if (
+      this.props.planId.equals(params.newPlanId) &&
+      this.props.currentPlanPriceId.equals(params.newPlanPriceId)
+    ) {
+      return;
+    }
+
     const fromPlanId = this.props.planId;
     this.props.planId = params.newPlanId;
     this.props.currentPlanPriceId = params.newPlanPriceId;

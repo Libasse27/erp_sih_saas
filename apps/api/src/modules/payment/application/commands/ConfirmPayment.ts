@@ -147,6 +147,10 @@ export class ConfirmPaymentHandler {
           confirmedAt: webhookEvent.occurredAt,
           newPeriodStartsAt: invoice.periodStartsAt,
           newPeriodEndsAt: invoice.periodEndsAt,
+          // Restitue telle quelle la reference opaque portee par la facture (voir
+          // PlatformInvoice.ts) : c'est elle qui permettra au module emetteur de retrouver SON
+          // fait metier a l'origine du paiement. Jamais reconstruite ni devinee ici.
+          sourceReference: invoice.sourceReference,
           clock: this.clock,
           idGenerator: this.idGenerator,
         }),
