@@ -2,10 +2,13 @@ import type { PrismaClient } from '@prisma/client';
 import type { Clock } from '../../../shared-kernel/domain/ports/Clock.js';
 import type { IdGenerator } from '../../../shared-kernel/domain/ports/IdGenerator.js';
 import type { UnitOfWork } from '../../../shared-kernel/application/UnitOfWork.js';
+import type { OutboxEventHandler } from '../../../shared-kernel/application/OutboxEventHandler.js';
 import { PgUnitOfWork } from '../../../shared-kernel/infrastructure/persistence/PgUnitOfWork.js';
 import { StartTrialSubscriptionHandler } from '../application/commands/StartTrialSubscription.js';
 import { UpgradeSubscriptionPlanHandler } from '../application/commands/UpgradeSubscriptionPlan.js';
 import { CheckUsersQuotaHandler } from '../application/services/CheckUsersQuota.js';
+import { ProcessSubscriptionRenewalsHandler } from '../application/services/ProcessSubscriptionRenewals.js';
+import { createReactivateSubscriptionOnPaymentSucceededHandler } from '../application/services/ReactivateSubscriptionOnPaymentSucceeded.js';
 import type { PlanChangeRepository } from '../domain/ports/PlanChangeRepository.js';
 import type { PlanPriceRepository } from '../domain/ports/PlanPriceRepository.js';
 import type { PlanRepository } from '../domain/ports/PlanRepository.js';
@@ -30,6 +33,12 @@ export interface SubscriptionModule {
   };
   readonly services: {
     readonly checkUsersQuota: CheckUsersQuotaHandler;
+    /** Scheduler applicatif O-25.6 (grace/degrade) — invoque periodiquement, voir infrastructure/scheduler/SubscriptionRenewalScheduler.ts. */
+    readonly processSubscriptionRenewals: ProcessSubscriptionRenewalsHandler;
+  };
+  /** Consommateurs Outbox exposes par ce module — cables UNIQUEMENT dans composition-root.ts. */
+  readonly outboxHandlers: {
+    readonly reactivateSubscriptionOnPaymentSucceeded: OutboxEventHandler;
   };
 }
 
@@ -78,6 +87,21 @@ export function buildSubscriptionModule(deps: {
     },
     services: {
       checkUsersQuota: new CheckUsersQuotaHandler(subscriptions, plans),
+      processSubscriptionRenewals: new ProcessSubscriptionRenewalsHandler(
+        subscriptions,
+        planPrices,
+        unitOfWork,
+        deps.clock,
+        deps.idGenerator,
+      ),
+    },
+    outboxHandlers: {
+      reactivateSubscriptionOnPaymentSucceeded: createReactivateSubscriptionOnPaymentSucceededHandler({
+        subscriptionRepository: subscriptions,
+        unitOfWork,
+        clock: deps.clock,
+        idGenerator: deps.idGenerator,
+      }),
     },
   };
 }

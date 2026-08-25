@@ -34,6 +34,11 @@ export class FixedClock implements Clock {
   now(): Date {
     return this.current;
   }
+
+  /** Ajoute a l'etape 5 (scenarios de scheduler sur plusieurs cycles, O-25.6) — inexistant a l'etape 4, aucun test existant n'en dependait. */
+  advanceTo(iso: string): void {
+    this.current = new Date(iso);
+  }
 }
 
 /** Genere des UUID v4 valides et deterministes (sequentiels) — jamais Math.random() dans les tests. */
@@ -134,7 +139,23 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
     if (!subscription.tenantId.equals(tenantId)) {
       throw new Error("Tentative de sauvegarde d'un Subscription hors du tenant du contexte courant.");
     }
+    subscription.pullDomainEvents();
     this.byId.set(subscription.id.toString(), subscription);
+  }
+
+  async listSchedulerCandidates(now: Date): Promise<readonly Subscription[]> {
+    return [...this.byId.values()].filter((subscription) => {
+      if (
+        (subscription.status === 'TRIALING' || subscription.status === 'ACTIVE') &&
+        subscription.periodEndsAt.getTime() <= now.getTime()
+      ) {
+        return true;
+      }
+      if (subscription.status === 'GRACE_PERIOD') {
+        return true;
+      }
+      return subscription.status === 'DEGRADED' && subscription.degradedModeSustainedNotifiedAt === null;
+    });
   }
 }
 

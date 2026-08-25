@@ -3,7 +3,13 @@ import type { Clock } from '../../../shared-kernel/domain/ports/Clock.js';
 import type { IdGenerator } from '../../../shared-kernel/domain/ports/IdGenerator.js';
 import type { TenantId } from '../../../shared-kernel/domain/value-objects/TenantId.js';
 import { addCalendarDays } from './services/CalendarDays.js';
+import { SubscriptionDegradedModeEntered } from './events/SubscriptionDegradedModeEntered.js';
+import { SubscriptionDegradedModeSustained } from './events/SubscriptionDegradedModeSustained.js';
+import { SubscriptionGracePeriodStarted } from './events/SubscriptionGracePeriodStarted.js';
 import { SubscriptionPlanChanged } from './events/SubscriptionPlanChanged.js';
+import { SubscriptionReactivated } from './events/SubscriptionReactivated.js';
+import { SubscriptionRenewalDue } from './events/SubscriptionRenewalDue.js';
+import { SubscriptionRenewed } from './events/SubscriptionRenewed.js';
 import { SubscriptionStarted } from './events/SubscriptionStarted.js';
 import { SubscriptionId } from './value-objects/SubscriptionId.js';
 import type { BillingPeriod } from './value-objects/BillingPeriod.js';
@@ -14,16 +20,25 @@ import type { SubscriptionStatus } from './value-objects/SubscriptionStatus.js';
 /** Duree de l'essai gratuit — O-02.5, valeur close par la decision, pas une valeur par defaut inventee. */
 export const TRIAL_DURATION_DAYS = 30;
 
+/** Duree de la periode de grace — O-03.2, valeur close par la decision. */
+export const GRACE_PERIOD_DAYS = 7;
+
+/** Duree du mode degrade AVANT maintien indefini (J+7 a J+37) — O-03.2, valeur close par la decision. */
+export const DEGRADED_MODE_DAYS = 30;
+
 interface SubscriptionProps {
   readonly tenantId: TenantId;
   planId: PlanId;
   currentPlanPriceId: PlanPriceId;
   readonly period: BillingPeriod;
-  readonly status: SubscriptionStatus;
-  readonly trialEndsAt: Date | null;
-  readonly periodStartsAt: Date;
-  readonly periodEndsAt: Date;
+  status: SubscriptionStatus;
+  trialEndsAt: Date | null;
+  periodStartsAt: Date;
+  periodEndsAt: Date;
   readonly createdAt: Date;
+  gracePeriodStartedAt: Date | null;
+  degradedModeEnteredAt: Date | null;
+  degradedModeSustainedNotifiedAt: Date | null;
 }
 
 /**
@@ -35,10 +50,11 @@ interface SubscriptionProps {
  * `tenantId` sur CHAQUE methode — c'est la SEULE barriere reelle ici, plus critique encore que
  * la couche 3 habituelle puisqu'il n'y a pas de RLS en couche 4 pour cette table).
  *
- * Statut volontairement minimal (`TRIALING`/`ACTIVE`, voir `value-objects/SubscriptionStatus.ts`)
- * — meme choix que `HealthFacility.status` a l'etape 3 : aucun etat de grace/mode degrade (O-03)
- * n'est invente ici, ce sera la responsabilite d'une etape ulterieure qui composera avec ce
- * statut sans le remplacer.
+ * Statut (`TRIALING`/`ACTIVE`/`GRACE_PERIOD`/`DEGRADED`, voir
+ * `value-objects/SubscriptionStatus.ts`) — les deux derniers ajoutes a l'etape 5 (integration
+ * O-25/O-03) : voir `startGracePeriod`/`enterDegradedMode`/`sustainDegradedMode`/`reactivate`/
+ * `renew` ci-dessous pour les transitions, toutes pilotees par `ProcessSubscriptionRenewals.ts`
+ * (scheduler) ou par la confirmation d'un paiement (module `payment`), jamais par un controleur.
  *
  * Invariant du catalogue (01-target-architecture.md §6.3) : "un Tenant a exactement un
  * Subscription actif a un instant donne" — impose ici par construction (un seul agregat par
@@ -94,6 +110,9 @@ export class Subscription extends AggregateRoot<SubscriptionId> {
       periodStartsAt: now,
       periodEndsAt: trialEndsAt,
       createdAt: now,
+      gracePeriodStartedAt: null,
+      degradedModeEnteredAt: null,
+      degradedModeSustainedNotifiedAt: null,
     });
 
     subscription.addDomainEvent(
@@ -149,6 +168,214 @@ export class Subscription extends AggregateRoot<SubscriptionId> {
 
   get createdAt(): Date {
     return this.props.createdAt;
+  }
+
+  get gracePeriodStartedAt(): Date | null {
+    return this.props.gracePeriodStartedAt;
+  }
+
+  get degradedModeEnteredAt(): Date | null {
+    return this.props.degradedModeEnteredAt;
+  }
+
+  get degradedModeSustainedNotifiedAt(): Date | null {
+    return this.props.degradedModeSustainedNotifiedAt;
+  }
+
+  /**
+   * Vrai si l'echeance de facturation est atteinte ET qu'aucune periode de grace n'a encore
+   * demarre (statuts eligibles : `TRIALING`/`ACTIVE` uniquement — un abonnement deja en
+   * `GRACE_PERIOD`/`DEGRADED` ne "redevient" jamais due par ce chemin, seul un paiement confirme
+   * le fait sortir de cet etat). Utilise par le scheduler (`ProcessSubscriptionRenewals.ts`,
+   * O-25.6) pour decider d'emettre `SubscriptionRenewalDue` + de demarrer la grace.
+   */
+  isRenewalDue(now: Date): boolean {
+    return (
+      (this.props.status === 'TRIALING' || this.props.status === 'ACTIVE') &&
+      this.props.periodEndsAt.getTime() <= now.getTime()
+    );
+  }
+
+  /** Vrai si la periode de grace (7 jours, O-03.2) est ecoulee sans regularisation. */
+  isGracePeriodExpired(now: Date): boolean {
+    return (
+      this.props.status === 'GRACE_PERIOD' &&
+      this.props.gracePeriodStartedAt !== null &&
+      addCalendarDays(this.props.gracePeriodStartedAt, GRACE_PERIOD_DAYS).getTime() <= now.getTime()
+    );
+  }
+
+  /** Vrai si le mode degrade dure depuis 30 jours (J+37 total, O-03.3) et n'a jamais encore ete signale comme "maintenu" (idempotence : une seule emission de `SubscriptionDegradedModeSustained`). */
+  isDegradedModeSustainDue(now: Date): boolean {
+    return (
+      this.props.status === 'DEGRADED' &&
+      this.props.degradedModeSustainedNotifiedAt === null &&
+      this.props.degradedModeEnteredAt !== null &&
+      addCalendarDays(this.props.degradedModeEnteredAt, DEGRADED_MODE_DAYS).getTime() <= now.getTime()
+    );
+  }
+
+  /**
+   * Signale l'echeance de facturation atteinte (O-25.6, scheduler) — N'ALTERE PAS le statut par
+   * lui-meme (voir `startGracePeriod`, appele juste apres par l'appelant dans le meme cycle) :
+   * distingue le FAIT "echeance atteinte, montant a facturer" (utile au module `payment`, qui
+   * emet la facture a partir de cet evenement) de la CONSEQUENCE "entree en grace" (propre a cet
+   * agregat). Le montant est resolu par l'appelant (`ProcessSubscriptionRenewals.ts`, via
+   * `PlanPriceRepository` — jamais `plan.price`, O-02.6) : cet agregat ne fait aucune I/O.
+   */
+  markRenewalDue(params: {
+    amountXof: number;
+    newPeriodStartsAt: Date;
+    newPeriodEndsAt: Date;
+    clock: Clock;
+    idGenerator: IdGenerator;
+  }): void {
+    this.addDomainEvent(
+      SubscriptionRenewalDue.create({
+        subscriptionId: this.id.toString(),
+        tenantId: this.props.tenantId.toString(),
+        planPriceId: this.props.currentPlanPriceId.toString(),
+        amountXof: params.amountXof,
+        newPeriodStartsAt: params.newPeriodStartsAt,
+        newPeriodEndsAt: params.newPeriodEndsAt,
+        clock: params.clock,
+        idGenerator: params.idGenerator,
+      }),
+    );
+  }
+
+  /**
+   * Entree en periode de grace (O-03.2) : echeance depassee, aucun paiement confirme pour la
+   * nouvelle periode. Precondition verifiee par l'appelant via `isRenewalDue()` — un appel hors
+   * de ce contexte est une erreur de programmation (bug), pas un echec metier attendu, donc leve
+   * une exception plutot qu'un `Result` (§2 du system prompt).
+   */
+  startGracePeriod(params: { now: Date; clock: Clock; idGenerator: IdGenerator }): void {
+    if (this.props.status !== 'TRIALING' && this.props.status !== 'ACTIVE') {
+      throw new Error(`Transition invalide : startGracePeriod() appele depuis le statut ${this.props.status}.`);
+    }
+    this.props.status = 'GRACE_PERIOD';
+    this.props.gracePeriodStartedAt = params.now;
+    this.addDomainEvent(
+      SubscriptionGracePeriodStarted.create({
+        subscriptionId: this.id.toString(),
+        tenantId: this.props.tenantId.toString(),
+        gracePeriodStartedAt: params.now,
+        graceEndsAt: addCalendarDays(params.now, GRACE_PERIOD_DAYS),
+        clock: params.clock,
+        idGenerator: params.idGenerator,
+      }),
+    );
+  }
+
+  /** Passage en mode degrade (O-03.2) : grace expiree sans regularisation. Precondition verifiee par l'appelant via `isGracePeriodExpired()`. */
+  enterDegradedMode(params: { now: Date; clock: Clock; idGenerator: IdGenerator }): void {
+    if (this.props.status !== 'GRACE_PERIOD') {
+      throw new Error(`Transition invalide : enterDegradedMode() appele depuis le statut ${this.props.status}.`);
+    }
+    this.props.status = 'DEGRADED';
+    this.props.degradedModeEnteredAt = params.now;
+    this.addDomainEvent(
+      SubscriptionDegradedModeEntered.create({
+        subscriptionId: this.id.toString(),
+        tenantId: this.props.tenantId.toString(),
+        degradedModeEnteredAt: params.now,
+        clock: params.clock,
+        idGenerator: params.idGenerator,
+      }),
+    );
+  }
+
+  /**
+   * Signale le maintien indefini du mode degrade a J+37 (O-03.3). IDEMPOTENT PAR CONSTRUCTION :
+   * si deja signale (`degradedModeSustainedNotifiedAt` renseigne), ne fait rien et n'emet aucun
+   * evenement — necessaire car le scheduler tourne a chaque cycle et reverifierait
+   * indefiniment cette condition sans cette garde (le statut `DEGRADED` lui-meme, contrairement a
+   * `GRACE_PERIOD`, ne change plus jamais automatiquement par la suite : "maintien indefini").
+   */
+  sustainDegradedMode(params: { clock: Clock; idGenerator: IdGenerator }): void {
+    if (this.props.status !== 'DEGRADED') {
+      throw new Error(`Transition invalide : sustainDegradedMode() appele depuis le statut ${this.props.status}.`);
+    }
+    if (this.props.degradedModeSustainedNotifiedAt !== null) {
+      return;
+    }
+    this.props.degradedModeSustainedNotifiedAt = params.clock.now();
+    this.addDomainEvent(
+      SubscriptionDegradedModeSustained.create({
+        subscriptionId: this.id.toString(),
+        tenantId: this.props.tenantId.toString(),
+        clock: params.clock,
+        idGenerator: params.idGenerator,
+      }),
+    );
+  }
+
+  /**
+   * Renouvellement a l'echeance SANS jamais etre passe par la grace (paiement confirme avant ou
+   * au moment de `periodEndsAt`) — reste `ACTIVE`, emet `SubscriptionRenewed` (distinct de
+   * `SubscriptionReactivated`, reserve a la sortie de grace/degrade). Convertit aussi un essai
+   * (`TRIALING`) en abonnement payant, `trialEndsAt` efface : c'est le meme mecanisme qui traite
+   * la "premiere echeance due" d'un essai que le renouvellement d'un abonnement payant (voir
+   * ProcessSubscriptionRenewals.ts — aucun etat "conversion" distinct invente).
+   *
+   * IDEMPOTENT du point de vue de l'appelant, meme garde que `reactivate()` : si deja `ACTIVE`
+   * avec une periode couvrant deja `newPeriodEndsAt`, ne fait rien (re-livraison at-least-once
+   * du meme evenement `SaaSPaymentSucceeded`).
+   */
+  renew(params: { newPeriodStartsAt: Date; newPeriodEndsAt: Date; clock: Clock; idGenerator: IdGenerator }): void {
+    if (this.props.status === 'ACTIVE' && this.props.periodEndsAt.getTime() >= params.newPeriodEndsAt.getTime()) {
+      return;
+    }
+    if (this.props.status !== 'ACTIVE' && this.props.status !== 'TRIALING') {
+      throw new Error(`Transition invalide : renew() appele depuis le statut ${this.props.status}.`);
+    }
+    this.props.status = 'ACTIVE';
+    this.props.trialEndsAt = null;
+    this.props.periodStartsAt = params.newPeriodStartsAt;
+    this.props.periodEndsAt = params.newPeriodEndsAt;
+    this.addDomainEvent(
+      SubscriptionRenewed.create({
+        subscriptionId: this.id.toString(),
+        tenantId: this.props.tenantId.toString(),
+        newPeriodStartsAt: params.newPeriodStartsAt,
+        newPeriodEndsAt: params.newPeriodEndsAt,
+        clock: params.clock,
+        idGenerator: params.idGenerator,
+      }),
+    );
+  }
+
+  /**
+   * Sortie de `GRACE_PERIOD`/`DEGRADED` suite a un paiement confirme, A TOUT MOMENT (O-25.6).
+   * IDEMPOTENT du point de vue de l'appelant : si l'abonnement est deja `ACTIVE` avec une
+   * periode couvrant deja `newPeriodEndsAt`, ne fait rien (evite une double reactivation en cas
+   * de re-livraison at-least-once du meme evenement `SaaSPaymentSucceeded` par l'Outbox).
+   */
+  reactivate(params: { newPeriodStartsAt: Date; newPeriodEndsAt: Date; clock: Clock; idGenerator: IdGenerator }): void {
+    if (this.props.status === 'ACTIVE' && this.props.periodEndsAt.getTime() >= params.newPeriodEndsAt.getTime()) {
+      return;
+    }
+    if (this.props.status !== 'GRACE_PERIOD' && this.props.status !== 'DEGRADED') {
+      throw new Error(`Transition invalide : reactivate() appele depuis le statut ${this.props.status}.`);
+    }
+    this.props.status = 'ACTIVE';
+    this.props.trialEndsAt = null;
+    this.props.periodStartsAt = params.newPeriodStartsAt;
+    this.props.periodEndsAt = params.newPeriodEndsAt;
+    this.props.gracePeriodStartedAt = null;
+    this.props.degradedModeEnteredAt = null;
+    this.props.degradedModeSustainedNotifiedAt = null;
+    this.addDomainEvent(
+      SubscriptionReactivated.create({
+        subscriptionId: this.id.toString(),
+        tenantId: this.props.tenantId.toString(),
+        newPeriodStartsAt: params.newPeriodStartsAt,
+        newPeriodEndsAt: params.newPeriodEndsAt,
+        clock: params.clock,
+        idGenerator: params.idGenerator,
+      }),
+    );
   }
 
   /**

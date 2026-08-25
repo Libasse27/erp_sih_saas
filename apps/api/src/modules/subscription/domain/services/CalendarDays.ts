@@ -26,3 +26,20 @@ export function addCalendarDays(date: Date, days: number): Date {
   result.setUTCDate(result.getUTCDate() + days);
   return result;
 }
+
+/**
+ * Ajoute UNE periode de facturation (O-02.2 : mensuel ou annuel) a une date, en conservant
+ * l'heure d'origine — utilise par `ProcessSubscriptionRenewals.ts` (etape 5) pour calculer la
+ * nouvelle `periodEndsAt` d'un renouvellement, a partir de `subscription.period`. Utilise
+ * `setUTCMonth`/`setUTCFullYear` (jamais une addition de jours fixes, un mois n'a pas une duree
+ * constante) — meme discipline "au jour calendaire pres" que le reste de ce fichier.
+ */
+export function addBillingPeriod(date: Date, period: 'MENSUEL' | 'ANNUEL'): Date {
+  const result = new Date(date.getTime());
+  if (period === 'MENSUEL') {
+    result.setUTCMonth(result.getUTCMonth() + 1);
+  } else {
+    result.setUTCFullYear(result.getUTCFullYear() + 1);
+  }
+  return result;
+}

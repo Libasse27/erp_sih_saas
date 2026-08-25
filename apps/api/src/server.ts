@@ -1,18 +1,86 @@
-import express, { type Express } from 'express';
+import express, { type ErrorRequestHandler, type Express } from 'express';
 import { buildCompositionRoot, type CompositionRoot } from './composition-root.js';
 
+export interface ErrorHandlerLogger {
+  error(fields: Record<string, unknown>, message: string): void;
+}
+
 /**
- * Bootstrap HTTP minimal. Aucune route metier tant qu'aucun module (Identity, Tenant...)
- * n'existe (Phase 0, etapes 2+) — seul un health check est expose, utile des l'infra CI/CD.
+ * Discriminant d'une erreur de parsing JSON `body-parser` (utilise par `express.json()`) —
+ * verifie empiriquement sur Express 4.21/body-parser (voir le test d'integration associe) :
+ * `err.type === 'entity.parse.failed'` ET `err instanceof SyntaxError` avec une propriete `body`
+ * (le corps brut qui a echoue a parser). Les DEUX conditions sont verifiees plutot qu'une seule
+ * pour ne jamais confondre cette erreur precise avec une autre `SyntaxError` accidentelle levee
+ * plus loin dans la chaine de middlewares (§3.3 : jamais de detail interne expose, donc autant
+ * etre strict sur CE qui declenche la reponse 400 "payload malformee").
+ */
+function isJsonBodyParseError(err: unknown): boolean {
+  return (
+    err instanceof SyntaxError &&
+    'body' in err &&
+    'type' in err &&
+    (err as { type: unknown }).type === 'entity.parse.failed'
+  );
+}
+
+/**
+ * Middleware d'erreur Express (4 arguments, reconnu comme tel par sa seule arite — Express ne le
+ * distingue pas autrement) a monter APRES toutes les routes : sans lui, une erreur de parsing
+ * JSON sur une route non-webhook (ou toute exception synchrone non geree dans un handler)
+ * retomberait sur le handler d'erreur PAR DEFAUT d'Express, qui expose `err.message` (et la stack
+ * en dev) dans le corps de reponse — contraire a la regle deja appliquee partout ailleurs dans ce
+ * depot (§3.3, voir PaymentWebhookController.ts). Ne renvoie JAMAIS `err.stack`/`err.message` au
+ * client, dans aucun des deux cas ci-dessous.
+ *
+ * Extrait en fonction exportee (plutot qu'inline dans `createApp`) pour etre testable
+ * independamment d'un `CompositionRoot` complet — voir test/server/errorHandler.test.ts, qui
+ * l'exerce sur une app Express minimale ad hoc (aucune route JSON reelle n'existe encore a cette
+ * etape, le webhook de paiement etant volontairement monte AVANT `express.json()`).
+ */
+export function createErrorHandler(logger: ErrorHandlerLogger): ErrorRequestHandler {
+  return (err, _req, res, _next) => {
+    if (isJsonBodyParseError(err)) {
+      res.status(400).json({ error: 'invalid_request_body' });
+      return;
+    }
+    logger.error(
+      { event: 'http.unhandled-error', error: err instanceof Error ? err.message : String(err) },
+      'Erreur HTTP inattendue',
+    );
+    res.status(500).json({ error: 'internal_error' });
+  };
+}
+
+/**
+ * Bootstrap HTTP minimal. Health check + le SEUL endpoint metier existant a ce stade (Phase 0,
+ * etape 5/13) : le webhook de confirmation de paiement (O-25.5).
+ *
+ * Le webhook est monte AVANT `express.json()` global, avec son propre `express.raw()` scope a
+ * cette seule route : la verification de signature HMAC (voir
+ * `PaymentWebhookController.ts`/`SandboxPaymentProviderAdapter.ts`) exige le corps HTTP BRUT
+ * exact, jamais une re-serialisation JSON qui pourrait differer (ordre des cles, espaces...).
+ * Express ne "retombe" jamais sur un middleware enregistre APRES une route qui a deja repondu —
+ * les autres routes futures, enregistrees apres `express.json()`, ne sont pas affectees.
  */
 export function createApp(root: CompositionRoot): Express {
   const app = express();
   app.disable('x-powered-by');
-  app.use(express.json());
+
+  app.post(
+    '/api/v1/payments/webhook',
+    express.raw({ type: '*/*', limit: '256kb' }),
+    root.payment.presentation.webhookController.handle,
+  );
+
+  app.use(express.json({ limit: '1mb' }));
 
   app.get('/health', (_req, res) => {
     res.status(200).json({ status: 'ok', now: root.clock.now().toISOString() });
   });
+
+  // Monte APRES toutes les routes (contrat Express des middlewares d'erreur) — voir
+  // `createErrorHandler` ci-dessus pour le detail de ce qu'il couvre et pourquoi.
+  app.use(createErrorHandler(root.logger));
 
   return app;
 }
@@ -20,15 +88,17 @@ export function createApp(root: CompositionRoot): Express {
 function main(): void {
   const root = buildCompositionRoot();
   const app = createApp(root);
+  root.startBackgroundJobs();
   const server = app.listen(root.env.PORT, () => {
     // eslint-disable-next-line no-console
     console.log(`apps/api ecoute sur le port ${root.env.PORT} (${root.env.NODE_ENV})`);
   });
 
-  // Arret propre (§8 exploitation) : fin des requetes en cours, fermeture des connexions.
+  // Arret propre (§8 exploitation) : fin des requetes en cours, drain des jobs de fond, puis
+  // fermeture des connexions — dans cet ordre.
   process.on('SIGTERM', () => {
     server.close(() => {
-      void root.shutdown();
+      void root.stopBackgroundJobs().then(() => root.shutdown());
     });
   });
 }

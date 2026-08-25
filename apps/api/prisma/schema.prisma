@@ -186,9 +186,17 @@ enum BillingPeriod {
   @@schema("platform")
 }
 
+/// GRACE_PERIOD/DEGRADED ajoutes a l'etape 5 (integration O-25/O-03) — extension explicitement
+/// autorisee du perimetre de l'etape 4 (voir domain/Subscription.ts pour les transitions), PAS
+/// une nouvelle machine a etats au sens d'O-25.5 (celle-ci concerne exclusivement PaymentStatus) :
+/// ce sont les etats de cycle de vie de l'ABONNEMENT decrits en prose par O-03/§6.3
+/// ("periode de grace de 7 jours" / "mode degrade pendant 30 jours"), qui n'avaient simplement
+/// jamais ete formalises en enum avant cette etape.
 enum SubscriptionStatus {
   TRIALING
   ACTIVE
+  GRACE_PERIOD
+  DEGRADED
 
   @@schema("platform")
 }
@@ -245,6 +253,11 @@ model Subscription {
   periodStartsAt     DateTime           @map("period_starts_at")
   periodEndsAt       DateTime           @map("period_ends_at")
   createdAt          DateTime           @map("created_at")
+  // Ajoutes a l'etape 5 (O-03/O-25) — horodatages du cycle grace/degrade, tous NULL tant que le
+  // statut n'a jamais quitte TRIALING/ACTIVE. Voir domain/Subscription.ts.
+  gracePeriodStartedAt           DateTime? @map("grace_period_started_at")
+  degradedModeEnteredAt          DateTime? @map("degraded_mode_entered_at")
+  degradedModeSustainedNotifiedAt DateTime? @map("degraded_mode_sustained_notified_at")
 
   @@unique([tenantId])
   @@map("Subscription")
@@ -268,6 +281,171 @@ model SubscriptionPlanChange {
   @@index([subscriptionId])
   @@index([tenantId])
   @@map("SubscriptionPlanChange")
+  @@schema("platform")
+}
+
+// =================================================================================================
+// Outbox (Phase 0, etape 5/13) — D9 (01-target-architecture.md §9.3).
+//
+// Table `platform.OutboxMessage`, HORS RLS (ADR-0001 §3.3), comme Subscription/PlanPrice/Plan
+// ci-dessus : le relais (shared-kernel/infrastructure/persistence/OutboxRelay.ts) est un
+// PROCESSUS DE NIVEAU PLATEFORME qui doit lire les messages de TOUS les tenants pour les
+// distribuer ; une RLS par tenant sur cette table serait directement incompatible avec ce role.
+// Ecrite par `shared-kernel/infrastructure/persistence/OutboxWriter.ts`, dans la MEME transaction
+// que l'agregat qui emet l'evenement (D9) — jamais par un module applicatif directement.
+// =================================================================================================
+
+enum OutboxMessageStatus {
+  PENDING
+  PROCESSING
+  PROCESSED
+  FAILED
+
+  @@schema("platform")
+}
+
+/// File d'attente Outbox generique, partagee par tous les modules (voir OutboxWriter.ts /
+/// OutboxRelay.ts). `tenant_id` NULLABLE : certains evenements de plateforme n'ont pas de portee
+/// tenant (voir `DomainEvent.tenantId: string | null`).
+model OutboxMessage {
+  id           String              @id @db.Uuid
+  eventType    String              @map("event_type")
+  eventVersion Int                 @map("event_version")
+  aggregateId  String              @map("aggregate_id")
+  tenantId     String?             @map("tenant_id") @db.Uuid
+  payload      Json
+  status       OutboxMessageStatus @default(PENDING)
+  occurredAt   DateTime            @map("occurred_at")
+  createdAt    DateTime            @default(now()) @map("created_at")
+  attempts     Int                 @default(0)
+  lockedAt     DateTime?           @map("locked_at")
+  lockedBy     String?             @map("locked_by")
+  processedAt  DateTime?           @map("processed_at")
+  lastError    String?             @map("last_error")
+
+  // Index compose sur le couple filtre par le relais (`WHERE status = ...`, `ORDER BY
+  // occurred_at`) — evite un balayage complet de la table a chaque cycle de polling.
+  @@index([status, occurredAt])
+  @@map("OutboxMessage")
+  @@schema("platform")
+}
+
+// =================================================================================================
+// Module Payment (Phase 0, etape 5/13) — Payment / PlatformInvoice, integration O-25.
+//
+// Memes principes que le module Subscription (schema "platform", HORS RLS, ADR-0001 §3.3) :
+// `Payment` et `PlatformInvoice` sont des donnees de niveau plateforme (encaissement de
+// l'abonnement de l'ETABLISSEMENT a la PLATEFORME, distinct d'O-18/paiement patient). Filtrage
+// tenant PUREMENT APPLICATIF dans chaque repository (voir infrastructure/persistence/), couvert
+// par un test d'isolation dedie (meme pattern que subscriptionRepositoryTenantIsolation.test.ts).
+//
+// Aucune contrainte FOREIGN KEY declaree vers `platform.Subscription` : choix deliberement
+// coherent avec la regle "un module possede ses propres collections, aucune requete/contrainte
+// cross-module en base" (Payment ne DOIT PAS dependre au niveau schema d'une table appartenant au
+// module Subscription) — seule une FK INTRA-module (`Payment.platformInvoiceId` ->
+// `PlatformInvoice.id`) est declaree, meme raisonnement que
+// `SubscriptionPlanChange -> Subscription` a l'etape 4.
+// =================================================================================================
+
+enum PaymentMethod {
+  MOBILE_MONEY
+  CARD
+
+  @@schema("platform")
+}
+
+/// Six valeurs EXACTES imposees par O-25.5 ("Etats reutilises tels quels de la Saga (§5/§6.3),
+/// aucune nouvelle machine a etats : PENDING/SUCCEEDED/FAILED/EXPIRED/ANNULE/RENOUVELE") —
+/// identifiants traduits en anglais (convention du depot), aucune valeur ajoutee ni retranchee.
+/// Voir domain/value-objects/PaymentStatus.ts pour la table de transitions autorisees et le
+/// commentaire sur l'usage de RENEWED (point signale a l'architecte, non totalement contraint par
+/// l'ADR).
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  EXPIRED
+  CANCELLED
+  RENEWED
+
+  @@schema("platform")
+}
+
+/// A quoi correspond ce paiement (O-25.1 : "abonnement initial + renouvellements"). `UPGRADE`
+/// reserve pour un branchement futur (voir domain/Payment.ts) — non emis par cette etape.
+enum PaymentPurpose {
+  INITIAL
+  RENEWAL
+  UPGRADE
+
+  @@schema("platform")
+}
+
+/// Minimal V1 : une facture plateforme est emise puis payee. Pas d'annulation/avoir — hors
+/// perimetre V1 (O-25.1 : remboursement d'abonnement SaaS explicitement hors V1).
+enum PlatformInvoiceStatus {
+  ISSUED
+  PAID
+
+  @@schema("platform")
+}
+
+/// Registre de ce qui est du a la plateforme pour UNE periode de facturation d'UN abonnement
+/// (voir domain/PlatformInvoice.ts). `planPriceId` : reference au `PlanPrice` REELLEMENT resolu
+/// au moment de l'emission (jamais recalcule depuis `Plan`, meme discipline que
+/// `SubscriptionPlanChange`, O-02.6). `@@unique([subscriptionId, periodStartsAt])` : empeche
+/// deux factures pour la MEME periode d'un MEME abonnement — c'est la barriere qui rend
+/// l'emission concurrente idempotente (voir application/commands/IssuePlatformInvoice.ts et le
+/// test adversarial "deux renouvellements concurrents").
+model PlatformInvoice {
+  id             String                @id @db.Uuid
+  tenantId       String                @map("tenant_id") @db.Uuid
+  subscriptionId String                @map("subscription_id") @db.Uuid
+  planPriceId    String                @map("plan_price_id") @db.Uuid
+  amount         Int
+  periodStartsAt DateTime              @map("period_starts_at")
+  periodEndsAt   DateTime              @map("period_ends_at")
+  status         PlatformInvoiceStatus
+  issuedAt       DateTime              @map("issued_at")
+  paidAt         DateTime?             @map("paid_at")
+
+  payments Payment[]
+
+  @@unique([subscriptionId, periodStartsAt])
+  @@index([tenantId])
+  @@map("PlatformInvoice")
+  @@schema("platform")
+}
+
+/// Une TENTATIVE de paiement pour une `PlatformInvoice` (voir domain/Payment.ts). Plusieurs
+/// `Payment` peuvent viser la meme facture (ex. un premier essai FAILED, un second SUCCEEDED) —
+/// c'est la facture, pas la tentative, qui porte la verite "est-ce paye" (`PlatformInvoice.status`).
+/// `providerTransactionId` UNIQUE NOT NULL : cle d'idempotence webhook imposee par O-25.5 ("
+/// Idempotence par identifiant de transaction fournisseur").
+model Payment {
+  id                    String         @id @db.Uuid
+  tenantId              String         @map("tenant_id") @db.Uuid
+  platformInvoiceId     String         @map("platform_invoice_id") @db.Uuid
+  subscriptionId        String         @map("subscription_id") @db.Uuid
+  purpose               PaymentPurpose
+  method                PaymentMethod
+  amount                Int
+  status                PaymentStatus
+  providerTransactionId String         @unique @map("provider_transaction_id")
+  initiatedAt           DateTime       @map("initiated_at")
+  confirmedAt           DateTime?      @map("confirmed_at")
+  /// Verrouillage optimiste PUREMENT technique (voir PrismaPaymentRepository.ts) : empeche un
+  /// lost-update entre le webhook de confirmation et le rapprochement periodique, qui peuvent
+  /// tous deux ecrire ce MEME Payment concurremment (ex. SUCCEEDED via webhook puis EXPIRED via
+  /// rapprochement ecrasant silencieusement le succes deja commite). N'est PAS un concept de
+  /// domaine : absent de Payment/PaymentProps, connu uniquement de l'infrastructure.
+  version               Int            @default(0)
+
+  platformInvoice PlatformInvoice @relation(fields: [platformInvoiceId], references: [id], onDelete: Restrict)
+
+  @@index([tenantId])
+  @@index([platformInvoiceId])
+  @@map("Payment")
   @@schema("platform")
 }
 

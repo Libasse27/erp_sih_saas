@@ -91,6 +91,9 @@ async function buildScenario() {
     periodStartsAt: new Date('2026-08-01T00:00:00Z'),
     periodEndsAt: new Date('2026-08-31T00:00:00Z'),
     createdAt: new Date('2026-08-01T00:00:00Z'),
+    gracePeriodStartedAt: null,
+    degradedModeEnteredAt: null,
+    degradedModeSustainedNotifiedAt: null,
   });
   await subscriptionRepository.save(subscription, tenantId);
 

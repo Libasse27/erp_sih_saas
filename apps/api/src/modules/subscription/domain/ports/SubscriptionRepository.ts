@@ -19,4 +19,16 @@ export interface SubscriptionRepository {
   findById(id: SubscriptionId, tenantId: TenantId): Promise<Subscription | null>;
 
   save(subscription: Subscription, tenantId: TenantId): Promise<void>;
+
+  /**
+   * Candidats scannes par le scheduler de renouvellement (`ProcessSubscriptionRenewals.ts`,
+   * O-25.6) : abonnements potentiellement concernes par une transition automatique a l'instant
+   * `now` — echeance atteinte (`TRIALING`/`ACTIVE` avec `periodEndsAt <= now`), grace en cours
+   * (`GRACE_PERIOD`, quelle que soit l'anciennete), ou mode degrade pas encore signale "maintenu"
+   * (`DEGRADED` avec `degradedModeSustainedNotifiedAt` NULL). Requete PLATEFORME (tous tenants,
+   * AUCUN filtrage tenant) — coherent avec l'absence de RLS sur cette table (ADR-0001 §3.3) et le
+   * role de ce scheduler : un processus de niveau plateforme, analogue au relais Outbox, jamais
+   * appele dans le contexte d'une requete HTTP tenant-scopee.
+   */
+  listSchedulerCandidates(now: Date): Promise<readonly Subscription[]>;
 }

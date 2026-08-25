@@ -1,0 +1,92 @@
+openapi: 3.1.0
+info:
+  title: SIH SaaS API — Paiement d'abonnement (O-25)
+  version: 0.1.0
+  description: >
+    Premier fichier OpenAPI de ce depot (Phase 0, etape 5/13). Documente UNIQUEMENT l'endpoint
+    HTTP existant a ce stade : la confirmation de paiement d'abonnement SaaS serveur-a-serveur
+    (O-25.5). Aucune route CRUD Payment/PlatformInvoice n'est exposee (aucun besoin identifie a
+    cette etape) — voir docs/architecture/03-open-decisions.md, O-25.
+
+servers:
+  - url: https://api.exemple.sn
+    description: Exemple d'URL de production (aucun environnement reel deploye a ce stade)
+
+paths:
+  /api/v1/payments/webhook:
+    post:
+      operationId: confirmSaaSPayment
+      tags: [Payments]
+      summary: Confirmation serveur-a-serveur d'un paiement d'abonnement SaaS (O-25.5)
+      description: >
+        Point d'entree UNIQUE de confirmation de paiement — jamais d'activation sur retour
+        frontend (O-25.5). Signature HMAC obligatoire (en-tete `X-Payment-Signature`,
+        `sha256=<hex>`) : toute notification absente de signature valide, illisible, ou portant
+        un identifiant de transaction inconnu est rejetee SILENCIEUSEMENT (toujours HTTP 200,
+        aucune information distinctive dans la reponse — evite qu'un tiers puisse sonder
+        l'existence d'un `providerTransactionId` par la reponse HTTP). Idempotent par
+        identifiant de transaction fournisseur : une meme notification recue plusieurs fois ne
+        produit jamais d'effet applicatif supplementaire.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: >
+                Format PROPRE au prestataire (traduit en interne via un Anti-Corruption Layer,
+                voir infrastructure/payment-provider/ — aucun prestataire reel choisi a ce
+                stade, adaptateur SANDBOX documente dans le code). Exemple ci-dessous au format
+                du sandbox actuellement cable.
+              properties:
+                transactionId:
+                  type: string
+                  example: sandbox_3fa85f64-5717-4562-b3fc-2c963f66afa6
+                event:
+                  type: string
+                  enum: [payment.succeeded, payment.failed]
+                  example: payment.succeeded
+                occurredAt:
+                  type: string
+                  format: date-time
+                  example: '2026-08-24T10:32:00Z'
+      parameters:
+        - name: X-Payment-Signature
+          in: header
+          required: true
+          schema:
+            type: string
+            example: sha256=9f3a1c2e...
+          description: Signature HMAC-SHA256 du corps brut exact de la requete.
+      responses:
+        '200':
+          description: >
+            Toujours renvoye, que la notification ait ete traitee, ignoree (deja traitee,
+            idempotence) ou rejetee (signature absente/invalide, payload illisible, transaction
+            inconnue) — reponse volontairement identique dans tous les cas (O-25.5, "rejet
+            silencieux, pas d'erreur qui fuite d'info"). Corps toujours vide.
+
+components:
+  schemas:
+    ProblemDetails:
+      type: object
+      description: >
+        Reserve pour les futurs endpoints CRUD de ce module (non exposes a cette etape) —
+        format RFC 9457 standard du depot, voir le system prompt de l'agent backend.
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+        code:
+          type: string
+        correlationId:
+          type: string

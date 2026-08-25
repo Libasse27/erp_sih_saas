@@ -136,6 +136,9 @@ describe('Subscription', () => {
       periodStartsAt: subscription.periodStartsAt,
       periodEndsAt: subscription.periodEndsAt,
       createdAt: subscription.createdAt,
+      gracePeriodStartedAt: subscription.gracePeriodStartedAt,
+      degradedModeEnteredAt: subscription.degradedModeEnteredAt,
+      degradedModeSustainedNotifiedAt: subscription.degradedModeSustainedNotifiedAt,
     });
 
     expect(reconstituted.pullDomainEvents()).toHaveLength(0);

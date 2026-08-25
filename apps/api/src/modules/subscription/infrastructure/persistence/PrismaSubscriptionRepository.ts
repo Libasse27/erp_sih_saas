@@ -1,5 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import { resolvePrismaClient } from '../../../../shared-kernel/infrastructure/persistence/PrismaTransactionContext.js';
+import { writeDomainEventsToOutbox } from '../../../../shared-kernel/infrastructure/persistence/OutboxWriter.js';
 import { assertValid } from '../../../../shared-kernel/infrastructure/persistence/assertValid.js';
 import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantId.js';
 import { Subscription } from '../../domain/Subscription.js';
@@ -21,6 +22,9 @@ interface SubscriptionRow {
   periodStartsAt: Date;
   periodEndsAt: Date;
   createdAt: Date;
+  gracePeriodStartedAt: Date | null;
+  degradedModeEnteredAt: Date | null;
+  degradedModeSustainedNotifiedAt: Date | null;
 }
 
 /**
@@ -75,14 +79,43 @@ export class PrismaSubscriptionRepository implements SubscriptionRepository {
         periodStartsAt: subscription.periodStartsAt,
         periodEndsAt: subscription.periodEndsAt,
         createdAt: subscription.createdAt,
+        gracePeriodStartedAt: subscription.gracePeriodStartedAt,
+        degradedModeEnteredAt: subscription.degradedModeEnteredAt,
+        degradedModeSustainedNotifiedAt: subscription.degradedModeSustainedNotifiedAt,
       },
       update: {
         planId: subscription.planId.toString(),
         currentPlanPriceId: subscription.currentPlanPriceId.toString(),
         status: subscription.status,
         trialEndsAt: subscription.trialEndsAt,
+        periodStartsAt: subscription.periodStartsAt,
+        periodEndsAt: subscription.periodEndsAt,
+        gracePeriodStartedAt: subscription.gracePeriodStartedAt,
+        degradedModeEnteredAt: subscription.degradedModeEnteredAt,
+        degradedModeSustainedNotifiedAt: subscription.degradedModeSustainedNotifiedAt,
       },
     });
+
+    // Outbox (D9) : ecrit DANS LA MEME TRANSACTION que la ligne ci-dessus (meme `client`
+    // resolu via `resolvePrismaClient`). Active ici, a l'etape 5, le relais pour TOUS les
+    // evenements de ce module (y compris ceux de l'etape 4, SubscriptionStarted/
+    // SubscriptionPlanChanged, jusqu'ici accumules sur l'agregat mais jamais persistes nulle
+    // part — voir shared-kernel/infrastructure/persistence/OutboxWriter.ts).
+    await writeDomainEventsToOutbox(client, subscription.pullDomainEvents());
+  }
+
+  async listSchedulerCandidates(now: Date): Promise<readonly Subscription[]> {
+    const client = resolvePrismaClient(this.prisma);
+    const rows = await client.subscription.findMany({
+      where: {
+        OR: [
+          { status: { in: ['TRIALING', 'ACTIVE'] }, periodEndsAt: { lte: now } },
+          { status: 'GRACE_PERIOD' },
+          { status: 'DEGRADED', degradedModeSustainedNotifiedAt: null },
+        ],
+      },
+    });
+    return rows.map((row) => this.toDomain(row));
   }
 
   private toDomain(row: SubscriptionRow): Subscription {
@@ -100,6 +133,9 @@ export class PrismaSubscriptionRepository implements SubscriptionRepository {
       periodStartsAt: row.periodStartsAt,
       periodEndsAt: row.periodEndsAt,
       createdAt: row.createdAt,
+      gracePeriodStartedAt: row.gracePeriodStartedAt,
+      degradedModeEnteredAt: row.degradedModeEnteredAt,
+      degradedModeSustainedNotifiedAt: row.degradedModeSustainedNotifiedAt,
     });
   }
 }

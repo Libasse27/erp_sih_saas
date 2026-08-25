@@ -1,17 +1,23 @@
 /**
- * Statut de cycle de vie minimal de l'abonnement (Phase 0, etape 4/13). Volontairement reduit a
- * ce qui est necessaire pour representer un abonnement actif et son historique de changements de
- * forfait — meme choix de minimalisme que `FacilityStatus` (module tenant/, etape 3) : aucun etat
- * pilote par la politique d'impaye (O-03 : grace, mode degrade...) n'est invente ici, ce sera la
- * responsabilite d'une etape ulterieure (Saga provisioning + impaye, etape 10), qui composera
- * avec ce statut sans le remplacer.
+ * Statut de cycle de vie de l'abonnement. Etendu a l'etape 5/13 (integration O-25/O-03) —
+ * initialement minimal a l'etape 4 (`TRIALING`/`ACTIVE` seuls), le passage a `GRACE_PERIOD`/
+ * `DEGRADED` fait desormais partie du perimetre explicitement confie a cette etape ("methodes/
+ * transitions necessaires pour reagir aux nouveaux evenements — grace, mode degrade,
+ * reactivation").
  *
  * - `TRIALING` : essai gratuit (O-02.5), forfait STANDARD, `trialEndsAt` renseigne, aucun moyen
  *   de paiement requis a l'activation.
- * - `ACTIVE` : abonnement payant en cours (paiement reel hors perimetre, etape 5 — le passage de
- *   `TRIALING` a `ACTIVE` n'est donc pas implemente par ce module, seul l'etat existe).
+ * - `ACTIVE` : abonnement payant en cours, periode couverte par un paiement confirme.
+ * - `GRACE_PERIOD` : echeance depassee (`periodEndsAt`), AUCUN paiement confirme pour la nouvelle
+ *   periode — periode de grace de 7 jours (O-03.2). Continuite des soins garantie, aucune donnee
+ *   supprimee (O-03.1).
+ * - `DEGRADED` : grace expiree sans regularisation — mode degrade (O-03.2/O-03.3), fonctions
+ *   commerciales/administratives non essentielles restreintes UNIQUEMENT (jamais l'acces
+ *   clinique — hors perimetre de ce module, qui ne connait et ne doit connaitre que ce statut,
+ *   pas les regles d'acces elles-memes). Maintenu indefiniment au-dela de J+37 (O-03.3), sans
+ *   transition ulterieure automatique — seul un paiement confirme en sort (`reactivate()`).
  */
-export const SUBSCRIPTION_STATUSES = ['TRIALING', 'ACTIVE'] as const;
+export const SUBSCRIPTION_STATUSES = ['TRIALING', 'ACTIVE', 'GRACE_PERIOD', 'DEGRADED'] as const;
 
 export type SubscriptionStatus = (typeof SUBSCRIPTION_STATUSES)[number];
 
