@@ -12,3 +12,4 @@ coverage/
 !.vscode/extensions.json
 pnpm-lock.yaml.bak
 docker-compose.override.yml
+.claude/
