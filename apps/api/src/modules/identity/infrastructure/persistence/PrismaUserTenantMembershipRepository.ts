@@ -10,6 +10,7 @@ import { UserAccountId } from '../../domain/value-objects/UserAccountId.js';
 import { UserTenantMembershipId } from '../../domain/value-objects/UserTenantMembershipId.js';
 import { assertValid } from '../../../../shared-kernel/infrastructure/persistence/assertValid.js';
 import { resolvePrismaClient } from '../../../../shared-kernel/infrastructure/persistence/PrismaTransactionContext.js';
+import { writeDomainEventsToOutbox } from '../../../../shared-kernel/infrastructure/persistence/OutboxWriter.js';
 
 interface MembershipRow {
   id: string;
@@ -127,6 +128,14 @@ export class PrismaUserTenantMembershipRepository implements UserTenantMembershi
         })),
       });
     }
+
+    // Outbox (D9, etape 6/13) : ecrit DANS LA MEME TRANSACTION que les ecritures ci-dessus (meme
+    // `client` resolu via `resolvePrismaClient`) — tous les appelants de `save()`
+    // (GrantMembershipHandler, RevokeMembershipHandler...) executent deja sous
+    // `unitOfWork.withTransaction`. Active ici le relais pour `MembershipGranted`/
+    // `MembershipRevoked`/`MembershipRoleAssigned`/`MembershipRoleUnassigned`, jusqu'ici accumules
+    // sur l'agregat mais jamais persistes nulle part.
+    await writeDomainEventsToOutbox(client, membership.pullDomainEvents());
   }
 
   private toDomain(row: MembershipRow): UserTenantMembership {

@@ -6,6 +6,7 @@ import type { HealthFacilityRepository } from '../../domain/ports/HealthFacility
 import { FacilityName } from '../../domain/value-objects/FacilityName.js';
 import type { FacilityStatus } from '../../domain/value-objects/FacilityStatus.js';
 import { assertValid } from '../../../../shared-kernel/infrastructure/persistence/assertValid.js';
+import { writeDomainEventsToOutbox } from '../../../../shared-kernel/infrastructure/persistence/OutboxWriter.js';
 
 interface HealthFacilityRow {
   id: string;
@@ -61,6 +62,12 @@ export class PrismaHealthFacilityRepository implements HealthFacilityRepository 
         status: facility.status,
       },
     });
+
+    // Outbox (D9, etape 6/13) : ecrit DANS LA MEME TRANSACTION que la ligne ci-dessus (meme
+    // `client` resolu via `resolvePrismaClient`) — CreateHealthFacilityHandler, seul appelant de
+    // `save()`, execute deja sous `unitOfWork.withTransaction`. Active ici le relais pour
+    // `HealthFacilityCreated`, jusqu'ici accumule sur l'agregat mais jamais persiste nulle part.
+    await writeDomainEventsToOutbox(client, facility.pullDomainEvents());
   }
 
   private toDomain(row: HealthFacilityRow): HealthFacility {

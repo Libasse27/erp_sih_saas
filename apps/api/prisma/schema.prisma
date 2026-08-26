@@ -324,14 +324,22 @@ model SubscriptionPlanUpgradeRequest {
 }
 
 // =================================================================================================
-// Outbox (Phase 0, etape 5/13) — D9 (01-target-architecture.md §9.3).
+// Outbox (Phase 0, etape 5/13, relais migre vers BullMQ a l'etape 6/13) — D9
+// (01-target-architecture.md §9.3, ADR-0004).
 //
 // Table `platform.OutboxMessage`, HORS RLS (ADR-0001 §3.3), comme Subscription/PlanPrice/Plan
-// ci-dessus : le relais (shared-kernel/infrastructure/persistence/OutboxRelay.ts) est un
-// PROCESSUS DE NIVEAU PLATEFORME qui doit lire les messages de TOUS les tenants pour les
-// distribuer ; une RLS par tenant sur cette table serait directement incompatible avec ce role.
-// Ecrite par `shared-kernel/infrastructure/persistence/OutboxWriter.ts`, dans la MEME transaction
-// que l'agregat qui emet l'evenement (D9) — jamais par un module applicatif directement.
+// ci-dessus : le relais (shared-kernel/infrastructure/persistence/OutboxRelay.ts +
+// shared-kernel/infrastructure/queue/OutboxWorker.ts, ADR-0004) est un PROCESSUS DE NIVEAU
+// PLATEFORME qui doit lire les messages de TOUS les tenants pour les distribuer ; une RLS par
+// tenant sur cette table serait directement incompatible avec ce role. Ecrite par
+// `shared-kernel/infrastructure/persistence/OutboxWriter.ts`, dans la MEME transaction que
+// l'agregat qui emet l'evenement (D9) — jamais par un module applicatif directement.
+//
+// Reste la source de verite TRANSACTIONNELLE et le mecanisme de reprise apres crash /
+// dead-letter (`status`, `attempts`, `locked_at`/`locked_by`) : BullMQ (Redis) ne fait QUE
+// distribuer la CHARGE de traitement a un ou plusieurs workers concurrents une fois qu'une ligne
+// a ete reclamee ici — voir le commentaire de tete de OutboxRelay.ts/OutboxWorker.ts pour le
+// detail de cette repartition des responsabilites.
 // =================================================================================================
 
 enum OutboxMessageStatus {
@@ -362,10 +370,43 @@ model OutboxMessage {
   processedAt  DateTime?           @map("processed_at")
   lastError    String?             @map("last_error")
 
+  consumedBy OutboxConsumedEvent[]
+
   // Index compose sur le couple filtre par le relais (`WHERE status = ...`, `ORDER BY
   // occurred_at`) — evite un balayage complet de la table a chaque cycle de polling.
   @@index([status, occurredAt])
   @@map("OutboxMessage")
+  @@schema("platform")
+}
+
+/// Registre GENERIQUE d'idempotence consommateur (etape 6/13, D9 : "tout consommateur est
+/// idempotent -> cle d'idempotence + registre des evenements traites"). Une ligne = "CE handler a
+/// deja applique les effets de CE message Outbox" — cle primaire composite
+/// `(outbox_message_id, handler_name)` : le MEME message peut etre traite par PLUSIEURS handlers
+/// distincts (voir composition-root.ts, `payment.payment.saas-payment-succeeded` a trois
+/// consommateurs), chacun devant etre dedupliqué INDEPENDAMMENT des autres.
+///
+/// Ecrite par le wrapper generique `shared-kernel/infrastructure/persistence/
+/// OutboxIdempotencyGuard.ts`, seul point d'ecriture — jamais par un module applicatif
+/// directement (meme discipline que OutboxMessage/OutboxWriter.ts ci-dessus). Vecue comme un
+/// registre PUREMENT TECHNIQUE de premiere ligne de defense : les contraintes UNIQUE metier
+/// existantes (`PlatformInvoice_subscription_id_purpose_period_starts_at_key`,
+/// `Payment_provider_transaction_id_key`, `version` optimiste...) restent en place en defense
+/// supplementaire, mais ne sont plus la SEULE garantie d'idempotence, desormais uniforme sur tous
+/// les handlers sans exception.
+///
+/// `handler_name` est une chaine STABLE choisie au cablage (composition-root.ts) — PAS le nom de
+/// la fonction JS (mangled/anonyme pour les handlers produits par une factory `createXxx...`) :
+/// voir le commentaire de tete de OutboxIdempotencyGuard.ts pour la convention de nommage.
+model OutboxConsumedEvent {
+  outboxMessageId String   @map("outbox_message_id") @db.Uuid
+  handlerName     String   @map("handler_name")
+  processedAt     DateTime @map("processed_at")
+
+  outboxMessage OutboxMessage @relation(fields: [outboxMessageId], references: [id], onDelete: Cascade)
+
+  @@id([outboxMessageId, handlerName])
+  @@map("OutboxConsumedEvent")
   @@schema("platform")
 }
 

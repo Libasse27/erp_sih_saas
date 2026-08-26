@@ -57,7 +57,6 @@ export class UserAccount extends AggregateRoot<UserAccountId> {
     account.addDomainEvent(
       UserAccountCreated.create({
         userAccountId: id.toString(),
-        email: params.email.value,
         clock: params.clock,
         idGenerator: params.idGenerator,
       }),

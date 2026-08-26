@@ -22,6 +22,15 @@ interface RoleRow {
  * que soit le contexte de session (voir politique RLS `system_role_catalog_read`). Les roles
  * personnalises sont tenant-scoped ; `findByIds` filtre explicitement sur `(tenantId OU NULL)`
  * en plus du RLS (couche 3, ADR-0001 §3.2).
+ *
+ * PAS d'appel a `writeDomainEventsToOutbox` ici (etape 6/13) : `Role` (domain/Role.ts) etend
+ * `Entity`, PAS `AggregateRoot` — il n'expose aucune methode `pullDomainEvents()` et n'emet
+ * structurellement aucun `DomainEvent` (aucune classe `RoleCreated`/`RoleUpdated` n'existe sous
+ * domain/events/). Ce n'est pas un oubli de cette passe : il n'y a rien a ecrire dans l'Outbox
+ * pour cet agregat en l'etat actuel du domaine. Si un futur besoin fonctionnel introduit un
+ * evenement de domaine sur `Role`, il faudra d'abord le faire etendre `AggregateRoot` (comme
+ * `UserAccount`/`UserTenantMembership`/`HealthFacility`) avant de brancher ce repository de la
+ * meme maniere.
  */
 export class PrismaRoleRepository implements RoleRepository {
   constructor(private readonly prisma: PrismaClient) {}

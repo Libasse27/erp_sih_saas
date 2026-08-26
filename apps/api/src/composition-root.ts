@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { Redis } from 'ioredis';
+import { Queue } from 'bullmq';
 import type { Clock } from './shared-kernel/domain/ports/Clock.js';
 import type { IdGenerator } from './shared-kernel/domain/ports/IdGenerator.js';
 import type { TenantId } from './shared-kernel/domain/value-objects/TenantId.js';
@@ -7,7 +8,11 @@ import { SystemClock } from './shared-kernel/infrastructure/SystemClock.js';
 import { UuidGenerator } from './shared-kernel/infrastructure/UuidGenerator.js';
 import { ConsoleStructuredLogger } from './shared-kernel/infrastructure/ConsoleStructuredLogger.js';
 import { relayOutboxOnce } from './shared-kernel/infrastructure/persistence/OutboxRelay.js';
+import { withOutboxIdempotency } from './shared-kernel/infrastructure/persistence/OutboxIdempotencyGuard.js';
 import { startPeriodicJob, type PeriodicJobHandle } from './shared-kernel/infrastructure/persistence/PeriodicJobRunner.js';
+import { createOutboxQueueConnection } from './shared-kernel/infrastructure/queue/OutboxQueueConnection.js';
+import { createOutboxWorker } from './shared-kernel/infrastructure/queue/OutboxWorker.js';
+import { OUTBOX_QUEUE_NAME, type OutboxJobData } from './shared-kernel/infrastructure/queue/OutboxJob.js';
 import type { OutboxEventHandler } from './shared-kernel/application/OutboxEventHandler.js';
 import { loadEnv, type Env } from './config/env.js';
 import { buildIdentityModule, type IdentityModule } from './modules/identity/infrastructure/IdentityModule.js';
@@ -116,27 +121,81 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
   // meme raisonnement que `TenantModuleBackedAccessChecker` ci-dessus). TROIS consommateurs pour
   // `SaaSPaymentSucceeded` (module `payment` -> `payment` + `subscription`), un pour
   // `SubscriptionRenewalDue` et un pour `SubscriptionUpgradeRequested` (module `subscription` ->
-  // `payment`) — voir le catalogue d'evenements O-25.6 et l'ADR-0003.
+  // `payment`) — voir le catalogue d'evenements O-25.6, l'ADR-0003 et docs/domain/events.md.
   //
   // Le routage reste un simple `eventType -> handlers[]` : les TROIS consommateurs de
   // `SaaSPaymentSucceeded` tournent sur CHAQUE message et se filtrent EUX-MEMES sur `purpose`
   // (`reactivate...` ignore les upgrades, `applyPlanUpgrade...` ne traite qu'eux). Aiguiller ici
   // sur le contenu du payload dupliquerait cette regle metier hors des modules qui la portent.
+  //
+  // CHAQUE handler est decore par `withOutboxIdempotency` (etape 6/13, D9 : "tout consommateur est
+  // idempotent -> cle d'idempotence + registre des evenements traites") AVANT d'entrer dans cette
+  // map : c'est ICI, et nulle part ailleurs, que cette garantie de premier niveau est appliquee
+  // UNIFORMEMENT a tous les handlers, sans qu'aucun module n'ait a s'en soucier lui-meme (voir
+  // OutboxIdempotencyGuard.ts). `handlerName` est une chaine STABLE choisie ici (pas le nom de la
+  // fonction JS, qui serait anonyme pour tout handler produit par une factory `createXxx...`) —
+  // convention `<module>.<service>`, a reprendre pour tout futur consommateur (Identity/Tenant
+  // n'en ont aucun a ce jour, voir docs/domain/events.md).
   const outboxHandlers = new Map<string, readonly OutboxEventHandler[]>([
     [
       'payment.payment.saas-payment-succeeded',
       [
-        payment.outboxHandlers.markPlatformInvoicePaidOnPaymentSucceeded,
-        subscription.outboxHandlers.reactivateSubscriptionOnPaymentSucceeded,
-        subscription.outboxHandlers.applyPlanUpgradeOnPaymentSucceeded,
+        withOutboxIdempotency(
+          prisma,
+          'payment.markPlatformInvoicePaidOnPaymentSucceeded',
+          payment.outboxHandlers.markPlatformInvoicePaidOnPaymentSucceeded,
+        ),
+        withOutboxIdempotency(
+          prisma,
+          'subscription.reactivateSubscriptionOnPaymentSucceeded',
+          subscription.outboxHandlers.reactivateSubscriptionOnPaymentSucceeded,
+        ),
+        withOutboxIdempotency(
+          prisma,
+          'subscription.applyPlanUpgradeOnPaymentSucceeded',
+          subscription.outboxHandlers.applyPlanUpgradeOnPaymentSucceeded,
+        ),
       ],
     ],
-    ['subscription.subscription.renewal-due', [payment.outboxHandlers.issuePlatformInvoiceOnRenewalDue]],
+    [
+      'subscription.subscription.renewal-due',
+      [
+        withOutboxIdempotency(
+          prisma,
+          'payment.issuePlatformInvoiceOnRenewalDue',
+          payment.outboxHandlers.issuePlatformInvoiceOnRenewalDue,
+        ),
+      ],
+    ],
     [
       'subscription.subscription.upgrade-requested',
-      [payment.outboxHandlers.issuePlatformInvoiceOnUpgradeRequested],
+      [
+        withOutboxIdempotency(
+          prisma,
+          'payment.issuePlatformInvoiceOnUpgradeRequested',
+          payment.outboxHandlers.issuePlatformInvoiceOnUpgradeRequested,
+        ),
+      ],
     ],
   ]);
+
+  // Connexion Redis DEDIEE a BullMQ (voir OutboxQueueConnection.ts — `maxRetriesPerRequest: null`
+  // exige par BullMQ, incompatible avec la connexion `redis` ci-dessus, partagee
+  // sessions/cache). Queue (producteur, utilise par `relayOutboxOnce`) et Worker (consommateur,
+  // `OutboxWorker.ts`) partagent la MEME connexion — pattern standard BullMQ.
+  const outboxQueueConnection = createOutboxQueueConnection(env.REDIS_URL);
+  const outboxQueue = new Queue<OutboxJobData>(OUTBOX_QUEUE_NAME, { connection: outboxQueueConnection });
+  // UNE SEULE valeur, partagee par le relais (colonne `locked_by`) ET le worker (verification
+  // d'integrite, voir OutboxWorker.ts) — jamais deux calculs independants de `outbox-${pid}` qui
+  // pourraient diverger si ce fichier evoluait.
+  const outboxWorkerId = `outbox-${process.pid}`;
+  const outboxWorker = createOutboxWorker({
+    prisma,
+    handlers: outboxHandlers,
+    connection: outboxQueueConnection,
+    workerId: outboxWorkerId,
+    logger,
+  });
 
   let outboxRelayJob: PeriodicJobHandle | undefined;
   let subscriptionRenewalJob: PeriodicJobHandle | undefined;
@@ -154,11 +213,22 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
     subscription,
     payment,
     startBackgroundJobs(): void {
+      // `autorun: false` a la construction (voir OutboxWorker.ts) : demarre explicitement ici,
+      // jamais avant — meme discipline que les jobs periodiques ci-dessous (rien ne tourne avant
+      // cet appel unique, voir server.ts). `run()` ne resout qu'a la fermeture du worker
+      // (`stopBackgroundJobs`) : jamais attendu ici, fire-and-forget avec log d'erreur explicite
+      // pour ne jamais laisser un rejet non gere s'echapper.
+      void outboxWorker.run().catch((error: unknown) => {
+        logger.error(
+          { event: 'outbox.worker.crashed', error: error instanceof Error ? error.message : String(error) },
+          'Le worker BullMQ Outbox s_est arrete de maniere inattendue',
+        );
+      });
       outboxRelayJob = startPeriodicJob({
         name: 'outbox-relay',
         intervalMs: 5_000,
         run: async () => {
-          await relayOutboxOnce({ prisma, handlers: outboxHandlers, workerId: `outbox-${process.pid}`, logger });
+          await relayOutboxOnce({ prisma, queue: outboxQueue, workerId: outboxWorkerId, logger });
         },
         logger,
       });
@@ -172,9 +242,15 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
       });
     },
     async stopBackgroundJobs(): Promise<void> {
+      // Ordre : stopper la DECOUVERTE (plus aucun nouveau job enfile) avant de fermer le WORKER
+      // (qui attend la fin des jobs deja en cours, §8 exploitation) — jamais l'inverse, qui
+      // laisserait le worker fermer pendant qu'un cycle de decouverte tente encore d'enfiler.
       await Promise.all([outboxRelayJob?.stop(), subscriptionRenewalJob?.stop(), paymentReconciliationJob?.stop()]);
+      await outboxWorker.close();
     },
     async shutdown(): Promise<void> {
+      await outboxQueue.close();
+      outboxQueueConnection.disconnect();
       await prisma.$disconnect();
       redis.disconnect();
     },

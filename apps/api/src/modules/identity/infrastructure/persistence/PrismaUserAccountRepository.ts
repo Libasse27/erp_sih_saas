@@ -7,6 +7,7 @@ import { UserAccountId } from '../../domain/value-objects/UserAccountId.js';
 import type { PlatformRole } from '../../domain/value-objects/PlatformRole.js';
 import { assertValid } from '../../../../shared-kernel/infrastructure/persistence/assertValid.js';
 import { resolvePrismaClient } from '../../../../shared-kernel/infrastructure/persistence/PrismaTransactionContext.js';
+import { writeDomainEventsToOutbox } from '../../../../shared-kernel/infrastructure/persistence/OutboxWriter.js';
 
 interface UserAccountRow {
   id: string;
@@ -49,6 +50,12 @@ export class PrismaUserAccountRepository implements UserAccountRepository {
         platformRole: account.platformRole,
       },
     });
+
+    // Outbox (D9, etape 6/13) : ecrit DANS LA MEME TRANSACTION que la ligne ci-dessus (meme
+    // `client` resolu via `resolvePrismaClient`) — voir CreateUserAccountHandler, seul appelant de
+    // `save()`, toujours execute sous `unitOfWork.withTransaction`. Active ici le relais pour
+    // `UserAccountCreated`, jusqu'ici accumule sur l'agregat mais jamais persiste nulle part.
+    await writeDomainEventsToOutbox(client, account.pullDomainEvents());
   }
 
   private toDomain(row: UserAccountRow): UserAccount {

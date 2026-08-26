@@ -104,3 +104,68 @@ describe('ADR-0001 — garde-fou generique : toute table du schema public a tena
     expect(await hasActiveRlsPolicy('HealthFacility')).toBe(true);
   });
 });
+
+/**
+ * Garde-fou MIROIR du precedent (revue de securite, etape 6/13) : la ou le garde-fou ci-dessus
+ * impose RLS a toute table de `public`, celui-ci impose qu'AUCUNE table de `platform` ne porte
+ * de RLS, ET que la liste des tables de ce schema soit une LISTE BLANCHE explicite — toute
+ * nouvelle table `platform` doit etre une decision CONSCIENTE (ajoutee ici avec une justification,
+ * voir schema.prisma) plutot qu'un defaut silencieux qui echapperait a la fois a ce garde-fou et
+ * a celui de `public` (une table qui n'est dans AUCUNE des deux listes ne serait testee nulle
+ * part).
+ */
+describe('ADR-0001 §3.3 — garde-fou generique : toute table du schema platform hors RLS est une liste blanche consciente', () => {
+  let client: Client;
+
+  // Chaque entree correspond a une decision documentee dans schema.prisma (section "Module
+  // Payment"/"Module Subscription"/Outbox) : donnees de niveau PLATEFORME, filtrage tenant
+  // PUREMENT APPLICATIF (voir les repositories Prisma correspondants), jamais par RLS.
+  const PLATFORM_TABLES_WITHOUT_RLS = new Set([
+    'UserAccount',
+    'Permission',
+    'Plan',
+    'PlanPrice',
+    'Subscription',
+    'SubscriptionPlanChange',
+    'SubscriptionPlanUpgradeRequest',
+    'OutboxMessage',
+    'OutboxConsumedEvent',
+    'Payment',
+    'PlatformInvoice',
+  ]);
+
+  beforeAll(async () => {
+    client = await createRawPgClient();
+  });
+
+  afterAll(async () => {
+    await client.end();
+  });
+
+  async function listPlatformTables(): Promise<string[]> {
+    const result = await client.query<{ tablename: string }>(
+      `SELECT tablename FROM pg_tables WHERE schemaname = 'platform' AND tablename NOT LIKE '\\_prisma%'`,
+    );
+    return result.rows.map((row) => row.tablename);
+  }
+
+  it("la liste des tables du schema platform correspond EXACTEMENT a la liste blanche documentee (toute nouvelle table est une decision consciente, jamais un defaut silencieux)", async () => {
+    const actual = new Set(await listPlatformTables());
+
+    const undocumented = [...actual].filter((table) => !PLATFORM_TABLES_WITHOUT_RLS.has(table));
+    expect(undocumented).toEqual([]);
+
+    const missing = [...PLATFORM_TABLES_WITHOUT_RLS].filter((table) => !actual.has(table));
+    expect(missing).toEqual([]);
+  });
+
+  it('aucune table du schema platform ne porte de politique RLS active (ADR-0001 §3.3 : hors RLS par construction)', async () => {
+    for (const table of PLATFORM_TABLES_WITHOUT_RLS) {
+      const result = await client.query<{ relforcerowsecurity: boolean }>(
+        `SELECT relforcerowsecurity FROM pg_class WHERE relname = $1 AND relnamespace = 'platform'::regnamespace`,
+        [table],
+      );
+      expect(result.rows[0]?.relforcerowsecurity ?? false).toBe(false);
+    }
+  });
+});
