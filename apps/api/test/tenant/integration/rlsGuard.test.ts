@@ -132,6 +132,16 @@ describe('ADR-0001 §3.3 — garde-fou generique : toute table du schema platfor
     'OutboxConsumedEvent',
     'Payment',
     'PlatformInvoice',
+    // Etape 7/13 (ADR-0005 §1) : MFA lie a UserAccount par identifiant uniquement — concept
+    // d'identite GLOBALE, jamais tenant-scoped (un SUPER_ADMIN, sans tenant, y est soumis au
+    // meme titre qu'un utilisateur d'etablissement).
+    'MfaEnrollment',
+    'MfaRecoveryCode',
+    // Etape 7/13 (ADR-0005 §5) : un evenement MFA en contexte PLATFORM n'a pas de tenant ; une
+    // politique RLS refuserait purement et simplement l'insertion d'une ligne sans
+    // app.tenant_id positionne, rendant le journal muet sur le role le plus sensible de la
+    // plateforme. Filtrage tenant PUREMENT APPLICATIF (voir auditEntryTenantIsolation.test.ts).
+    'AuditEntry',
   ]);
 
   beforeAll(async () => {

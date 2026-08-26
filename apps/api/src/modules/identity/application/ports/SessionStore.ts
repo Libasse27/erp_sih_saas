@@ -3,12 +3,22 @@
  * volontairement generique pour rester extensible sans reecriture vers l'etape ulterieure
  * "Sessions avancees" (expiration differenciee par categorie O-06, refresh-token rotation) —
  * cette etape n'implemente que la creation/validation/fermeture (2.4/2.5).
+ *
+ * `mfaSatisfiedAt` ajoute a l'etape 7/13 (ADR-0005 §4) : horodatage ISO de la DERNIERE
+ * verification reussie du second facteur pour CETTE session precise (jamais heritee d'une
+ * session precedente, voir ADR-0005 §4 dernier paragraphe : un changement de contexte
+ * "redemande systematiquement le second facteur"). `null` quand le MFA n'a jamais ete requis
+ * pour ouvrir cette session (branche "false, non" de la table de decision) ou quand une session
+ * `PLATFORM` vient d'etre emise sans challenge (ne devrait pas arriver, `requiresMfa` y est
+ * toujours `true`, mais le type reste honnete : l'emission initiale precede toujours le
+ * challenge).
  */
 export interface PlatformSessionContext {
   readonly sessionId: string;
   readonly kind: 'PLATFORM';
   readonly userId: string;
   readonly requiresMfa: true;
+  readonly mfaSatisfiedAt: string | null;
   readonly issuedAt: string;
 }
 
@@ -21,10 +31,31 @@ export interface TenantSessionContext {
   readonly roleCodes: readonly string[];
   readonly permissionCodes: readonly string[];
   readonly requiresMfa: boolean;
+  readonly mfaSatisfiedAt: string | null;
   readonly issuedAt: string;
 }
 
-export type SessionContext = PlatformSessionContext | TenantSessionContext;
+/**
+ * Troisieme variante de l'union (ADR-0005 §4) : porte l'utilisateur et l'INTENTION deja validee
+ * serveur, mais NI `permissionCodes`, NI `roleCodes` exploitables, NI `membershipId`. Le blocage
+ * n'est donc pas une verification qu'un developpeur pourrait oublier : il est STRUCTUREL — il
+ * n'existe aucune permission a fuir dans cet objet. `auditRoleCodes` n'est PAS un moyen
+ * d'autorisation (jamais lu par `ServerContextResolver`) : il sert uniquement a enrichir les
+ * entrees `AuditEntry` d'un contournement tente (ADR-0005 §4/§6), sans reintroduire de
+ * `permissionCodes` exploitable.
+ */
+export interface MfaPendingSessionContext {
+  readonly sessionId: string;
+  readonly kind: 'MFA_PENDING';
+  readonly userId: string;
+  readonly intent: { readonly kind: 'PLATFORM' } | { readonly kind: 'TENANT'; readonly tenantId: string };
+  readonly reason: 'CHALLENGE_REQUIRED' | 'ENROLLMENT_REQUIRED';
+  readonly auditRoleCodes: readonly string[];
+  readonly issuedAt: string;
+  readonly expiresAt: string;
+}
+
+export type SessionContext = PlatformSessionContext | TenantSessionContext | MfaPendingSessionContext;
 
 /**
  * Port de stockage de session. Le changement d'etablissement (O-05) doit fermer le contexte
@@ -41,4 +72,12 @@ export interface SessionStore {
    * revocation, O-05 : "invalide les contextes de session deja ouverts pour ce membership").
    */
   deleteAllForMembership(membershipId: string): Promise<void>;
+  /**
+   * Invalide TOUS les contextes de session ouverts pour un utilisateur donne, tous tenants et
+   * contextes confondus (ADR-0005, `ForceMfaReEnrollment` : un ré-enrolement force doit couper
+   * immediatement tout acces deja ouvert avec l'ancien facteur, symetrique de
+   * `deleteAllForMembership` mais a l'echelle de l'utilisateur entier plutot que d'un seul
+   * membership).
+   */
+  deleteAllForUser(userId: string): Promise<void>;
 }

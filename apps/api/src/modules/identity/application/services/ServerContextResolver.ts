@@ -1,6 +1,9 @@
 import { Result } from '../../../../shared-kernel/domain/Result.js';
 import type { UnitOfWorkContext } from '../../../../shared-kernel/application/UnitOfWork.js';
 import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantId.js';
+import { MFA_PENDING_SESSION_WINDOW_SECONDS } from '../../domain/MfaTuning.js';
+import type { AuditTrail } from '../ports/AuditTrail.js';
+import type { MfaBypassAttemptGuard } from '../ports/MfaBypassAttemptGuard.js';
 import type { PlatformSessionContext, SessionStore, TenantSessionContext } from '../ports/SessionStore.js';
 
 export type ServerContext =
@@ -12,7 +15,7 @@ export type ServerContext =
       readonly session: TenantSessionContext;
     };
 
-export type ResolveServerContextError = 'SESSION_NOT_FOUND';
+export type ResolveServerContextError = 'SESSION_NOT_FOUND' | 'MFA_REQUIRED';
 
 /**
  * Resout le contexte serveur (`tenantId`, `actorUserId`) a partir d'un `sessionId` porte par la
@@ -37,11 +40,27 @@ export type ResolveServerContextError = 'SESSION_NOT_FOUND';
  *   depuis l'etape Identity (concu des le depart pour etre reutilise par tous les modules — voir
  *   commentaire sur `UnitOfWorkContext`), donc aucun nouveau port cross-module n'est necessaire
  *   dans ce sens (Identity -> shared-kernel est toujours autorise).
+ *
+ * ETAPE 7/13 (ADR-0005 §4) : une session `MFA_PENDING` ne produit JAMAIS de `ServerContext` — ni
+ * `PLATFORM` ni `TENANT`. `Result.failure('MFA_REQUIRED')` est retourne AVANT toute construction
+ * d'objet porteur de tenant/acteur : aucun `UnitOfWorkContext`, donc AUCUNE transaction ne s'ouvre
+ * jamais sous une session en attente de second facteur (verifie par
+ * `test/identity/integration/mfaSessionGate.test.ts`). La tentative est journalisee
+ * (`MFA_BYPASS_ATTEMPTED`/`DENIED`), dedupliquee par session via `MfaBypassAttemptGuard` (Redis
+ * `SET NX EX`, meme fenetre que la session `MFA_PENDING`) pour borner le volume d'entrees d'audit
+ * en cas de scan automatise repete sur le meme `sessionId`.
  */
 export class ServerContextResolver {
-  constructor(private readonly sessionStore: SessionStore) {}
+  constructor(
+    private readonly sessionStore: SessionStore,
+    private readonly bypassAttemptGuard: MfaBypassAttemptGuard,
+    private readonly auditTrail: AuditTrail,
+  ) {}
 
-  async resolve(sessionId: string): Promise<Result<ServerContext, ResolveServerContextError>> {
+  async resolve(
+    sessionId: string,
+    correlationId: string | null = null,
+  ): Promise<Result<ServerContext, ResolveServerContextError>> {
     const session = await this.sessionStore.get(sessionId);
     if (session === null) {
       // Session absente OU deja fermee/expiree : aucun contexte ne doit etre construit. L'appelant
@@ -50,25 +69,54 @@ export class ServerContextResolver {
       return Result.failure('SESSION_NOT_FOUND');
     }
 
-    if (session.kind === 'PLATFORM') {
-      return Result.success({ kind: 'PLATFORM', actorUserId: session.userId, session });
-    }
+    // F-7 : `switch` exhaustif (au lieu d'une cascade de `if`) — garantit qu'un ajout futur de
+    // variante a `SessionContext` (union discriminee sur `kind`) casse la COMPILATION ici tant
+    // que le nouveau cas n'est pas traite explicitement, via le `default` qui affecte `session` a
+    // une variable typee `never`.
+    switch (session.kind) {
+      case 'MFA_PENDING': {
+        const shouldRecord = await this.bypassAttemptGuard.tryMark(session.sessionId, MFA_PENDING_SESSION_WINDOW_SECONDS);
+        if (shouldRecord) {
+          await this.auditTrail.record({
+            eventType: 'MFA_BYPASS_ATTEMPTED',
+            outcome: 'DENIED',
+            tenantId: session.intent.kind === 'TENANT' ? session.intent.tenantId : null,
+            subjectUserId: session.userId,
+            actorUserId: session.userId,
+            actorRoleCodes: session.auditRoleCodes,
+            reason: null,
+            sessionId: session.sessionId,
+            correlationId,
+          });
+        }
+        return Result.failure('MFA_REQUIRED');
+      }
 
-    const tenantIdResult = TenantId.create(session.tenantId);
-    if (tenantIdResult.isFailure()) {
-      // Un SessionContext TENANT est toujours cree par ResolveTenantContextHandler a partir d'un
-      // TenantId deja valide (voir ResolveTenantContext.ts) : un tenantId invalide ici trahit une
-      // corruption du stockage de session (Redis), pas un echec metier attendu — on ne degrade
-      // jamais silencieusement vers "pas de tenant" dans ce cas, on leve.
-      throw new Error(`SessionContext TENANT corrompu : tenantId invalide ("${session.tenantId}").`);
-    }
+      case 'PLATFORM':
+        return Result.success({ kind: 'PLATFORM', actorUserId: session.userId, session });
 
-    return Result.success({
-      kind: 'TENANT',
-      actorUserId: session.userId,
-      tenantId: tenantIdResult.getValue(),
-      session,
-    });
+      case 'TENANT': {
+        const tenantIdResult = TenantId.create(session.tenantId);
+        if (tenantIdResult.isFailure()) {
+          // Un SessionContext TENANT est toujours cree par ResolveTenantContextHandler a partir
+          // d'un TenantId deja valide (voir ResolveTenantContext.ts) : un tenantId invalide ici
+          // trahit une corruption du stockage de session (Redis), pas un echec metier attendu —
+          // on ne degrade jamais silencieusement vers "pas de tenant" dans ce cas, on leve.
+          throw new Error(`SessionContext TENANT corrompu : tenantId invalide ("${session.tenantId}").`);
+        }
+        return Result.success({
+          kind: 'TENANT',
+          actorUserId: session.userId,
+          tenantId: tenantIdResult.getValue(),
+          session,
+        });
+      }
+
+      default: {
+        const exhaustiveCheck: never = session;
+        throw new Error(`SessionContext.kind non gere par ServerContextResolver : ${JSON.stringify(exhaustiveCheck)}`);
+      }
+    }
   }
 
   /**

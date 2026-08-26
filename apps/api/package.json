@@ -18,6 +18,7 @@
     "bullmq": "^6.2.1",
     "express": "^4.21.2",
     "ioredis": "^6.0.0",
+    "otpauth": "^9.3.6",
     "zod": "^3.24.1"
   },
   "devDependencies": {

@@ -8,8 +8,9 @@ import { UuidGenerator } from '../../../src/shared-kernel/infrastructure/UuidGen
 import { buildIdentityModule, type IdentityModule } from '../../../src/modules/identity/infrastructure/IdentityModule.js';
 import type { TenantAccessChecker } from '../../../src/modules/identity/application/ports/TenantAccessChecker.js';
 import { seedPermissionCatalog, seedSystemRoles } from '../../../src/modules/identity/infrastructure/seed/seedIdentityCatalog.js';
-import type { TenantSessionContext } from '../../../src/modules/identity/application/ports/SessionStore.js';
+import type { MfaPendingSessionContext, TenantSessionContext } from '../../../src/modules/identity/application/ports/SessionStore.js';
 import { buildTenantModule, type TenantModule } from '../../../src/modules/tenant/infrastructure/TenantModule.js';
+import { InMemoryAuditTrail } from '../builders/testKit.js';
 import { createTestPrismaClient, createTestRedisClient, uniqueEmail, uniqueFacilityName } from './dbTestHelpers.js';
 
 /**
@@ -54,6 +55,14 @@ describe('Identity — flux integres (Prisma + Redis reels)', () => {
       clock: new SystemClock(),
       idGenerator: new UuidGenerator(),
       tenantAccessChecker,
+      auditTrail: new InMemoryAuditTrail(),
+      mfa: {
+        secretEncryptionKey: Buffer.alloc(32, 3),
+        secretEncryptionKeyId: 'k1',
+        recoveryCodePepper: 'identity-flow-test-recovery-code-pepper-32c',
+        recoveryCodePepperId: 'p1',
+        totpIssuer: 'SIH-TEST',
+      },
     });
 
     await seedPermissionCatalog(prisma);
@@ -169,7 +178,7 @@ describe('Identity — flux integres (Prisma + Redis reels)', () => {
     expect(activeCount).toBe(1);
   });
 
-  it('requiresMfa est vrai des qu_un seul role du membership l_exige', async () => {
+  it("requiresMfa est vrai des qu_un seul role du membership l_exige : la session emise est desormais MFA_PENDING (ADR-0005 §4, aucun enrolement actif -> ENROLLMENT_REQUIRED, jamais une session porteuse de permissions)", async () => {
     const { userId } = await createAccount();
     const tenantId = await createFacilityTenantId();
 
@@ -182,7 +191,10 @@ describe('Identity — flux integres (Prisma + Redis reels)', () => {
 
     const context = await identity.handlers.resolveTenantContext.execute({ userId, intent: { kind: 'TENANT', tenantId } });
     expect(context.isSuccess()).toBe(true);
-    expect((context.getValue().session as TenantSessionContext).requiresMfa).toBe(true);
+    const session = context.getValue().session as MfaPendingSessionContext;
+    expect(session.kind).toBe('MFA_PENDING');
+    expect(session.reason).toBe('ENROLLMENT_REQUIRED');
+    expect(session.intent).toEqual({ kind: 'TENANT', tenantId });
   });
 
   it('la revocation d_un membership empeche l_ouverture d_un nouveau contexte pour ce tenant', async () => {

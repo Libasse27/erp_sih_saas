@@ -16,8 +16,13 @@ import type { Role } from '../Role.js';
  * valider par l'architecte des qu'un module ulterieur introduit une nouvelle ressource
  * sensible ; en cas de doute, le choix retenu est d'inclure (sur-couverture du MFA) plutot que
  * d'exclure.
+ *
+ * `mfa` ajoutee a l'etape 7/13 (ADR-0005, "Consequences" : "sa seule evolution est l'ajout de la
+ * ressource `mfa` a TENANT_ADMIN_RESOURCES") — quiconque detient `mfa:reset` (peut forcer le
+ * ré-enrolement d'un tiers) est lui-meme soumis au MFA, application directe de l'escalade que ce
+ * fichier documentait deja lui-meme.
  */
-const TENANT_ADMIN_RESOURCES: ReadonlySet<string> = new Set(['membership', 'role', 'tenant-config']);
+const TENANT_ADMIN_RESOURCES: ReadonlySet<string> = new Set(['membership', 'role', 'tenant-config', 'mfa']);
 
 const HIGH_IMPACT_FINANCE_PERMISSION_CODES: ReadonlySet<string> = new Set([
   'invoice:cancel',

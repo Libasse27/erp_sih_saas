@@ -16,6 +16,18 @@ import { UserTenantMembershipId } from '../../../src/modules/identity/domain/val
 import { RoleId } from '../../../src/modules/identity/domain/value-objects/RoleId.js';
 import type { SessionContext, SessionStore } from '../../../src/modules/identity/application/ports/SessionStore.js';
 import type { TenantAccessChecker, TenantAccessStatus } from '../../../src/modules/identity/application/ports/TenantAccessChecker.js';
+import type { AuditRecordInput, AuditTrail } from '../../../src/modules/identity/application/ports/AuditTrail.js';
+import type { MfaBypassAttemptGuard } from '../../../src/modules/identity/application/ports/MfaBypassAttemptGuard.js';
+import type { MfaEnrollment } from '../../../src/modules/identity/domain/MfaEnrollment.js';
+import type { MfaEnrollmentRepository } from '../../../src/modules/identity/domain/ports/MfaEnrollmentRepository.js';
+import type {
+  GeneratedRecoveryCodes,
+  RecoveryCodeGenerator,
+} from '../../../src/modules/identity/domain/ports/RecoveryCodeGenerator.js';
+import type { RecoveryCodeHasher } from '../../../src/modules/identity/domain/ports/RecoveryCodeHasher.js';
+import type { TotpProvisioning, TotpService, TotpVerificationOutcome } from '../../../src/modules/identity/domain/ports/TotpService.js';
+import { EncryptedTotpSecret } from '../../../src/modules/identity/domain/value-objects/EncryptedTotpSecret.js';
+import { RecoveryCodeHash } from '../../../src/modules/identity/domain/value-objects/RecoveryCodeHash.js';
 import { Result } from '../../../src/shared-kernel/domain/Result.js';
 
 export class FixedClock implements Clock {
@@ -185,6 +197,14 @@ export class InMemorySessionStore implements SessionStore {
     }
   }
 
+  async deleteAllForUser(userId: string): Promise<void> {
+    for (const [sessionId, session] of this.byId.entries()) {
+      if (session.userId === userId) {
+        this.byId.delete(sessionId);
+      }
+    }
+  }
+
   size(): number {
     return this.byId.size;
   }
@@ -244,3 +264,109 @@ export const idFor = {
   membership: (n: number): UserTenantMembershipId => mustSucceed(UserTenantMembershipId.create(uuidAt(n))),
   role: (n: number): RoleId => mustSucceed(RoleId.create(uuidAt(n))),
 };
+
+export class InMemoryMfaEnrollmentRepository implements MfaEnrollmentRepository {
+  private readonly byUserId = new Map<string, MfaEnrollment>();
+
+  async findByUserId(userId: UserAccountId): Promise<MfaEnrollment | null> {
+    return this.byUserId.get(userId.toString()) ?? null;
+  }
+
+  /**
+   * Le fake en memoire n'a pas de notion de transaction/verrou de ligne (mono-thread, aucune
+   * concurrence reelle possible en test unitaire) — delegue simplement a `findByUserId` (F-3, voir
+   * `PrismaMfaEnrollmentRepository.findByUserIdForUpdate` pour la variante PostgreSQL reelle,
+   * couverte par un test d'integration dedie).
+   */
+  async findByUserIdForUpdate(userId: UserAccountId): Promise<MfaEnrollment | null> {
+    return this.findByUserId(userId);
+  }
+
+  async save(enrollment: MfaEnrollment): Promise<void> {
+    enrollment.pullDomainEvents();
+    this.byUserId.set(enrollment.userId.toString(), enrollment);
+  }
+
+  seed(enrollment: MfaEnrollment): void {
+    enrollment.pullDomainEvents();
+    this.byUserId.set(enrollment.userId.toString(), enrollment);
+  }
+}
+
+function encryptedSecretFor(userAccountId: string): EncryptedTotpSecret {
+  // Enveloppe FACTICE valide (respecte le format `v1.<keyId>.<iv>.<tag>.<ciphertext>`) — aucune
+  // cryptographie reelle : reservee aux tests unitaires rapides (le vrai AES-256-GCM est couvert
+  // par les tests d'integration de `Rfc6238TotpService`/`AesGcmSecretCipher`).
+  return mustSucceed(EncryptedTotpSecret.create(`v1.testkey.${userAccountId}.faketag.fakecipher`));
+}
+
+/**
+ * Double deterministe de `TotpService` : un code EST valide si et seulement s'il est EGAL a
+ * `validCode` (par defaut `'000000'`), auquel cas le pas de temps retourne avance a chaque appel
+ * (jamais deux fois le meme, pour ne pas declencher artificiellement l'anti-rejeu du domaine
+ * sauf demande explicite via `nextTimeStep`).
+ */
+export class FakeTotpService implements TotpService {
+  // Demarre volontairement HAUT (pas 1) : de nombreux tests seedent un enrolement deja confirme
+  // avec `lastAcceptedTimeStep: 1` directement au niveau du domaine (sans passer par ce service) —
+  // demarrer a 1 ici declencherait un faux anti-rejeu (CODE_ALREADY_USED) des le premier appel
+  // reel a `verify()`. Ajuster explicitement via `nextTimeStep` si un test a besoin de forcer un
+  // rejeu.
+  nextTimeStep = 1000;
+
+  constructor(private readonly validCode: string = '000000') {}
+
+  async generateSecret(params: { userAccountId: string; accountLabel: string }): Promise<TotpProvisioning> {
+    return {
+      encryptedSecret: encryptedSecretFor(params.userAccountId),
+      provisioningUri: `otpauth://totp/${params.accountLabel}?secret=FAKE`,
+    };
+  }
+
+  async verify(params: { code: string }): Promise<TotpVerificationOutcome> {
+    if (params.code !== this.validCode) {
+      return { valid: false, timeStep: null };
+    }
+    const timeStep = this.nextTimeStep;
+    this.nextTimeStep += 1;
+    return { valid: true, timeStep };
+  }
+}
+
+/** Hachage factice deterministe (pas de HMAC reel) — le hash EST le code normalise, prefixe pour respecter le format de l'enveloppe. */
+export class FakeRecoveryCodeHasher implements RecoveryCodeHasher {
+  hash(plainCode: string): RecoveryCodeHash {
+    const normalized = plainCode.toUpperCase().replace(/[\s-]/g, '');
+    return mustSucceed(RecoveryCodeHash.create(`v1.testpepper.${normalized}`));
+  }
+}
+
+/** Generateur deterministe (pas de CSPRNG) — codes sequentiels `CODE-<n>`, pratiques a asserter dans les tests. */
+export class FakeRecoveryCodeGenerator implements RecoveryCodeGenerator {
+  constructor(private readonly hasher: RecoveryCodeHasher = new FakeRecoveryCodeHasher()) {}
+
+  generate(count: number): GeneratedRecoveryCodes {
+    const plainCodes = Array.from({ length: count }, (_unused, index) => `CODE-${index + 1}`);
+    return { plainCodes, hashes: plainCodes.map((code) => this.hasher.hash(code)) };
+  }
+}
+
+export class InMemoryAuditTrail implements AuditTrail {
+  readonly records: AuditRecordInput[] = [];
+
+  async record(input: AuditRecordInput): Promise<void> {
+    this.records.push(input);
+  }
+}
+
+export class InMemoryMfaBypassAttemptGuard implements MfaBypassAttemptGuard {
+  private readonly marked = new Set<string>();
+
+  async tryMark(sessionId: string): Promise<boolean> {
+    if (this.marked.has(sessionId)) {
+      return false;
+    }
+    this.marked.add(sessionId);
+    return true;
+  }
+}

@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { InMemorySessionStore, uuidAt } from '../../../../../test/identity/builders/testKit.js';
-import type { PlatformSessionContext, TenantSessionContext } from '../ports/SessionStore.js';
+import {
+  InMemoryAuditTrail,
+  InMemoryMfaBypassAttemptGuard,
+  InMemorySessionStore,
+  uuidAt,
+} from '../../../../../test/identity/builders/testKit.js';
+import type { MfaPendingSessionContext, PlatformSessionContext, TenantSessionContext } from '../ports/SessionStore.js';
 import { ServerContextResolver } from './ServerContextResolver.js';
 
 const TENANT_A = uuidAt(9001);
@@ -15,6 +20,7 @@ function tenantSession(overrides: Partial<TenantSessionContext> = {}): TenantSes
     roleCodes: ['MEDECIN'],
     permissionCodes: ['patient:read'],
     requiresMfa: false,
+    mfaSatisfiedAt: null,
     issuedAt: '2026-08-24T10:00:00Z',
     ...overrides,
   };
@@ -26,15 +32,36 @@ function platformSession(overrides: Partial<PlatformSessionContext> = {}): Platf
     kind: 'PLATFORM',
     userId: uuidAt(3),
     requiresMfa: true,
+    mfaSatisfiedAt: '2026-08-24T10:00:00Z',
     issuedAt: '2026-08-24T10:00:00Z',
     ...overrides,
   };
 }
 
+function mfaPendingSession(overrides: Partial<MfaPendingSessionContext> = {}): MfaPendingSessionContext {
+  return {
+    sessionId: 'session-mfa-pending-1',
+    kind: 'MFA_PENDING',
+    userId: uuidAt(4),
+    intent: { kind: 'TENANT', tenantId: TENANT_A },
+    reason: 'CHALLENGE_REQUIRED',
+    auditRoleCodes: ['ADMIN_ETABLISSEMENT'],
+    issuedAt: '2026-08-24T10:00:00Z',
+    expiresAt: '2026-08-24T10:05:00Z',
+    ...overrides,
+  };
+}
+
+function buildResolver(): { resolver: ServerContextResolver; sessions: InMemorySessionStore; auditTrail: InMemoryAuditTrail } {
+  const sessions = new InMemorySessionStore();
+  const auditTrail = new InMemoryAuditTrail();
+  const resolver = new ServerContextResolver(sessions, new InMemoryMfaBypassAttemptGuard(), auditTrail);
+  return { resolver, sessions, auditTrail };
+}
+
 describe('ServerContextResolver', () => {
   it("refuse une session absente/inconnue : aucun ServerContext ne peut donc etre construit ni transmis a un UnitOfWorkContext", async () => {
-    const sessions = new InMemorySessionStore();
-    const resolver = new ServerContextResolver(sessions);
+    const { resolver } = buildResolver();
 
     const result = await resolver.resolve('session-inconnue');
 
@@ -46,10 +73,9 @@ describe('ServerContextResolver', () => {
   });
 
   it('resout une session TENANT valide en ServerContext TENANT, tenantId correctement type (TenantId)', async () => {
-    const sessions = new InMemorySessionStore();
+    const { resolver, sessions } = buildResolver();
     const session = tenantSession();
     await sessions.create(session);
-    const resolver = new ServerContextResolver(sessions);
 
     const result = await resolver.resolve(session.sessionId);
 
@@ -63,10 +89,9 @@ describe('ServerContextResolver', () => {
   });
 
   it('resout une session PLATFORM valide en ServerContext PLATFORM, sans tenantId', async () => {
-    const sessions = new InMemorySessionStore();
+    const { resolver, sessions } = buildResolver();
     const session = platformSession();
     await sessions.create(session);
-    const resolver = new ServerContextResolver(sessions);
 
     const result = await resolver.resolve(session.sessionId);
 
@@ -76,10 +101,9 @@ describe('ServerContextResolver', () => {
   });
 
   it('toUnitOfWorkContext() propage correctement tenantId + actorUserId pour un contexte TENANT', async () => {
-    const sessions = new InMemorySessionStore();
+    const { resolver, sessions } = buildResolver();
     const session = tenantSession();
     await sessions.create(session);
-    const resolver = new ServerContextResolver(sessions);
 
     const context = (await resolver.resolve(session.sessionId)).getValue();
     const uowContext = resolver.toUnitOfWorkContext(context);
@@ -89,10 +113,9 @@ describe('ServerContextResolver', () => {
   });
 
   it('toUnitOfWorkContext() ne porte JAMAIS de tenantId pour un contexte PLATFORM', async () => {
-    const sessions = new InMemorySessionStore();
+    const { resolver, sessions } = buildResolver();
     const session = platformSession();
     await sessions.create(session);
-    const resolver = new ServerContextResolver(sessions);
 
     const context = (await resolver.resolve(session.sessionId)).getValue();
     const uowContext = resolver.toUnitOfWorkContext(context);
@@ -102,11 +125,54 @@ describe('ServerContextResolver', () => {
   });
 
   it('leve une exception (pas un Result.failure) si une session TENANT stockee porte un tenantId corrompu — corruption, pas un echec metier attendu', async () => {
-    const sessions = new InMemorySessionStore();
+    const { resolver, sessions } = buildResolver();
     const session = tenantSession({ tenantId: 'pas-un-uuid' });
     await sessions.create(session);
-    const resolver = new ServerContextResolver(sessions);
 
     await expect(resolver.resolve(session.sessionId)).rejects.toThrow();
+  });
+
+  describe('ADR-0005 §4 — une session MFA_PENDING ne produit JAMAIS de ServerContext', () => {
+    it("renvoie Result.failure('MFA_REQUIRED'), jamais un ServerContext PLATFORM ou TENANT", async () => {
+      const { resolver, sessions } = buildResolver();
+      const session = mfaPendingSession();
+      await sessions.create(session);
+
+      const result = await resolver.resolve(session.sessionId);
+
+      expect(result.isFailure()).toBe(true);
+      expect(result.getError()).toBe('MFA_REQUIRED');
+    });
+
+    it('journalise une tentative de contournement (MFA_BYPASS_ATTEMPTED / DENIED)', async () => {
+      const { resolver, sessions, auditTrail } = buildResolver();
+      const session = mfaPendingSession();
+      await sessions.create(session);
+
+      await resolver.resolve(session.sessionId, 'corr-1');
+
+      expect(auditTrail.records).toHaveLength(1);
+      expect(auditTrail.records[0]).toMatchObject({
+        eventType: 'MFA_BYPASS_ATTEMPTED',
+        outcome: 'DENIED',
+        subjectUserId: session.userId,
+        actorUserId: session.userId,
+        sessionId: session.sessionId,
+        tenantId: TENANT_A,
+        correlationId: 'corr-1',
+      });
+    });
+
+    it("ne journalise qu'UNE SEULE FOIS par sessionId (deduplication, ADR-0005 §4)", async () => {
+      const { resolver, sessions, auditTrail } = buildResolver();
+      const session = mfaPendingSession();
+      await sessions.create(session);
+
+      await resolver.resolve(session.sessionId);
+      await resolver.resolve(session.sessionId);
+      await resolver.resolve(session.sessionId);
+
+      expect(auditTrail.records).toHaveLength(1);
+    });
   });
 });

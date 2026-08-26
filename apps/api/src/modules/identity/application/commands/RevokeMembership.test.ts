@@ -58,6 +58,7 @@ describe('RevokeMembershipHandler', () => {
       roleCodes: [],
       permissionCodes: [],
       requiresMfa: false,
+      mfaSatisfiedAt: null,
       issuedAt: clock.now().toISOString(),
     });
 

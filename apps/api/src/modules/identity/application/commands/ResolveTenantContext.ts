@@ -1,18 +1,10 @@
 import { Result } from '../../../../shared-kernel/domain/Result.js';
-import type { Clock } from '../../../../shared-kernel/domain/ports/Clock.js';
-import type { IdGenerator } from '../../../../shared-kernel/domain/ports/IdGenerator.js';
-import type { UnitOfWork } from '../../../../shared-kernel/application/UnitOfWork.js';
 import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantId.js';
-import { requiresMfaForMembership, requiresMfaForPlatformContext } from '../../domain/services/MfaPolicy.js';
-import { resolveEffectivePermissions } from '../../domain/services/PermissionResolver.js';
-import type { RoleRepository } from '../../domain/ports/RoleRepository.js';
-import type { UserAccountRepository } from '../../domain/ports/UserAccountRepository.js';
-import type { UserTenantMembershipRepository } from '../../domain/ports/UserTenantMembershipRepository.js';
 import { UserAccountId } from '../../domain/value-objects/UserAccountId.js';
+import type { ContextIntent, SessionContextIssuer } from '../services/SessionContextIssuer.js';
 import type { SessionContext, SessionStore } from '../ports/SessionStore.js';
-import type { TenantAccessChecker } from '../ports/TenantAccessChecker.js';
 
-export type ContextIntent = { readonly kind: 'PLATFORM' } | { readonly kind: 'TENANT'; readonly tenantId: string };
+export type { ContextIntent };
 
 export interface ResolveTenantContextCommand {
   /** Identite deja verifiee par AuthenticateUser (2.4) — cette commande ne re-verifie pas le mot de passe. */
@@ -42,16 +34,20 @@ export interface ResolveTenantContextResult {
   readonly session: SessionContext;
 }
 
+/**
+ * Ouvre un nouveau contexte de session (PLATFORM ou TENANT). Depuis l'etape 7/13 (ADR-0005 §4),
+ * la resolution roles/permissions/gate-MFA est DELEGUEE a `SessionContextIssuer` — CE handler ne
+ * fait plus que : valider le format des identifiants transmis, invoquer le service, gerer le
+ * remplacement de session (fermeture de l'ancienne, ouverture de la nouvelle). Le CONTRAT PUBLIC
+ * (commande, erreurs, `{ session }`) reste inchange ; seule la VALEUR possible de `session` change
+ * (une session `MFA_PENDING` peut desormais etre retournee en succes, jamais signalee comme une
+ * erreur — voir ADR-0005 §4 : le blocage est porte par le TYPE de la session, pas par un code
+ * d'erreur).
+ */
 export class ResolveTenantContextHandler {
   constructor(
-    private readonly userAccountRepository: UserAccountRepository,
-    private readonly membershipRepository: UserTenantMembershipRepository,
-    private readonly roleRepository: RoleRepository,
+    private readonly sessionContextIssuer: SessionContextIssuer,
     private readonly sessionStore: SessionStore,
-    private readonly tenantAccessChecker: TenantAccessChecker,
-    private readonly unitOfWork: UnitOfWork,
-    private readonly clock: Clock,
-    private readonly idGenerator: IdGenerator,
   ) {}
 
   async execute(
@@ -63,77 +59,21 @@ export class ResolveTenantContextHandler {
     }
     const userId = userIdResult.getValue();
 
-    const account = await this.unitOfWork.withTransaction(() => this.userAccountRepository.findById(userId));
-    if (account === null) {
-      return Result.failure('ACCOUNT_NOT_FOUND');
-    }
-
-    let session: SessionContext;
-
-    if (command.intent.kind === 'PLATFORM') {
-      if (!account.isSuperAdmin()) {
-        return Result.failure('NOT_SUPER_ADMIN');
-      }
-      session = {
-        sessionId: this.idGenerator.generate(),
-        kind: 'PLATFORM',
-        userId: userId.toString(),
-        requiresMfa: requiresMfaForPlatformContext(),
-        issuedAt: this.clock.now().toISOString(),
-      };
-    } else {
+    if (command.intent.kind === 'TENANT') {
       const tenantIdResult = TenantId.create(command.intent.tenantId);
       if (tenantIdResult.isFailure()) {
         return Result.failure('INVALID_TENANT_ID');
       }
-      const tenantId = tenantIdResult.getValue();
-
-      // Verification d'acces au tenant AVANT le membership (etendue lors de l'arbitrage
-      // architecte du 2026-08-24, en continuite de l'etape 3) : un membership actif ne suffit
-      // pas a ouvrir un NOUVEAU contexte si le tenant n'existe plus (TENANT_NOT_FOUND) OU si
-      // son statut interdit l'ouverture d'un nouveau contexte (TENANT_SUSPENDED) — defense en
-      // profondeur supplementaire, distincte du RLS qui isole mais ne verifie ni l'existence ni
-      // l'accessibilite. TENANT_SUSPENDED ne bloque QUE cette ouverture : il ne ferme jamais une
-      // session deja ouverte et n'affecte aucune donnee medicale — voir TenantAccessChecker.ts.
-      const resolved = await this.unitOfWork.withTransaction(async () => {
-        const access = await this.tenantAccessChecker.checkAccess(tenantId);
-        if (access === 'NOT_FOUND') {
-          return { kind: 'TENANT_NOT_FOUND' as const };
-        }
-        if (access === 'SUSPENDED') {
-          return { kind: 'TENANT_SUSPENDED' as const };
-        }
-        const membership = await this.membershipRepository.findActiveByUserAndTenant(userId, tenantId);
-        if (membership === null) {
-          return { kind: 'MEMBERSHIP_NOT_FOUND' as const };
-        }
-        const roles = await this.roleRepository.findByIds(tenantId, membership.roleIds);
-        return { kind: 'OK' as const, membership, roles };
-      }, { tenantId });
-
-      if (resolved.kind === 'TENANT_NOT_FOUND') {
-        return Result.failure('TENANT_NOT_FOUND');
-      }
-      if (resolved.kind === 'TENANT_SUSPENDED') {
-        return Result.failure('TENANT_SUSPENDED');
-      }
-      if (resolved.kind === 'MEMBERSHIP_NOT_FOUND') {
-        return Result.failure('MEMBERSHIP_NOT_FOUND_OR_INACTIVE');
-      }
-
-      const permissions = resolveEffectivePermissions(resolved.roles);
-      session = {
-        sessionId: this.idGenerator.generate(),
-        kind: 'TENANT',
-        userId: userId.toString(),
-        tenantId: tenantId.toString(),
-        membershipId: resolved.membership.id.toString(),
-        roleCodes: resolved.roles.map((role) => role.code),
-        permissionCodes: permissions.map((permission) => permission.code),
-        requiresMfa: requiresMfaForMembership(resolved.roles),
-        issuedAt: this.clock.now().toISOString(),
-      };
     }
+
+    const sessionResult = await this.sessionContextIssuer.issueForNewContext({
+      userId,
+      intent: command.intent,
+    });
+    if (sessionResult.isFailure()) {
+      return Result.failure(sessionResult.getError());
+    }
+    const session = sessionResult.getValue();
 
     // Changement de contexte = fermeture puis emission (jamais une mutation en place) : le
     // nouvel objet `session` ci-dessus ne partage aucun etat mutable avec l'ancien.

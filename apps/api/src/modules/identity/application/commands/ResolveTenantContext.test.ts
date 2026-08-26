@@ -3,6 +3,7 @@ import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantI
 import {
   FixedClock,
   idFor,
+  InMemoryMfaEnrollmentRepository,
   InMemoryRoleRepository,
   InMemorySessionStore,
   InMemoryTenantAccessChecker,
@@ -18,8 +19,9 @@ import { Role } from '../../domain/Role.js';
 import { Email } from '../../domain/value-objects/Email.js';
 import { PasswordHash } from '../../domain/value-objects/PasswordHash.js';
 import { Permission } from '../../domain/value-objects/Permission.js';
+import { SessionContextIssuer } from '../services/SessionContextIssuer.js';
 import { ResolveTenantContextHandler } from './ResolveTenantContext.js';
-import type { TenantSessionContext } from '../ports/SessionStore.js';
+import type { MfaPendingSessionContext, TenantSessionContext } from '../ports/SessionStore.js';
 
 const TENANT_A = TenantId.create(uuidAt(6001)).getValue();
 const TENANT_B = TenantId.create(uuidAt(6002)).getValue();
@@ -34,6 +36,7 @@ describe('ResolveTenantContextHandler', () => {
   let roles: InMemoryRoleRepository;
   let sessions: InMemorySessionStore;
   let tenants: InMemoryTenantAccessChecker;
+  let mfaEnrollments: InMemoryMfaEnrollmentRepository;
   let handler: ResolveTenantContextHandler;
   let clock: FixedClock;
   let idGenerator: SequentialIdGenerator;
@@ -44,6 +47,7 @@ describe('ResolveTenantContextHandler', () => {
     roles = new InMemoryRoleRepository();
     sessions = new InMemorySessionStore();
     tenants = new InMemoryTenantAccessChecker();
+    mfaEnrollments = new InMemoryMfaEnrollmentRepository();
     // Les tenants utilises par la grande majorite des scenarios de cette suite existent deja
     // (le comportement "tenant absent" a sa propre suite dediee ci-dessous, sur un tenant non
     // seed ici).
@@ -51,16 +55,18 @@ describe('ResolveTenantContextHandler', () => {
     tenants.seed(TENANT_B);
     clock = new FixedClock('2026-08-23T10:00:00Z');
     idGenerator = new SequentialIdGenerator();
-    handler = new ResolveTenantContextHandler(
+    const unitOfWork = new InMemoryUnitOfWork();
+    const issuer = new SessionContextIssuer(
       accounts,
       memberships,
       roles,
-      sessions,
       tenants,
-      new InMemoryUnitOfWork(),
+      mfaEnrollments,
+      unitOfWork,
       clock,
       idGenerator,
     );
+    handler = new ResolveTenantContextHandler(issuer, sessions);
   });
 
   async function registerStandardUser(): Promise<UserAccount> {
@@ -75,7 +81,7 @@ describe('ResolveTenantContextHandler', () => {
     return account;
   }
 
-  it('un utilisateur avec deux memberships actifs dans deux etablissements peut selectionner l_un OU l_autre', async () => {
+  it('un utilisateur avec deux memberships actifs dans deux etablissements peut selectionner l_un OU l_autre (aucun role sensible : session complete des les deux)', async () => {
     const account = await registerStandardUser();
     const medecin = Role.system({ id: idFor.role(1), code: 'MEDECIN', name: 'Medecin', permissions: [permission('patient:read')] });
     roles.seed(medecin);
@@ -96,23 +102,25 @@ describe('ResolveTenantContextHandler', () => {
     expect(resultB.isSuccess()).toBe(true);
     const sessionA = resultA.getValue().session as TenantSessionContext;
     const sessionB = resultB.getValue().session as TenantSessionContext;
+    expect(sessionA.kind).toBe('TENANT');
+    expect(sessionB.kind).toBe('TENANT');
     expect(sessionA.tenantId).toBe(TENANT_A.toString());
     expect(sessionB.tenantId).toBe(TENANT_B.toString());
   });
 
-  it('calcule les permissions effectives et requiresMfa a partir des roles du membership', async () => {
+  it('calcule les permissions effectives (union de plusieurs roles NON sensibles) sur une session complete', async () => {
     const account = await registerStandardUser();
     const infirmier = Role.system({ id: idFor.role(2), code: 'INFIRMIER', name: 'Infirmier', permissions: [permission('patient:read')] });
-    const adminTenant = Role.system({ id: idFor.role(3), code: 'ADMIN_ETABLISSEMENT', name: 'Admin', permissions: [permission('membership:administer')] });
+    const accueil = Role.system({ id: idFor.role(3), code: 'ACCUEIL', name: 'Accueil', permissions: [permission('appointment:read')] });
     roles.seed(infirmier);
-    roles.seed(adminTenant);
+    roles.seed(accueil);
 
     await memberships.save(
       UserTenantMembership.grant({
         userId: account.id,
         tenantId: TENANT_A,
         createdBy: account.id,
-        initialRoleIds: [infirmier.id, adminTenant.id],
+        initialRoleIds: [infirmier.id, accueil.id],
         clock,
         idGenerator,
       }),
@@ -122,8 +130,35 @@ describe('ResolveTenantContextHandler', () => {
     const result = await handler.execute({ userId: account.id.toString(), intent: { kind: 'TENANT', tenantId: TENANT_A.toString() } });
     expect(result.isSuccess()).toBe(true);
     const session = result.getValue().session as TenantSessionContext;
-    expect(new Set(session.permissionCodes)).toEqual(new Set(['patient:read', 'membership:administer']));
-    expect(session.requiresMfa).toBe(true);
+    expect(session.kind).toBe('TENANT');
+    expect(new Set(session.permissionCodes)).toEqual(new Set(['patient:read', 'appointment:read']));
+    expect(session.requiresMfa).toBe(false);
+  });
+
+  it("ADR-0005 §4 : un role exigeant le MFA (ADMIN_ETABLISSEMENT) sans enrolement actif produit une session MFA_PENDING/ENROLLMENT_REQUIRED — jamais une session porteuse de permissions", async () => {
+    const account = await registerStandardUser();
+    const adminTenant = Role.system({ id: idFor.role(4), code: 'ADMIN_ETABLISSEMENT', name: 'Admin', permissions: [permission('membership:administer')] });
+    roles.seed(adminTenant);
+
+    await memberships.save(
+      UserTenantMembership.grant({
+        userId: account.id,
+        tenantId: TENANT_A,
+        createdBy: account.id,
+        initialRoleIds: [adminTenant.id],
+        clock,
+        idGenerator,
+      }),
+      TENANT_A,
+    );
+
+    const result = await handler.execute({ userId: account.id.toString(), intent: { kind: 'TENANT', tenantId: TENANT_A.toString() } });
+    expect(result.isSuccess()).toBe(true);
+    const session = result.getValue().session as MfaPendingSessionContext;
+    expect(session.kind).toBe('MFA_PENDING');
+    expect(session.reason).toBe('ENROLLMENT_REQUIRED');
+    expect(session.intent).toEqual({ kind: 'TENANT', tenantId: TENANT_A.toString() });
+    expect((session as unknown as { permissionCodes?: unknown }).permissionCodes).toBeUndefined();
   });
 
   it("refuse un tenantId qui ne correspond a aucun HealthFacility existant (TENANT_NOT_FOUND avant meme la verification du membership)", async () => {
@@ -184,7 +219,7 @@ describe('ResolveTenantContextHandler', () => {
     expect(result.getError()).toBe('NOT_SUPER_ADMIN');
   });
 
-  it('un SUPER_ADMIN ouvre un contexte PLATFORM avec requiresMfa toujours vrai', async () => {
+  it('un SUPER_ADMIN sans enrolement actif recoit une session MFA_PENDING/ENROLLMENT_REQUIRED (requiresMfaForPlatformContext toujours vrai, ADR-0005 §4)', async () => {
     const superAdmin = UserAccount.register({
       email: Email.create('super@plateforme.sn').getValue(),
       passwordHash: PasswordHash.fromHash('hash').getValue(),
@@ -196,12 +231,15 @@ describe('ResolveTenantContextHandler', () => {
 
     const result = await handler.execute({ userId: superAdmin.id.toString(), intent: { kind: 'PLATFORM' } });
     expect(result.isSuccess()).toBe(true);
-    expect(result.getValue().session.requiresMfa).toBe(true);
+    const session = result.getValue().session as MfaPendingSessionContext;
+    expect(session.kind).toBe('MFA_PENDING');
+    expect(session.reason).toBe('ENROLLMENT_REQUIRED');
+    expect(session.intent).toEqual({ kind: 'PLATFORM' });
   });
 
   it("le changement d'etablissement ferme le contexte courant et en ouvre un nouveau, sans etat partage", async () => {
     const account = await registerStandardUser();
-    const roleA = Role.system({ id: idFor.role(4), code: 'MEDECIN', name: 'Medecin', permissions: [permission('patient:read')] });
+    const roleA = Role.system({ id: idFor.role(7), code: 'MEDECIN', name: 'Medecin', permissions: [permission('patient:read')] });
     roles.seed(roleA);
     await memberships.save(
       UserTenantMembership.grant({ userId: account.id, tenantId: TENANT_A, createdBy: account.id, initialRoleIds: [roleA.id], clock, idGenerator }),

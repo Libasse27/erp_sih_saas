@@ -20,6 +20,8 @@ import type {
   TenantAccessChecker,
   TenantAccessStatus,
 } from './modules/identity/application/ports/TenantAccessChecker.js';
+import type { AuditRecordInput, AuditTrail } from './modules/identity/application/ports/AuditTrail.js';
+import { buildAuditModule, type AuditModule } from './modules/audit/infrastructure/AuditModule.js';
 import { buildTenantModule, type TenantModule } from './modules/tenant/infrastructure/TenantModule.js';
 import {
   buildSubscriptionModule,
@@ -54,6 +56,35 @@ class TenantModuleBackedAccessChecker implements TenantAccessChecker {
 }
 
 /**
+ * Adaptateur cross-module implementant le port `AuditTrail` d'Identity en s'appuyant sur le
+ * module `audit` (ADR-0005 §5). Vit ICI et nulle part ailleurs — meme raisonnement que
+ * `TenantModuleBackedAccessChecker` ci-dessus : c'est le seul point du code autorise a traduire
+ * l'union primitive `MfaAuditEventType` (Identity) vers les VO du module `audit`
+ * (`AuditCategory`/`AuditEventType`/`AuditOutcome`). La categorie est fixee a `'MFA'` : cet
+ * adaptateur ne sert QUE le port MFA d'Identity a cette etape (un futur module qui ecrirait
+ * d'autres categories d'audit aurait son propre adaptateur, jamais celui-ci etendu par un
+ * `if` sur l'appelant).
+ */
+class AuditModuleBackedAuditTrail implements AuditTrail {
+  constructor(private readonly audit: AuditModule) {}
+
+  async record(input: AuditRecordInput): Promise<void> {
+    await this.audit.services.recordEntry({
+      category: 'MFA',
+      eventType: input.eventType,
+      outcome: input.outcome,
+      tenantId: input.tenantId,
+      subjectUserId: input.subjectUserId,
+      actorUserId: input.actorUserId,
+      actorRoleCodes: input.actorRoleCodes,
+      reason: input.reason,
+      sessionId: input.sessionId,
+      correlationId: input.correlationId,
+    });
+  }
+}
+
+/**
  * Point de cablage unique des dependances (D3, 01-target-architecture.md §5).
  * Aucun singleton global : chaque entree fait partie de ce conteneur explicite, injecte
  * dans les handlers via le composition root de chaque module au fur et a mesure de leur
@@ -68,6 +99,7 @@ export interface CompositionRoot {
   /** Logger JSON structure partage (voir ConsoleStructuredLogger.ts) — expose ici pour que `server.ts` puisse l'utiliser dans le middleware d'erreur Express global, sans construire un second logger. */
   readonly logger: ConsoleStructuredLogger;
   readonly tenant: TenantModule;
+  readonly audit: AuditModule;
   readonly identity: IdentityModule;
   readonly subscription: SubscriptionModule;
   readonly payment: PaymentModule;
@@ -91,13 +123,29 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
   const redis = new Redis(env.REDIS_URL, { maxRetriesPerRequest: 3, lazyConnect: false });
   const logger = new ConsoleStructuredLogger();
 
-  // Tenant cable avant Identity : Identity depend du port `TenantAccessChecker`
-  // (ResolveTenantContextHandler, Phase 0 etape 3), dont l'implementation ci-dessus a besoin du
-  // module Tenant deja construit. L'inverse n'est jamais vrai : Tenant ne depend de rien
-  // d'Identity.
+  // Tenant et Audit cables avant Identity : Identity depend des ports `TenantAccessChecker`
+  // (ResolveTenantContextHandler, Phase 0 etape 3) et `AuditTrail` (MFA, etape 7/13), dont les
+  // implementations ci-dessous ont besoin des modules Tenant/Audit deja construits. L'inverse
+  // n'est jamais vrai : ni Tenant ni Audit ne dependent de rien d'Identity.
   const tenant = buildTenantModule({ prisma, clock, idGenerator });
   const tenantAccessChecker = new TenantModuleBackedAccessChecker(tenant);
-  const identity = buildIdentityModule({ prisma, redis, clock, idGenerator, tenantAccessChecker });
+  const audit = buildAuditModule({ prisma, clock, idGenerator });
+  const auditTrail = new AuditModuleBackedAuditTrail(audit);
+  const identity = buildIdentityModule({
+    prisma,
+    redis,
+    clock,
+    idGenerator,
+    tenantAccessChecker,
+    auditTrail,
+    mfa: {
+      secretEncryptionKey: Buffer.from(env.MFA_SECRET_ENCRYPTION_KEY, 'base64'),
+      secretEncryptionKeyId: env.MFA_SECRET_ENCRYPTION_KEY_ID,
+      recoveryCodePepper: env.MFA_RECOVERY_CODE_PEPPER,
+      recoveryCodePepperId: env.MFA_RECOVERY_CODE_PEPPER_ID,
+      totpIssuer: env.MFA_TOTP_ISSUER,
+    },
+  });
   // Subscription (Phase 0, etape 4/13) ne depend d'aucun autre module a ce stade — voir le
   // residu documente dans SubscriptionModule.ts sur l'absence volontaire d'un port
   // TenantAccessChecker cote Subscription (hors perimetre de cette etape).
@@ -209,6 +257,7 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
     redis,
     logger,
     tenant,
+    audit,
     identity,
     subscription,
     payment,

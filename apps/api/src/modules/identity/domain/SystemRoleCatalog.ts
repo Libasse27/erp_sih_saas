@@ -46,7 +46,11 @@ export const SYSTEM_ROLE_CATALOG: readonly SystemRoleDefinition[] = [
     id: 'cec566a2-c514-4a4a-bf32-b248848b419c',
     code: 'ADMIN_ETABLISSEMENT',
     name: "Administrateur d'etablissement",
-    permissionCodes: ['membership:administer', 'role:administer', 'tenant-config:administer'],
+    // 'mfa:reset' ajoute a l'etape 7/13 (ADR-0005) : execution technique de la procedure de
+    // recuperation MFA pour un membre de l'etablissement (O-04, residu 3 — la verification
+    // d'identite elle-meme reste un processus humain, hors code). Inclus dans
+    // TENANT_ADMIN_RESOURCES (voir MfaPolicy.ts) : le detenteur est lui-meme soumis au MFA.
+    permissionCodes: ['membership:administer', 'role:administer', 'tenant-config:administer', 'mfa:reset'],
   },
   {
     id: '82d35b51-5aff-4a89-9455-fc1dfb4228c0',

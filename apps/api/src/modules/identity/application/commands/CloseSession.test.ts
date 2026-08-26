@@ -10,6 +10,7 @@ describe('CloseSessionHandler', () => {
       kind: 'PLATFORM',
       userId: 'u1',
       requiresMfa: true,
+      mfaSatisfiedAt: null,
       issuedAt: new Date().toISOString(),
     });
 

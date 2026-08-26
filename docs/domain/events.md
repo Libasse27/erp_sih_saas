@@ -41,11 +41,34 @@ un barème, un taux ou un protocole », généralisée ici à « ne jamais inven
 | `MembershipRevoked` | `identity.membership.revoked` | 1 | `UserTenantMembership.revoke()`, via `RevokeMembershipHandler` | `userId: string` | **Aucun consommateur Outbox.** L'invalidation des sessions déjà ouvertes (O-05) est effectuée **synchroniquement** par `RevokeMembershipHandler` (`sessionStore.deleteAllForMembership`, hors mécanisme Outbox) — cet événement est publié pour un futur consommateur asynchrone (audit, notification), pas encore requis. |
 | `MembershipRoleAssigned` | `identity.membership.role-assigned` | 1 | `UserTenantMembership.grant()` / `.assignRole()` | `roleId: string` | **Aucun.** |
 | `MembershipRoleUnassigned` | `identity.membership.role-unassigned` | 1 | `UserTenantMembership.removeRole()` | `roleId: string` | **Aucun.** |
+| `MfaEnrollmentStarted` | `identity.mfa-enrollment.started` | 1 | `MfaEnrollment.start()`, via `StartMfaEnrollmentHandler` | `userAccountId: string` (`aggregateId` = `MfaEnrollmentId`, `tenantId` toujours `null` — niveau identité globale, voir ADR-0005 §1) | **Aucun.** |
+| `MfaEnrollmentConfirmed` | `identity.mfa-enrollment.confirmed` | 1 | `MfaEnrollment.confirmEnrollment()` (toute première activation), via `ConfirmMfaEnrollmentHandler` | `userAccountId: string` | **Aucun.** |
+| `MfaFactorReplaced` | `identity.mfa-enrollment.factor-replaced` | 1 | `MfaEnrollment.confirmEnrollment()` (ré-enrôlement après `RESET_REQUIRED`), via `ConfirmMfaEnrollmentHandler` | `userAccountId: string` | **Aucun.** |
+| `MfaReEnrollmentForced` | `identity.mfa-enrollment.re-enrollment-forced` | 1 | `MfaEnrollment.forceReEnrollment()`, via `ForceMfaReEnrollmentHandler` | `userAccountId: string`, `requestedByUserId: string`. **Ne porte JAMAIS le motif** (minimisation, ADR-0005 §6) : le motif est stocké UNIQUEMENT dans l'`AuditEntry` correspondante. | **Aucun.** |
+| `MfaRecoveryCodeConsumed` | `identity.mfa-enrollment.recovery-code-consumed` | 1 | `MfaEnrollment.consumeRecoveryCode()`, via `VerifyMfaChallengeHandler` | `userAccountId: string` | **Aucun.** |
+| `MfaRecoveryCodesExhausted` | `identity.mfa-enrollment.recovery-codes-exhausted` | 1 | `MfaEnrollment.consumeRecoveryCode()` (dernier code disponible), via `VerifyMfaChallengeHandler` | `userAccountId: string` | **Aucun.** |
+| `MfaRecoveryCodesRegenerated` | `identity.mfa-enrollment.recovery-codes-regenerated` | 1 | `MfaEnrollment.regenerateRecoveryCodes()`, via `RegenerateMfaRecoveryCodesHandler` | `userAccountId: string` | **Aucun.** |
+| `MfaFactorLockedOut` | `identity.mfa-enrollment.factor-locked-out` | 1 | `MfaEnrollment.registerFailedChallenge()` (seuil d'échecs consécutifs atteint) | `userAccountId: string` | **Aucun.** |
+
+**Note (ADR-0005 §5)** : les succès/échecs de **challenge de routine** (`MFA_CHALLENGE_SUCCEEDED`,
+`MFA_CHALLENGE_FAILED`, `MFA_CHALLENGE_BLOCKED`, `MFA_BYPASS_ATTEMPTED`) ne transitent **jamais**
+par l'Outbox — contrairement aux huit `DomainEvent` `Mfa*` ci-dessus, ce sont des **entrées
+`AuditEntry`** (module `audit`), écrites **directement, dans la transaction** de l'action MFA,
+jamais via un consommateur Outbox. Trois raisons (voir ADR-0005 §5 pour le détail complet) : un
+échec ne modifie aucun agrégat et n'émettrait donc aucun événement de domaine (un journal qui ne
+voit pas les échecs ne remplirait pas O-04.7) ; l'écriture transactionnelle garantit que l'action
+et sa preuve commitent ensemble ; la garantie *at-least-once* de l'Outbox produirait des doublons
+sur un registre append-only immuable, qui n'a pas vocation à être dédupliqué.
 
 **Note** : `Role` (`modules/identity/domain/Role.ts`) étend `Entity`, pas `AggregateRoot` — il
 n'émet structurellement aucun `DomainEvent` (aucune classe `RoleCreated`/`RoleUpdated` n'existe).
 `PrismaRoleRepository.ts` ne branche donc rien sur l'Outbox à cette étape (voir le commentaire de
 tête de ce fichier) ; ce n'est pas une omission mais un constat sur l'état actuel du domaine.
+
+`AuditEntry` (module `audit`, ADR-0005 §5) étend `AggregateRoot` mais N'ÉMET JAMAIS de
+`DomainEvent` non plus — documenté explicitement dans `modules/audit/domain/AuditEntry.ts` : ce
+n'est pas un événement d'intégration (asynchrone, at-least-once), c'est directement la preuve
+persistée, écrite dans la transaction de l'action auditée.
 
 ## Module `tenant`
 
