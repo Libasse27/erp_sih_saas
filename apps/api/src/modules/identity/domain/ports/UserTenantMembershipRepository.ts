@@ -1,5 +1,6 @@
 import type { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantId.js';
 import type { UserTenantMembership } from '../UserTenantMembership.js';
+import type { RoleId } from '../value-objects/RoleId.js';
 import type { UserAccountId } from '../value-objects/UserAccountId.js';
 import type { UserTenantMembershipId } from '../value-objects/UserTenantMembershipId.js';
 
@@ -29,6 +30,14 @@ export interface UserTenantMembershipRepository {
 
   /** Compte des memberships ACTIFS pour un tenant — jamais des roles (regle O-05 derivee, maxUsers). */
   countActive(tenantId: TenantId): Promise<number>;
+
+  /**
+   * Memberships ACTIFS d'un tenant portant un role donne (ajoute a l'etape 9/13 — resolution de
+   * destinataire pour Notifications, ADR-0007 §4 : "audience structurellement designee par
+   * O-04.1", jamais une nouvelle politique de ciblage). Filtrage tenant explicite, meme discipline
+   * que les autres methodes de ce port.
+   */
+  listActiveByTenantAndRole(tenantId: TenantId, roleId: RoleId): Promise<readonly UserTenantMembership[]>;
 
   save(membership: UserTenantMembership, tenantId: TenantId): Promise<void>;
 }

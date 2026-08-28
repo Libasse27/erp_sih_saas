@@ -146,6 +146,10 @@ describe('ADR-0001 §3.3 — garde-fou generique : toute table du schema platfor
     // meme regime que MfaEnrollment (concept d'identite/session GLOBALE, `tenantId` nullable pour
     // les chaines issues d'un contexte PLATFORM). Filtrage tenant PUREMENT APPLICATIF.
     'RefreshToken',
+    // Etape 9/13 (ADR-0007 §6) : notification declenchee par des evenements de niveau
+    // plateforme (Subscription), meme regime que Payment/PlatformInvoice. Filtrage tenant
+    // PUREMENT APPLICATIF.
+    'Notification',
   ]);
 
   beforeAll(async () => {

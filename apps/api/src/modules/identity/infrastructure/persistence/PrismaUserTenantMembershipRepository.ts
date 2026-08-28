@@ -73,6 +73,19 @@ export class PrismaUserTenantMembershipRepository implements UserTenantMembershi
     });
   }
 
+  async listActiveByTenantAndRole(tenantId: TenantId, roleId: RoleId): Promise<readonly UserTenantMembership[]> {
+    const client = resolvePrismaClient(this.prisma);
+    const rows = await client.userTenantMembership.findMany({
+      where: {
+        tenantId: tenantId.toString(),
+        status: 'ACTIVE',
+        roles: { some: { roleId: roleId.toString() } },
+      },
+      include: { roles: true },
+    });
+    return rows.map((row) => this.toDomain(row));
+  }
+
   async save(membership: UserTenantMembership, tenantId: TenantId): Promise<void> {
     if (!membership.tenantId.equals(tenantId)) {
       throw new Error(

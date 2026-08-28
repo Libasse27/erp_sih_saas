@@ -136,6 +136,16 @@ export class InMemoryUserTenantMembershipRepository implements UserTenantMembers
     return count;
   }
 
+  async listActiveByTenantAndRole(tenantId: TenantId, roleId: RoleId): Promise<readonly UserTenantMembership[]> {
+    const result: UserTenantMembership[] = [];
+    for (const membership of this.byId.values()) {
+      if (membership.tenantId.equals(tenantId) && membership.isActive() && membership.roleIds.some((id) => id.equals(roleId))) {
+        result.push(membership);
+      }
+    }
+    return result;
+  }
+
   async save(membership: UserTenantMembership, tenantId: TenantId): Promise<void> {
     // Meme garde defensive que PrismaUserTenantMembershipRepository (couche 3, ADR-0001 §3.2) :
     // le tenantId du contexte d'appel doit toujours correspondre a celui de l'agregat sauvegarde.

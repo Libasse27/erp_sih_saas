@@ -805,3 +805,76 @@ model AuditEntry {
   @@map("AuditEntry")
   @@schema("platform")
 }
+
+// =================================================================================================
+// Module `notifications` — Email + SMS (Phase 0, etape 9/13, O-07, ADR-0007).
+//
+// `platform.Notification`, HORS RLS : meme regime que `Payment`/`PlatformInvoice` (ADR-0007 §6,
+// meme raisonnement que 01-target-architecture.md §3.3) — donnee de niveau plateforme (declenchee
+// par des evenements Subscription/plateforme), filtrage tenant PUREMENT APPLICATIF, `tenant_id`
+// NULLABLE (une notification de niveau plateforme sans tenant reste possible en principe, meme si
+// les deux declencheurs cables a cette etape en portent toujours un).
+//
+// `@@unique([sourceEventId, channel, recipient])` : cle d'idempotence PERSISTEE, seconde ligne de
+// defense derriere `withOutboxIdempotency` (ADR-0007 §6) — jamais un `create()` rattrapant un
+// P2002, voir PrismaNotificationRepository.ts (`createMany({ skipDuplicates: true })`).
+// `recipient` fait partie de la cle : un meme evenement peut legitimement produire PLUSIEURS
+// notifications sur le MEME canal (un ADMIN_ETABLISSEMENT par destinataire resolu, ADR-0007 §4) —
+// sans `recipient` dans la cle, seule la PREMIERE notification survivrait silencieusement.
+// =================================================================================================
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+
+  @@schema("platform")
+}
+
+enum NotificationStatus {
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+  DEAD_LETTER
+
+  @@schema("platform")
+}
+
+/// Miroir de `domain/value-objects/NotificationTemplateKind.ts` — catalogue FERME (ADR-0007 §1/§7).
+enum NotificationTemplateKind {
+  SUBSCRIPTION_WELCOME
+  SUBSCRIPTION_PLAN_CHANGED
+
+  @@schema("platform")
+}
+
+/// Trace CHAQUE notification (voir domain/Notification.ts, 01-target-architecture.md §6.3/§9.4).
+/// `lockedAt`/`lockedBy`/`nextAttemptAt` : meme mecanique de reclamation que `OutboxMessage`
+/// (`FOR UPDATE SKIP LOCKED`, ADR-0004), PLUS un backoff explicite (`nextAttemptAt`, ADR-0007 §6)
+/// absent d'OutboxMessage. Pas de directive `@updatedAt` (magie Prisma-Client) : `updatedAt` est
+/// mis a jour EXPLICITEMENT par chaque mutation SQL (relais/worker), meme discipline que
+/// `OutboxMessage` qui ne porte pas non plus de colonne generique equivalente.
+model Notification {
+  id                String                   @id @db.Uuid
+  tenantId          String?                  @map("tenant_id") @db.Uuid
+  channel           NotificationChannel
+  recipient         String
+  templateKind      NotificationTemplateKind @map("template_kind")
+  sourceEventId     String                   @map("source_event_id") @db.Uuid
+  status            NotificationStatus       @default(PENDING)
+  attempts          Int                      @default(0)
+  lastError         String?                  @map("last_error")
+  providerMessageId String?                  @map("provider_message_id")
+  lockedAt          DateTime?                @map("locked_at")
+  lockedBy          String?                  @map("locked_by")
+  nextAttemptAt     DateTime?                @map("next_attempt_at")
+  createdAt         DateTime                 @map("created_at")
+  updatedAt         DateTime                 @map("updated_at")
+  sentAt            DateTime?                @map("sent_at")
+
+  @@unique([sourceEventId, channel, recipient])
+  @@index([tenantId])
+  @@index([status, lockedAt])
+  @@map("Notification")
+  @@schema("platform")
+}

@@ -3,7 +3,7 @@ import { Redis } from 'ioredis';
 import { Queue } from 'bullmq';
 import type { Clock } from './shared-kernel/domain/ports/Clock.js';
 import type { IdGenerator } from './shared-kernel/domain/ports/IdGenerator.js';
-import type { TenantId } from './shared-kernel/domain/value-objects/TenantId.js';
+import { TenantId } from './shared-kernel/domain/value-objects/TenantId.js';
 import { SystemClock } from './shared-kernel/infrastructure/SystemClock.js';
 import { UuidGenerator } from './shared-kernel/infrastructure/UuidGenerator.js';
 import { ConsoleStructuredLogger } from './shared-kernel/infrastructure/ConsoleStructuredLogger.js';
@@ -32,6 +32,13 @@ import { buildPaymentModule, type PaymentModule } from './modules/payment/infras
 import { SandboxPaymentProviderAdapter } from './modules/payment/infrastructure/payment-provider/SandboxPaymentProviderAdapter.js';
 import { startSubscriptionRenewalScheduler } from './modules/subscription/infrastructure/scheduler/SubscriptionRenewalScheduler.js';
 import { startPaymentReconciliationScheduler } from './modules/payment/infrastructure/scheduler/PaymentReconciliationScheduler.js';
+import { buildNotificationModule, type NotificationModule } from './modules/notifications/infrastructure/NotificationModule.js';
+import type { RecipientDirectory } from './modules/notifications/application/ports/RecipientDirectory.js';
+import { SandboxEmailProviderAdapter } from './modules/notifications/infrastructure/providers/SandboxEmailProviderAdapter.js';
+import { SandboxSmsProviderAdapter } from './modules/notifications/infrastructure/providers/SandboxSmsProviderAdapter.js';
+import { relayNotificationsOnce } from './modules/notifications/infrastructure/persistence/NotificationRelay.js';
+import { createNotificationWorker } from './modules/notifications/infrastructure/queue/NotificationWorker.js';
+import { NOTIFICATION_QUEUE_NAME, type NotificationJobData } from './modules/notifications/infrastructure/queue/NotificationJob.js';
 
 /**
  * Adaptateur cross-module implementant le port `TenantAccessChecker` d'Identity en s'appuyant
@@ -112,6 +119,47 @@ class AuditModuleBackedSessionAuditTrail implements SessionAuditTrail {
 }
 
 /**
+ * Adaptateur cross-module implementant le port `RecipientDirectory` de Notifications en
+ * s'appuyant sur les repositories d'Identity (ADR-0007 §4, etape 9/13). Vit ICI et nulle part
+ * ailleurs — meme raisonnement que `TenantModuleBackedAccessChecker` : c'est le seul point du
+ * code autorise a connaitre Identity ET Notifications a la fois. Resout les emails des membres
+ * ACTIFS portant le role systeme `ADMIN_ETABLISSEMENT` du tenant — audience structurellement
+ * designee par O-04.1, jamais une politique de ciblage inventee.
+ */
+class IdentityModuleBackedRecipientDirectory implements RecipientDirectory {
+  constructor(private readonly identity: IdentityModule) {}
+
+  async findTenantAdminEmails(tenantId: string): Promise<readonly string[]> {
+    const tenantIdResult = TenantId.create(tenantId);
+    if (tenantIdResult.isFailure()) {
+      throw new Error(`RecipientDirectory : tenantId invalide ("${tenantId}").`);
+    }
+    const tenantIdVo = tenantIdResult.getValue();
+
+    const adminRole = await this.identity.repositories.roles.findSystemRoleByCode('ADMIN_ETABLISSEMENT');
+    if (adminRole === null) {
+      // Catalogue systeme non seede (environnement non provisionne) — rien a notifier, jamais
+      // une exception qui ferait echouer indefiniment le consommateur Outbox appelant.
+      return [];
+    }
+
+    const memberships = await this.identity.unitOfWork.withTransaction(
+      () => this.identity.repositories.memberships.listActiveByTenantAndRole(tenantIdVo, adminRole.id),
+      { tenantId: tenantIdVo },
+    );
+
+    const emails: string[] = [];
+    for (const membership of memberships) {
+      const account = await this.identity.repositories.userAccounts.findById(membership.userId);
+      if (account !== null) {
+        emails.push(account.email.value);
+      }
+    }
+    return emails;
+  }
+}
+
+/**
  * Point de cablage unique des dependances (D3, 01-target-architecture.md §5).
  * Aucun singleton global : chaque entree fait partie de ce conteneur explicite, injecte
  * dans les handlers via le composition root de chaque module au fur et a mesure de leur
@@ -130,9 +178,11 @@ export interface CompositionRoot {
   readonly identity: IdentityModule;
   readonly subscription: SubscriptionModule;
   readonly payment: PaymentModule;
+  readonly notifications: NotificationModule;
   /**
-   * Demarre les 3 processus de fond de cette etape (D9 + O-25.6 + O-25.5) : relais Outbox,
-   * scheduler de renouvellement d'abonnement, rapprochement de paiements. Idempotent a l'appel
+   * Demarre les 4 processus de fond de cette etape (D9 + O-25.6 + O-25.5 + ADR-0007) : relais
+   * Outbox, scheduler de renouvellement d'abonnement, rapprochement de paiements, pipeline de
+   * livraison des notifications (relais + worker dedies, ADR-0007 §6). Idempotent a l'appel
    * unique attendu (jamais appele depuis un handler HTTP) — voir server.ts.
    */
   startBackgroundJobs(): void;
@@ -197,6 +247,16 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
     webhookControllerLogger: logger,
   });
 
+  // Notifications (Phase 0, etape 9/13, ADR-0007). Fournisseurs SANDBOX pour Email ET SMS —
+  // aucun fournisseur reel choisi pour NI L'UN NI L'AUTRE canal (ADR-0007 §3 : residu O-07.3
+  // pour SMS ; Email traite symetriquement pour ne pas prendre implicitement une decision
+  // d'infrastructure de production non demandee). SEUL point du code qui construit ces
+  // adaptateurs ; Notifications ne connait que les ports `EmailProvider`/`SmsProvider`.
+  const emailProvider = new SandboxEmailProviderAdapter();
+  const smsProvider = new SandboxSmsProviderAdapter();
+  const recipientDirectory = new IdentityModuleBackedRecipientDirectory(identity);
+  const notifications = buildNotificationModule({ prisma, clock, idGenerator, recipientDirectory });
+
   // Registre `eventType -> handlers[]` du relais Outbox : SEUL point du code autorise a
   // connaitre les consommateurs de PLUSIEURS modules a la fois (01-target-architecture.md §5 —
   // meme raisonnement que `TenantModuleBackedAccessChecker` ci-dessus). TROIS consommateurs pour
@@ -258,6 +318,30 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
         ),
       ],
     ],
+    // Notifications (etape 9/13, ADR-0007 §1) — deux hooks designes des l'etape 4/13 dans
+    // docs/domain/events.md ("notification de bienvenue"/"notification de confirmation, etape
+    // 9"), les SEULS caches ici (voir l'ADR pour la justification de ne pas aller au-dela :
+    // rappels d'impayes/UserAccountCreated hors perimetre).
+    [
+      'subscription.subscription.started',
+      [
+        withOutboxIdempotency(
+          prisma,
+          'notifications.sendWelcomeEmailOnSubscriptionStarted',
+          notifications.outboxHandlers.sendWelcomeEmailOnSubscriptionStarted,
+        ),
+      ],
+    ],
+    [
+      'subscription.subscription.plan-changed',
+      [
+        withOutboxIdempotency(
+          prisma,
+          'notifications.sendPlanChangeConfirmationOnPlanChanged',
+          notifications.outboxHandlers.sendPlanChangeConfirmationOnPlanChanged,
+        ),
+      ],
+    ],
   ]);
 
   // Connexion Redis DEDIEE a BullMQ (voir OutboxQueueConnection.ts — `maxRetriesPerRequest: null`
@@ -278,9 +362,26 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
     logger,
   });
 
+  // Pipeline de livraison des notifications (ADR-0007 §6) — file BullMQ DISTINCTE de
+  // `outbox-relay` (deux politiques de retry deliberement differentes, jamais confondues),
+  // connexion Redis DEDIEE elle aussi (memes contraintes BullMQ que la connexion Outbox
+  // ci-dessus : `maxRetriesPerRequest: null`).
+  const notificationQueueConnection = createOutboxQueueConnection(env.REDIS_URL);
+  const notificationQueue = new Queue<NotificationJobData>(NOTIFICATION_QUEUE_NAME, { connection: notificationQueueConnection });
+  const notificationWorkerId = `notification-${process.pid}`;
+  const notificationWorker = createNotificationWorker({
+    prisma,
+    emailProvider,
+    smsProvider,
+    connection: notificationQueueConnection,
+    workerId: notificationWorkerId,
+    logger,
+  });
+
   let outboxRelayJob: PeriodicJobHandle | undefined;
   let subscriptionRenewalJob: PeriodicJobHandle | undefined;
   let paymentReconciliationJob: PeriodicJobHandle | undefined;
+  let notificationRelayJob: PeriodicJobHandle | undefined;
 
   return {
     env,
@@ -294,6 +395,7 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
     identity,
     subscription,
     payment,
+    notifications,
     startBackgroundJobs(): void {
       // `autorun: false` a la construction (voir OutboxWorker.ts) : demarre explicitement ici,
       // jamais avant — meme discipline que les jobs periodiques ci-dessous (rien ne tourne avant
@@ -322,17 +424,37 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
         handler: payment.services.reconcilePendingPayments,
         logger,
       });
+      void notificationWorker.run().catch((error: unknown) => {
+        logger.error(
+          { event: 'notification.worker.crashed', error: error instanceof Error ? error.message : String(error) },
+          'Le worker BullMQ de livraison des notifications s_est arrete de maniere inattendue',
+        );
+      });
+      notificationRelayJob = startPeriodicJob({
+        name: 'notification-relay',
+        intervalMs: 5_000,
+        run: async () => {
+          await relayNotificationsOnce({ prisma, queue: notificationQueue, workerId: notificationWorkerId, logger });
+        },
+        logger,
+      });
     },
     async stopBackgroundJobs(): Promise<void> {
       // Ordre : stopper la DECOUVERTE (plus aucun nouveau job enfile) avant de fermer le WORKER
       // (qui attend la fin des jobs deja en cours, §8 exploitation) — jamais l'inverse, qui
       // laisserait le worker fermer pendant qu'un cycle de decouverte tente encore d'enfiler.
-      await Promise.all([outboxRelayJob?.stop(), subscriptionRenewalJob?.stop(), paymentReconciliationJob?.stop()]);
-      await outboxWorker.close();
+      await Promise.all([
+        outboxRelayJob?.stop(),
+        subscriptionRenewalJob?.stop(),
+        paymentReconciliationJob?.stop(),
+        notificationRelayJob?.stop(),
+      ]);
+      await Promise.all([outboxWorker.close(), notificationWorker.close()]);
     },
     async shutdown(): Promise<void> {
-      await outboxQueue.close();
+      await Promise.all([outboxQueue.close(), notificationQueue.close()]);
       outboxQueueConnection.disconnect();
+      notificationQueueConnection.disconnect();
       await prisma.$disconnect();
       redis.disconnect();
     },
