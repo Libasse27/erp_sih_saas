@@ -1,4 +1,5 @@
 import type { Role } from '../Role.js';
+import type { SessionSensitivityCategory } from '../value-objects/SessionSensitivityCategory.js';
 
 /**
  * Plancher MFA obligatoire (O-04.1/O-04.2, 01-target-architecture.md §7.1) : declenchement par
@@ -56,4 +57,18 @@ export function requiresMfaForMembership(roles: readonly Role[]): boolean {
         HIGH_IMPACT_FINANCE_PERMISSION_CODES.has(permission.code),
     ),
   );
+}
+
+/**
+ * Categorie de sensibilite d'une session (O-06.1/O-06.2, ADR-0006 §1) — ajoutee a l'etape 8/13,
+ * REUTILISE la meme classification que `requiresMfaForMembership`/`requiresMfaForPlatformContext`
+ * ci-dessus (jamais une taxonomie plus fine : O-06.1 interdit explicitement une "troisieme
+ * taxonomie de risque" distincte de celle d'O-04.1). N'introduit aucune nouvelle regle metier :
+ * lit les memes ensembles de ressources/permissions, purement additif, les deux fonctions
+ * ci-dessus restent inchangees et continuent de determiner le declenchement du MFA.
+ */
+export function resolveSessionSensitivityCategory(
+  roles: readonly Role[],
+): Extract<SessionSensitivityCategory, 'TENANT_MFA_REQUIRED' | 'TENANT_STANDARD'> {
+  return requiresMfaForMembership(roles) ? 'TENANT_MFA_REQUIRED' : 'TENANT_STANDARD';
 }

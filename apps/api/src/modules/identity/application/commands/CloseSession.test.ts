@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { InMemorySessionStore } from '../../../../../test/identity/builders/testKit.js';
+import { InMemorySessionStore, buildTestRefreshTokenIssuer } from '../../../../../test/identity/builders/testKit.js';
 import { CloseSessionHandler } from './CloseSession.js';
 
 describe('CloseSessionHandler', () => {
@@ -12,9 +12,11 @@ describe('CloseSessionHandler', () => {
       requiresMfa: true,
       mfaSatisfiedAt: null,
       issuedAt: new Date().toISOString(),
+      sensitivityCategory: 'PLATFORM_SUPER_ADMIN',
+      absoluteExpiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
 
-    const handler = new CloseSessionHandler(store);
+    const handler = new CloseSessionHandler(store, buildTestRefreshTokenIssuer());
     const result = await handler.execute({ sessionId: 's1' });
 
     expect(result.isSuccess()).toBe(true);
@@ -23,7 +25,7 @@ describe('CloseSessionHandler', () => {
 
   it('est idempotent : fermer une session deja fermee ne produit pas d_erreur', async () => {
     const store = new InMemorySessionStore();
-    const handler = new CloseSessionHandler(store);
+    const handler = new CloseSessionHandler(store, buildTestRefreshTokenIssuer());
 
     const result = await handler.execute({ sessionId: 'inconnue' });
     expect(result.isSuccess()).toBe(true);

@@ -2,6 +2,7 @@ import { Result } from '../../../../shared-kernel/domain/Result.js';
 import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantId.js';
 import { UserAccountId } from '../../domain/value-objects/UserAccountId.js';
 import type { ContextIntent, SessionContextIssuer } from '../services/SessionContextIssuer.js';
+import type { RefreshTokenIssuer } from '../services/RefreshTokenIssuer.js';
 import type { SessionContext, SessionStore } from '../ports/SessionStore.js';
 
 export type { ContextIntent };
@@ -32,6 +33,8 @@ export type ResolveTenantContextError =
 
 export interface ResolveTenantContextResult {
   readonly session: SessionContext;
+  /** Refresh token brut (O-06.5, ADR-0006 §9) — `null` pour une session `MFA_PENDING` (aucune chaine n'est jamais issue avant preuve du second facteur). Retourne UNE SEULE FOIS : jamais persiste en clair (voir domain/RefreshToken.ts). */
+  readonly refreshToken: string | null;
 }
 
 /**
@@ -48,6 +51,7 @@ export class ResolveTenantContextHandler {
   constructor(
     private readonly sessionContextIssuer: SessionContextIssuer,
     private readonly sessionStore: SessionStore,
+    private readonly refreshTokenIssuer: RefreshTokenIssuer,
   ) {}
 
   async execute(
@@ -76,12 +80,18 @@ export class ResolveTenantContextHandler {
     const session = sessionResult.getValue();
 
     // Changement de contexte = fermeture puis emission (jamais une mutation en place) : le
-    // nouvel objet `session` ci-dessus ne partage aucun etat mutable avec l'ancien.
+    // nouvel objet `session` ci-dessus ne partage aucun etat mutable avec l'ancien. Etape 8/13
+    // (ADR-0006 §9) : la chaine de refresh suit EXACTEMENT le meme cycle de vie que la session
+    // elle-meme — fermer l'ancienne chaine, en ouvrir une nouvelle, jamais l'inverse. ORDRE
+    // DELIBERE (correctif securite, revue independante) : la chaine Postgres AVANT la session
+    // Redis — voir CloseSessionHandler pour le raisonnement complet (fail-closed).
     if (command.previousSessionId !== undefined) {
+      await this.refreshTokenIssuer.revokeChainBySessionId(command.previousSessionId, 'CONTEXT_SWITCHED');
       await this.sessionStore.delete(command.previousSessionId);
     }
     await this.sessionStore.create(session);
+    const issuedChain = await this.refreshTokenIssuer.issueChain(session);
 
-    return Result.success({ session });
+    return Result.success({ session, refreshToken: issuedChain?.raw ?? null });
   }
 }

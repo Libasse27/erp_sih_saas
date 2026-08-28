@@ -9,6 +9,7 @@ import type { UserTenantMembershipRepository } from '../../domain/ports/UserTena
 import { UserAccountId } from '../../domain/value-objects/UserAccountId.js';
 import type { AuditTrail } from '../ports/AuditTrail.js';
 import type { SessionContext, SessionStore } from '../ports/SessionStore.js';
+import type { RefreshTokenIssuer } from '../services/RefreshTokenIssuer.js';
 
 export interface ForceMfaReEnrollmentCommand {
   readonly subjectUserAccountId: string;
@@ -52,6 +53,7 @@ export class ForceMfaReEnrollmentHandler {
     private readonly userAccountRepository: UserAccountRepository,
     private readonly membershipRepository: UserTenantMembershipRepository,
     private readonly mfaEnrollmentRepository: MfaEnrollmentRepository,
+    private readonly refreshTokenIssuer: RefreshTokenIssuer,
     private readonly auditTrail: AuditTrail,
     private readonly unitOfWork: UnitOfWork,
     private readonly clock: Clock,
@@ -138,6 +140,8 @@ export class ForceMfaReEnrollmentHandler {
     });
 
     if (outcome.isSuccess()) {
+      // ORDRE DELIBERE (correctif securite, revue independante) : voir CloseSessionHandler.
+      await this.refreshTokenIssuer.revokeAllForUser(subjectId.toString(), 'MFA_RE_ENROLLMENT_FORCED');
       await this.sessionStore.deleteAllForUser(subjectId.toString());
     }
     return outcome;

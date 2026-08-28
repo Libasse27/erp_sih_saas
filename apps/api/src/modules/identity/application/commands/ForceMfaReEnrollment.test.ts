@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantId.js';
 import {
+  buildTestRefreshTokenIssuer,
   FixedClock,
   idFor,
   InMemoryAuditTrail,
@@ -49,6 +50,7 @@ describe('ForceMfaReEnrollmentHandler', () => {
       accounts,
       memberships,
       mfaEnrollments,
+      buildTestRefreshTokenIssuer({ clock, idGenerator }),
       auditTrail,
       new InMemoryUnitOfWork(),
       clock,
@@ -104,6 +106,8 @@ describe('ForceMfaReEnrollmentHandler', () => {
       requiresMfa: true,
       mfaSatisfiedAt: params.mfaSatisfiedAt,
       issuedAt: clock.now().toISOString(),
+      sensitivityCategory: 'TENANT_MFA_REQUIRED',
+      absoluteExpiresAt: new Date(clock.now().getTime() + 60_000).toISOString(),
     };
     await sessions.create(session);
     return session.sessionId;
@@ -117,6 +121,8 @@ describe('ForceMfaReEnrollmentHandler', () => {
       requiresMfa: true,
       mfaSatisfiedAt,
       issuedAt: clock.now().toISOString(),
+      sensitivityCategory: 'PLATFORM_SUPER_ADMIN',
+      absoluteExpiresAt: new Date(clock.now().getTime() + 60_000).toISOString(),
     };
     await sessions.create(session);
     return session.sessionId;
@@ -159,6 +165,8 @@ describe('ForceMfaReEnrollmentHandler', () => {
       requiresMfa: false,
       mfaSatisfiedAt: null,
       issuedAt: clock.now().toISOString(),
+      sensitivityCategory: 'TENANT_STANDARD',
+      absoluteExpiresAt: new Date(clock.now().getTime() + 60_000).toISOString(),
     };
     await sessions.create(subjectSession);
 
@@ -239,6 +247,8 @@ describe('ForceMfaReEnrollmentHandler', () => {
       requiresMfa: false,
       mfaSatisfiedAt: null,
       issuedAt: clock.now().toISOString(),
+      sensitivityCategory: 'TENANT_STANDARD',
+      absoluteExpiresAt: new Date(clock.now().getTime() + 60_000).toISOString(),
     };
     await sessions.create(subjectSession);
 

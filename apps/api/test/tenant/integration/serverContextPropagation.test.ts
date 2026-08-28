@@ -10,7 +10,7 @@ import { seedPermissionCatalog, seedSystemRoles } from '../../../src/modules/ide
 import type { TenantSessionContext } from '../../../src/modules/identity/application/ports/SessionStore.js';
 import { buildTenantModule, type TenantModule } from '../../../src/modules/tenant/infrastructure/TenantModule.js';
 import { createTestPrismaClient, createTestRedisClient, uniqueEmail, uniqueFacilityName } from '../../identity/integration/dbTestHelpers.js';
-import { InMemoryAuditTrail } from '../../identity/builders/testKit.js';
+import { InMemoryAuditTrail, InMemorySessionAuditTrail } from '../../identity/builders/testKit.js';
 
 /**
  * Preuve bout en bout du "contexte serveur" (Phase 0, etape 3, point 4) : depuis un `sessionId`
@@ -48,12 +48,17 @@ describe('Contexte serveur — de sessionId a une requete RLS-scopee reelle (Ide
       idGenerator: new UuidGenerator(),
       tenantAccessChecker,
       auditTrail: new InMemoryAuditTrail(),
+      sessionAuditTrail: new InMemorySessionAuditTrail(),
       mfa: {
         secretEncryptionKey: Buffer.alloc(32, 5),
         secretEncryptionKeyId: 'k1',
         recoveryCodePepper: 'server-context-propagation-test-pepper-32c',
         recoveryCodePepperId: 'p1',
         totpIssuer: 'SIH-TEST',
+      },
+      refreshToken: {
+        hashPepper: 'server-context-propagation-test-refresh-token-pepper-32c',
+        hashPepperId: 'p1',
       },
     });
 

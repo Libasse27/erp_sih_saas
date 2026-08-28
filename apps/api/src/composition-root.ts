@@ -21,6 +21,7 @@ import type {
   TenantAccessStatus,
 } from './modules/identity/application/ports/TenantAccessChecker.js';
 import type { AuditRecordInput, AuditTrail } from './modules/identity/application/ports/AuditTrail.js';
+import type { SessionAuditRecordInput, SessionAuditTrail } from './modules/identity/application/ports/SessionAuditTrail.js';
 import { buildAuditModule, type AuditModule } from './modules/audit/infrastructure/AuditModule.js';
 import { buildTenantModule, type TenantModule } from './modules/tenant/infrastructure/TenantModule.js';
 import {
@@ -85,6 +86,32 @@ class AuditModuleBackedAuditTrail implements AuditTrail {
 }
 
 /**
+ * Adaptateur cross-module implementant le port `SessionAuditTrail` d'Identity en s'appuyant sur
+ * le module `audit` (ADR-0006 §8, etape 8/13). Port DEDIE, categorie fixee a `'SESSION'` — jamais
+ * une extension de `AuditModuleBackedAuditTrail` ci-dessus (meme raisonnement qu'ADR-0005 §5,
+ * alternative 7 explicitement ecartee : "un futur module qui ecrirait d'autres categories
+ * d'audit aurait son propre adaptateur, jamais celui-ci etendu par un `if` sur l'appelant").
+ */
+class AuditModuleBackedSessionAuditTrail implements SessionAuditTrail {
+  constructor(private readonly audit: AuditModule) {}
+
+  async record(input: SessionAuditRecordInput): Promise<void> {
+    await this.audit.services.recordEntry({
+      category: 'SESSION',
+      eventType: input.eventType,
+      outcome: input.outcome,
+      tenantId: input.tenantId,
+      subjectUserId: input.subjectUserId,
+      actorUserId: input.actorUserId,
+      actorRoleCodes: input.actorRoleCodes,
+      reason: input.reason,
+      sessionId: input.sessionId,
+      correlationId: input.correlationId,
+    });
+  }
+}
+
+/**
  * Point de cablage unique des dependances (D3, 01-target-architecture.md §5).
  * Aucun singleton global : chaque entree fait partie de ce conteneur explicite, injecte
  * dans les handlers via le composition root de chaque module au fur et a mesure de leur
@@ -131,6 +158,7 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
   const tenantAccessChecker = new TenantModuleBackedAccessChecker(tenant);
   const audit = buildAuditModule({ prisma, clock, idGenerator });
   const auditTrail = new AuditModuleBackedAuditTrail(audit);
+  const sessionAuditTrail = new AuditModuleBackedSessionAuditTrail(audit);
   const identity = buildIdentityModule({
     prisma,
     redis,
@@ -138,12 +166,17 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
     idGenerator,
     tenantAccessChecker,
     auditTrail,
+    sessionAuditTrail,
     mfa: {
       secretEncryptionKey: Buffer.from(env.MFA_SECRET_ENCRYPTION_KEY, 'base64'),
       secretEncryptionKeyId: env.MFA_SECRET_ENCRYPTION_KEY_ID,
       recoveryCodePepper: env.MFA_RECOVERY_CODE_PEPPER,
       recoveryCodePepperId: env.MFA_RECOVERY_CODE_PEPPER_ID,
       totpIssuer: env.MFA_TOTP_ISSUER,
+    },
+    refreshToken: {
+      hashPepper: env.REFRESH_TOKEN_HASH_PEPPER,
+      hashPepperId: env.REFRESH_TOKEN_HASH_PEPPER_ID,
     },
   });
   // Subscription (Phase 0, etape 4/13) ne depend d'aucun autre module a ce stade — voir le

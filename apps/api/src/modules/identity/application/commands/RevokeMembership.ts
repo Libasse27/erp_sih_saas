@@ -6,6 +6,7 @@ import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantI
 import type { UserTenantMembershipRepository } from '../../domain/ports/UserTenantMembershipRepository.js';
 import { UserTenantMembershipId } from '../../domain/value-objects/UserTenantMembershipId.js';
 import type { SessionStore } from '../ports/SessionStore.js';
+import type { RefreshTokenIssuer } from '../services/RefreshTokenIssuer.js';
 
 export interface RevokeMembershipCommand {
   readonly membershipId: string;
@@ -28,6 +29,7 @@ export class RevokeMembershipHandler {
   constructor(
     private readonly membershipRepository: UserTenantMembershipRepository,
     private readonly sessionStore: SessionStore,
+    private readonly refreshTokenIssuer: RefreshTokenIssuer,
     private readonly unitOfWork: UnitOfWork,
     private readonly clock: Clock,
     private readonly idGenerator: IdGenerator,
@@ -59,6 +61,11 @@ export class RevokeMembershipHandler {
     }, { tenantId });
 
     if (outcome.isSuccess()) {
+      // ORDRE DELIBERE (correctif securite, revue independante) : revoquer les chaines de refresh
+      // AVANT de vider l'index de sessions Redis — voir CloseSessionHandler pour le raisonnement
+      // complet (fail-closed : un refresh concurrent qui commit APRES la revocation Postgres mais
+      // AVANT le nettoyage Redis echoue proprement, jamais l'inverse).
+      await this.refreshTokenIssuer.revokeAllForMembership(membershipId.toString(), 'MEMBERSHIP_REVOKED');
       await this.sessionStore.deleteAllForMembership(membershipId.toString());
     }
     return outcome;

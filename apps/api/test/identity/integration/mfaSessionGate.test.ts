@@ -6,6 +6,7 @@ import { SystemClock } from '../../../src/shared-kernel/infrastructure/SystemClo
 import { UuidGenerator } from '../../../src/shared-kernel/infrastructure/UuidGenerator.js';
 import { buildIdentityModule, type IdentityModule } from '../../../src/modules/identity/infrastructure/IdentityModule.js';
 import type { AuditRecordInput, AuditTrail } from '../../../src/modules/identity/application/ports/AuditTrail.js';
+import type { SessionAuditRecordInput, SessionAuditTrail } from '../../../src/modules/identity/application/ports/SessionAuditTrail.js';
 import type { TenantAccessChecker } from '../../../src/modules/identity/application/ports/TenantAccessChecker.js';
 import type { MfaPendingSessionContext } from '../../../src/modules/identity/application/ports/SessionStore.js';
 import { buildAuditModule, type AuditModule } from '../../../src/modules/audit/infrastructure/AuditModule.js';
@@ -33,6 +34,25 @@ class AuditModuleBackedAuditTrail implements AuditTrail {
   async record(input: AuditRecordInput): Promise<void> {
     await this.audit.services.recordEntry({
       category: 'MFA',
+      eventType: input.eventType,
+      outcome: input.outcome,
+      tenantId: input.tenantId,
+      subjectUserId: input.subjectUserId,
+      actorUserId: input.actorUserId,
+      actorRoleCodes: input.actorRoleCodes,
+      reason: input.reason,
+      sessionId: input.sessionId,
+      correlationId: input.correlationId,
+    });
+  }
+}
+
+class AuditModuleBackedSessionAuditTrail implements SessionAuditTrail {
+  constructor(private readonly audit: AuditModule) {}
+
+  async record(input: SessionAuditRecordInput): Promise<void> {
+    await this.audit.services.recordEntry({
+      category: 'SESSION',
       eventType: input.eventType,
       outcome: input.outcome,
       tenantId: input.tenantId,
@@ -79,12 +99,17 @@ describe('ADR-0005 §4 — le gate MFA_PENDING empeche structurellement toute tr
       idGenerator,
       tenantAccessChecker,
       auditTrail: new AuditModuleBackedAuditTrail(audit),
+      sessionAuditTrail: new AuditModuleBackedSessionAuditTrail(audit),
       mfa: {
         secretEncryptionKey: Buffer.alloc(32, 11),
         secretEncryptionKeyId: 'k1',
         recoveryCodePepper: 'mfa-session-gate-test-recovery-code-pepper-32c',
         recoveryCodePepperId: 'p1',
         totpIssuer: 'SIH-TEST',
+      },
+      refreshToken: {
+        hashPepper: 'mfa-session-gate-test-refresh-token-pepper-32chars',
+        hashPepperId: 'p1',
       },
     });
   });

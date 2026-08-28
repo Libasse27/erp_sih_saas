@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { idFor } from '../../../../../test/identity/builders/testKit.js';
 import { Role } from '../Role.js';
 import { Permission } from '../value-objects/Permission.js';
-import { requiresMfaForMembership, requiresMfaForPlatformContext } from './MfaPolicy.js';
+import { requiresMfaForMembership, requiresMfaForPlatformContext, resolveSessionSensitivityCategory } from './MfaPolicy.js';
 
 function permission(code: string): Permission {
   const result = Permission.create(code);
@@ -52,5 +52,18 @@ describe('MfaPolicy', () => {
       permissions: [permission('invoice:read'), permission('invoice:cancel')],
     });
     expect(requiresMfaForMembership([role])).toBe(true);
+  });
+
+  describe('resolveSessionSensitivityCategory (ADR-0006 §1, etape 8/13) — REUTILISE exactement requiresMfaForMembership, jamais une taxonomie plus fine', () => {
+    it("retourne 'TENANT_STANDARD' quand aucun role n_exige le MFA", () => {
+      const role = Role.system({ id: idFor.role(5), code: 'MEDECIN', name: 'Medecin', permissions: [permission('patient:read')] });
+      expect(resolveSessionSensitivityCategory([role])).toBe('TENANT_STANDARD');
+    });
+
+    it("retourne 'TENANT_MFA_REQUIRED' des qu_un seul role exige le MFA (meme regle du plus restrictif que requiresMfaForMembership)", () => {
+      const sansMfa = Role.system({ id: idFor.role(6), code: 'INFIRMIER', name: 'Infirmier', permissions: [permission('patient:read')] });
+      const avecMfa = Role.system({ id: idFor.role(7), code: 'ADMIN_ETABLISSEMENT', name: 'Admin', permissions: [permission('membership:administer')] });
+      expect(resolveSessionSensitivityCategory([sansMfa, avecMfa])).toBe('TENANT_MFA_REQUIRED');
+    });
   });
 });

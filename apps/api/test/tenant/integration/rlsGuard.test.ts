@@ -142,6 +142,10 @@ describe('ADR-0001 §3.3 — garde-fou generique : toute table du schema platfor
     // app.tenant_id positionne, rendant le journal muet sur le role le plus sensible de la
     // plateforme. Filtrage tenant PUREMENT APPLICATIF (voir auditEntryTenantIsolation.test.ts).
     'AuditEntry',
+    // Etape 8/13 (ADR-0006 §4) : refresh token lie a UserAccount par identifiant uniquement —
+    // meme regime que MfaEnrollment (concept d'identite/session GLOBALE, `tenantId` nullable pour
+    // les chaines issues d'un contexte PLATFORM). Filtrage tenant PUREMENT APPLICATIF.
+    'RefreshToken',
   ]);
 
   beforeAll(async () => {

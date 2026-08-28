@@ -19,6 +19,9 @@ const KNOWN_DEV_ONLY_MFA_SECRET_ENCRYPTION_KEYS = new Set([
 const KNOWN_DEV_ONLY_MFA_RECOVERY_CODE_PEPPERS = new Set([
   'dev_only_never_use_in_prod_recovery_code_pepper_32c',
 ]);
+const KNOWN_DEV_ONLY_REFRESH_TOKEN_HASH_PEPPERS = new Set([
+  'dev_only_never_use_in_prod_refresh_token_pepper_32c',
+]);
 
 const envSchema = z
   .object({
@@ -51,6 +54,13 @@ const envSchema = z
       .min(32, 'MFA_RECOVERY_CODE_PEPPER doit faire au moins 32 caracteres (poivre HMAC).'),
     MFA_RECOVERY_CODE_PEPPER_ID: z.string().min(1).default('p1'),
     MFA_TOTP_ISSUER: z.string().min(1).default('SIH'),
+    // Refresh token a rotation (etape 8/13, ADR-0006 §4) — meme discipline que
+    // MFA_RECOVERY_CODE_PEPPER : poivre HMAC exclusivement via l'environnement, jamais dans le
+    // depot.
+    REFRESH_TOKEN_HASH_PEPPER: z
+      .string()
+      .min(32, 'REFRESH_TOKEN_HASH_PEPPER doit faire au moins 32 caracteres (poivre HMAC).'),
+    REFRESH_TOKEN_HASH_PEPPER_ID: z.string().min(1).default('p1'),
   })
   // Revue de securite (etape 6/13) : Redis ne porte plus SEULEMENT du cache/sessions revocables —
   // il pilote desormais des decisions Outbox (BullMQ, ADR-0004) touchant des evenements
@@ -103,6 +113,13 @@ const envSchema = z
         code: z.ZodIssueCode.custom,
         path: ['MFA_RECOVERY_CODE_PEPPER'],
         message: `MFA_RECOVERY_CODE_PEPPER : valeur d'exemple de developpement detectee, interdite en ${data.NODE_ENV}.`,
+      });
+    }
+    if (KNOWN_DEV_ONLY_REFRESH_TOKEN_HASH_PEPPERS.has(data.REFRESH_TOKEN_HASH_PEPPER)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['REFRESH_TOKEN_HASH_PEPPER'],
+        message: `REFRESH_TOKEN_HASH_PEPPER : valeur d'exemple de developpement detectee, interdite en ${data.NODE_ENV}.`,
       });
     }
   });

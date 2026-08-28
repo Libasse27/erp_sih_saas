@@ -11,6 +11,7 @@ describe('loadEnv — validation REDIS_URL conditionnelle par environnement (rev
     PAYMENT_PROVIDER_WEBHOOK_SECRET: 'a'.repeat(32),
     MFA_SECRET_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString('base64'),
     MFA_RECOVERY_CODE_PEPPER: 'b'.repeat(32),
+    REFRESH_TOKEN_HASH_PEPPER: 'd'.repeat(32),
   };
 
   it('accepte redis:// non authentifie en developpement (environnement local non expose)', () => {
@@ -54,6 +55,7 @@ describe('loadEnv — validation des secrets MFA (etape 7/13, ADR-0005)', () => 
     DATABASE_URL: 'postgresql://sih_app:pw@localhost:5432/sih_dev?schema=public',
     PAYMENT_PROVIDER_WEBHOOK_SECRET: 'a'.repeat(32),
     REDIS_URL: 'rediss://user:pw@redis.example.sn:6380',
+    REFRESH_TOKEN_HASH_PEPPER: 'd'.repeat(32),
   };
 
   it('refuse une MFA_SECRET_ENCRYPTION_KEY qui ne decode pas en exactement 32 octets', () => {

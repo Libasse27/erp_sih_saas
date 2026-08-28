@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantId.js';
 import {
+  buildTestRefreshTokenIssuer,
   FixedClock,
   idFor,
   InMemorySessionStore,
@@ -27,7 +28,14 @@ describe('RevokeMembershipHandler', () => {
     sessions = new InMemorySessionStore();
     clock = new FixedClock('2026-08-23T10:00:00Z');
     idGenerator = new SequentialIdGenerator();
-    handler = new RevokeMembershipHandler(memberships, sessions, new InMemoryUnitOfWork(), clock, idGenerator);
+    handler = new RevokeMembershipHandler(
+      memberships,
+      sessions,
+      buildTestRefreshTokenIssuer({ clock, idGenerator }),
+      new InMemoryUnitOfWork(),
+      clock,
+      idGenerator,
+    );
 
     membership = UserTenantMembership.grant({
       userId: idFor.userAccount(1),
@@ -60,6 +68,8 @@ describe('RevokeMembershipHandler', () => {
       requiresMfa: false,
       mfaSatisfiedAt: null,
       issuedAt: clock.now().toISOString(),
+      sensitivityCategory: 'TENANT_STANDARD',
+      absoluteExpiresAt: new Date(clock.now().getTime() + 60_000).toISOString(),
     });
 
     await handler.execute({ membershipId: membership.id.toString(), tenantId: TENANT_A.toString() });

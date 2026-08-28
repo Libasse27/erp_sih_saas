@@ -11,6 +11,7 @@ import { UserAccountId } from '../../domain/value-objects/UserAccountId.js';
 import type { AuditTrail, MfaAuditEventType } from '../ports/AuditTrail.js';
 import type { MfaPendingSessionContext, SessionContext, SessionStore } from '../ports/SessionStore.js';
 import type { SessionContextIssuer } from '../services/SessionContextIssuer.js';
+import type { RefreshTokenIssuer } from '../services/RefreshTokenIssuer.js';
 
 export type MfaChallengeFactorInput = { readonly kind: 'TOTP'; readonly code: string } | { readonly kind: 'RECOVERY_CODE'; readonly code: string };
 
@@ -30,6 +31,8 @@ export type VerifyMfaChallengeError =
 
 export interface VerifyMfaChallengeResult {
   readonly session: SessionContext;
+  /** Voir `ResolveTenantContextResult.refreshToken` (ADR-0006 §9) — meme contrat, meme raison. */
+  readonly refreshToken: string | null;
 }
 
 type TransactionOutcome = { readonly kind: 'OK' } | { readonly kind: 'ERROR'; readonly error: VerifyMfaChallengeError };
@@ -48,6 +51,7 @@ export class VerifyMfaChallengeHandler {
     private readonly totpService: TotpService,
     private readonly recoveryCodeHasher: RecoveryCodeHasher,
     private readonly sessionContextIssuer: SessionContextIssuer,
+    private readonly refreshTokenIssuer: RefreshTokenIssuer,
     private readonly auditTrail: AuditTrail,
     private readonly unitOfWork: UnitOfWork,
     private readonly clock: Clock,
@@ -150,7 +154,11 @@ export class VerifyMfaChallengeHandler {
     const session = sessionResult.getValue();
     await this.sessionStore.delete(pending.sessionId);
     await this.sessionStore.create(session);
-    return Result.success({ session });
+    // Etape 8/13 (ADR-0006 §9) : une chaine de refresh n'est jamais issue d'une session
+    // `MFA_PENDING` (ADR-0006 §7) — elle ne peut demarrer qu'ICI, une fois le second facteur
+    // prouve et la session COMPLETE emise.
+    const issuedChain = await this.refreshTokenIssuer.issueChain(session);
+    return Result.success({ session, refreshToken: issuedChain?.raw ?? null });
   }
 
   /**

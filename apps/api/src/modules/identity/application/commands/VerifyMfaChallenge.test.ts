@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  buildTestRefreshTokenIssuer,
   FakeRecoveryCodeHasher,
   FakeTotpService,
   FixedClock,
@@ -74,6 +75,7 @@ describe('VerifyMfaChallengeHandler', () => {
       totpService,
       recoveryCodeHasher,
       issuer,
+      buildTestRefreshTokenIssuer({ clock, idGenerator }),
       auditTrail,
       new InMemoryUnitOfWork(),
       clock,

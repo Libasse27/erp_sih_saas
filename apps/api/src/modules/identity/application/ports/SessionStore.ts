@@ -13,6 +13,20 @@
  * toujours `true`, mais le type reste honnete : l'emission initiale precede toujours le
  * challenge).
  */
+/**
+ * `sensitivityCategory`/`absoluteExpiresAt` ajoutes a l'etape 8/13 (ADR-0006 §2/§5,
+ * O-06.1/O-06.2) : `sensitivityCategory` est calcule UNE FOIS par
+ * `SessionContextIssuer.buildSession` (seule fabrique de `SessionContext`) et transporte tel
+ * quel — `RedisSessionStore` le lit pour calculer sa TTL differenciee sans jamais avoir a
+ * re-resoudre de roles ni importer `MfaPolicy`. `absoluteExpiresAt` (ISO) porte le plafond
+ * absolu REEL de la CHAINE (pas de la session individuelle) : fixe a la creation de la chaine et
+ * COPIE TEL QUEL a chaque renouvellement (`SessionContextIssuer.issueForRefresh`) — jamais
+ * recalcule depuis "maintenant", sinon la fenetre glissante repousserait indefiniment le plafond
+ * qu'elle est censee respecter (meme invariant que `RefreshToken.absoluteExpiresAt`, ADR-0006
+ * §5). `RedisSessionStore` s'en sert pour plafonner sa TTL — sans cela, la DERNIERE session
+ * emise avant l'atteinte du plafond resterait exploitable en Redis jusqu'a une fenetre COMPLETE
+ * supplementaire, en violation directe d'O-06.1 ("jamais depasser, quelle que soit l'activite").
+ */
 export interface PlatformSessionContext {
   readonly sessionId: string;
   readonly kind: 'PLATFORM';
@@ -20,6 +34,8 @@ export interface PlatformSessionContext {
   readonly requiresMfa: true;
   readonly mfaSatisfiedAt: string | null;
   readonly issuedAt: string;
+  readonly sensitivityCategory: 'PLATFORM_SUPER_ADMIN';
+  readonly absoluteExpiresAt: string;
 }
 
 export interface TenantSessionContext {
@@ -33,6 +49,8 @@ export interface TenantSessionContext {
   readonly requiresMfa: boolean;
   readonly mfaSatisfiedAt: string | null;
   readonly issuedAt: string;
+  readonly sensitivityCategory: 'TENANT_MFA_REQUIRED' | 'TENANT_STANDARD';
+  readonly absoluteExpiresAt: string;
 }
 
 /**

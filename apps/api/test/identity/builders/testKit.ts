@@ -29,6 +29,13 @@ import type { TotpProvisioning, TotpService, TotpVerificationOutcome } from '../
 import { EncryptedTotpSecret } from '../../../src/modules/identity/domain/value-objects/EncryptedTotpSecret.js';
 import { RecoveryCodeHash } from '../../../src/modules/identity/domain/value-objects/RecoveryCodeHash.js';
 import { Result } from '../../../src/shared-kernel/domain/Result.js';
+import type { RefreshToken, RefreshTokenRevocationReason } from '../../../src/modules/identity/domain/RefreshToken.js';
+import type { RefreshTokenRepository } from '../../../src/modules/identity/domain/ports/RefreshTokenRepository.js';
+import type { RefreshTokenGenerator } from '../../../src/modules/identity/domain/ports/RefreshTokenGenerator.js';
+import type { RefreshTokenHasher } from '../../../src/modules/identity/domain/ports/RefreshTokenHasher.js';
+import { RefreshTokenHash } from '../../../src/modules/identity/domain/value-objects/RefreshTokenHash.js';
+import type { SessionAuditRecordInput, SessionAuditTrail } from '../../../src/modules/identity/application/ports/SessionAuditTrail.js';
+import { RefreshTokenIssuer } from '../../../src/modules/identity/application/services/RefreshTokenIssuer.js';
 
 export class FixedClock implements Clock {
   private current: Date;
@@ -357,6 +364,122 @@ export class InMemoryAuditTrail implements AuditTrail {
   async record(input: AuditRecordInput): Promise<void> {
     this.records.push(input);
   }
+}
+
+/** Fake en memoire de `RefreshTokenRepository` (etape 8/13, ADR-0006) — mono-thread, aucune concurrence reelle (voir PrismaRefreshTokenRepository.test/integration pour la variante reelle qui EXERCE la course). */
+export class InMemoryRefreshTokenRepository implements RefreshTokenRepository {
+  private readonly byId = new Map<string, RefreshToken>();
+
+  async findByHash(hash: RefreshTokenHash): Promise<RefreshToken | null> {
+    for (const token of this.byId.values()) {
+      if (token.tokenHash.equals(hash)) {
+        return token;
+      }
+    }
+    return null;
+  }
+
+  async create(token: RefreshToken): Promise<void> {
+    this.byId.set(token.id.toString(), token);
+  }
+
+  async tryMarkRotatedIfActive(hash: RefreshTokenHash): Promise<boolean> {
+    const token = await this.findByHash(hash);
+    if (token === null || !token.isActive()) {
+      return false;
+    }
+    token.markRotated();
+    return true;
+  }
+
+  async revokeChain(chainId: string, reason: RefreshTokenRevocationReason, now: Date): Promise<readonly string[]> {
+    const sessionIds = new Set<string>();
+    for (const token of this.byId.values()) {
+      if (token.chainId === chainId) {
+        sessionIds.add(token.sessionId);
+        if (token.status !== 'REVOKED') {
+          token.markRevoked(reason, now);
+        }
+      }
+    }
+    return [...sessionIds];
+  }
+
+  async revokeChainBySessionId(sessionId: string, reason: RefreshTokenRevocationReason, now: Date): Promise<void> {
+    for (const token of this.byId.values()) {
+      if (token.sessionId === sessionId) {
+        await this.revokeChain(token.chainId, reason, now);
+        return;
+      }
+    }
+  }
+
+  async revokeAllForUser(userId: string, reason: RefreshTokenRevocationReason, now: Date): Promise<void> {
+    for (const token of this.byId.values()) {
+      if (token.userId.toString() === userId && token.status !== 'REVOKED') {
+        token.markRevoked(reason, now);
+      }
+    }
+  }
+
+  async revokeAllForMembership(membershipId: string, reason: RefreshTokenRevocationReason, now: Date): Promise<void> {
+    for (const token of this.byId.values()) {
+      if (token.membershipId === membershipId && token.status !== 'REVOKED') {
+        token.markRevoked(reason, now);
+      }
+    }
+  }
+
+  all(): readonly RefreshToken[] {
+    return [...this.byId.values()];
+  }
+}
+
+/** Generateur factice (pas de CSPRNG) — secrets sequentiels `refresh-secret-<n>`, pratiques a asserter. */
+export class FakeRefreshTokenGenerator implements RefreshTokenGenerator {
+  private counter = 0;
+
+  generate(): string {
+    this.counter += 1;
+    return `refresh-secret-${this.counter}`;
+  }
+}
+
+/** Hachage factice deterministe (pas de HMAC reel) — le hash EST le secret, prefixe pour respecter le format de l'enveloppe. */
+export class FakeRefreshTokenHasher implements RefreshTokenHasher {
+  hash(rawToken: string): RefreshTokenHash {
+    return mustSucceed(RefreshTokenHash.create(`v1.testpepper.${rawToken}`));
+  }
+}
+
+export class InMemorySessionAuditTrail implements SessionAuditTrail {
+  readonly records: SessionAuditRecordInput[] = [];
+
+  async record(input: SessionAuditRecordInput): Promise<void> {
+    this.records.push(input);
+  }
+}
+
+/**
+ * Construit un `RefreshTokenIssuer` en memoire pour les tests unitaires qui n'exercent PAS
+ * directement le comportement de rotation (ex. `CloseSessionHandler`, `RevokeMembershipHandler`)
+ * mais doivent malgre tout satisfaire sa presence au constructeur depuis l'etape 8/13 (ADR-0006).
+ * `overrides.repository` permet aux tests qui EXERCENT la rotation d'inspecter l'etat via
+ * `InMemoryRefreshTokenRepository.all()`.
+ */
+export function buildTestRefreshTokenIssuer(overrides?: {
+  repository?: InMemoryRefreshTokenRepository;
+  clock?: Clock;
+  idGenerator?: IdGenerator;
+}): RefreshTokenIssuer {
+  return new RefreshTokenIssuer(
+    overrides?.repository ?? new InMemoryRefreshTokenRepository(),
+    new FakeRefreshTokenGenerator(),
+    new FakeRefreshTokenHasher(),
+    new InMemoryUnitOfWork(),
+    overrides?.clock ?? new FixedClock('2026-08-28T00:00:00.000Z'),
+    overrides?.idGenerator ?? new SequentialIdGenerator(),
+  );
 }
 
 export class InMemoryMfaBypassAttemptGuard implements MfaBypassAttemptGuard {

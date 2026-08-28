@@ -108,6 +108,8 @@ describe('StartMfaEnrollmentHandler', () => {
         requiresMfa: false,
         mfaSatisfiedAt: null,
         issuedAt: clock.now().toISOString(),
+        sensitivityCategory: 'TENANT_STANDARD',
+        absoluteExpiresAt: new Date(clock.now().getTime() + 60_000).toISOString(),
       };
       await sessions.create(attackerSession);
 

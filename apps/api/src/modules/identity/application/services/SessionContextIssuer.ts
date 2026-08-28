@@ -4,14 +4,19 @@ import type { IdGenerator } from '../../../../shared-kernel/domain/ports/IdGener
 import type { UnitOfWork } from '../../../../shared-kernel/application/UnitOfWork.js';
 import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantId.js';
 import { MFA_PENDING_SESSION_WINDOW_SECONDS } from '../../domain/MfaTuning.js';
-import { requiresMfaForMembership, requiresMfaForPlatformContext } from '../../domain/services/MfaPolicy.js';
+import { resolveSessionDurationPolicy } from '../../domain/SessionDurationTuning.js';
+import {
+  requiresMfaForMembership,
+  requiresMfaForPlatformContext,
+  resolveSessionSensitivityCategory,
+} from '../../domain/services/MfaPolicy.js';
 import { resolveEffectivePermissions } from '../../domain/services/PermissionResolver.js';
 import type { MfaEnrollmentRepository } from '../../domain/ports/MfaEnrollmentRepository.js';
 import type { RoleRepository } from '../../domain/ports/RoleRepository.js';
 import type { UserAccountRepository } from '../../domain/ports/UserAccountRepository.js';
 import type { UserTenantMembershipRepository } from '../../domain/ports/UserTenantMembershipRepository.js';
 import type { UserAccountId } from '../../domain/value-objects/UserAccountId.js';
-import type { MfaPendingSessionContext, SessionContext } from '../ports/SessionStore.js';
+import type { MfaPendingSessionContext, PlatformSessionContext, SessionContext, TenantSessionContext } from '../ports/SessionStore.js';
 import type { TenantAccessChecker } from '../ports/TenantAccessChecker.js';
 
 export type ContextIntent = { readonly kind: 'PLATFORM' } | { readonly kind: 'TENANT'; readonly tenantId: string };
@@ -35,6 +40,7 @@ export type PostChallengeIssuanceError = 'ACCOUNT_NOT_FOUND' | 'NOT_SUPER_ADMIN'
 interface ResolvedMaterialsPlatform {
   readonly kind: 'PLATFORM';
   readonly requiresMfa: true;
+  readonly sensitivityCategory: 'PLATFORM_SUPER_ADMIN';
 }
 
 interface ResolvedMaterialsTenant {
@@ -44,6 +50,7 @@ interface ResolvedMaterialsTenant {
   readonly roleCodes: readonly string[];
   readonly permissionCodes: readonly string[];
   readonly requiresMfa: boolean;
+  readonly sensitivityCategory: 'TENANT_MFA_REQUIRED' | 'TENANT_STANDARD';
 }
 
 type ResolvedMaterials = ResolvedMaterialsPlatform | ResolvedMaterialsTenant;
@@ -141,6 +148,12 @@ export class SessionContextIssuer {
       return pending;
     }
 
+    // Nouvelle chaine (premiere session complete de ce login) : le plafond absolu part de
+    // MAINTENANT — voir `issueForRefresh` pour le cas ou il doit au contraire etre COPIE tel quel.
+    const absoluteExpiresAt = new Date(
+      this.clock.now().getTime() + resolveSessionDurationPolicy(materials.sensitivityCategory).absoluteCeilingSeconds * 1000,
+    ).toISOString();
+
     if (materials.kind === 'PLATFORM') {
       return {
         sessionId,
@@ -149,6 +162,8 @@ export class SessionContextIssuer {
         requiresMfa: true,
         mfaSatisfiedAt,
         issuedAt,
+        sensitivityCategory: materials.sensitivityCategory,
+        absoluteExpiresAt,
       };
     }
 
@@ -163,7 +178,98 @@ export class SessionContextIssuer {
       requiresMfa: materials.requiresMfa,
       mfaSatisfiedAt,
       issuedAt,
+      sensitivityCategory: materials.sensitivityCategory,
+      absoluteExpiresAt,
     };
+  }
+
+  /**
+   * Utilise par `RefreshSessionHandler` (etape 8/13, ADR-0006 §7) APRES qu'un refresh token
+   * valide a ete presente pour une chaine deja etablie sur une session COMPLETE. Re-resout
+   * roles/permissions/acces tenant depuis la base — EXACTEMENT comme `issueAfterChallenge` (un
+   * membership revoque ou un tenant suspendu PENDANT la duree de vie de la chaine est ainsi
+   * detecte) — mais NE RE-APPLIQUE JAMAIS la table de decision MFA (pas de re-emission en
+   * `MFA_PENDING`, structurellement impossible en sortie de cette methode) : contrairement a
+   * `issueForNewContext`, le second facteur n'a pas a etre re-prouve ICI, c'est precisement le
+   * sens de la "fenetre glissante" (O-06.5) — prolonger une authentification DEJA VALIDE jusqu'au
+   * plafond absolu. `mfaSatisfiedAt` est TRANSPORTE TEL QUEL depuis la chaine (jamais fabrique a
+   * "maintenant" : le facteur n'a pas ete re-prouve a cet instant).
+   *
+   * CORRECTIF SECURITE (revue independante, etape 8/13) — garde ANTI-ESCALADE : refuse
+   * explicitement (`CONTEXT_NO_LONGER_AVAILABLE`, jamais une session complete) si le MFA est
+   * DEVENU exige (ou un enrolement DEVENU actif) DEPUIS l'ouverture de la chaine ALORS QUE le
+   * second facteur n'a jamais ete prouve pour cette chaine (`previousMfaSatisfiedAt === null`).
+   * Sans cette garde, une chaine ouverte AVANT une elevation de permissions (changement de roles
+   * du membership faisant desormais tomber sous le plancher MFA d'O-04.1) continuerait, a chaque
+   * refresh, a delivrer une session complete portant les NOUVELLES permissions sensibles sans
+   * jamais avoir prouve de second facteur — violation directe du plancher MFA. Ne redemande PAS
+   * le facteur a chaque refresh (§7 reste respecte) : la garde ne se declenche QUE si la
+   * condition MFA est devenue vraie APRES coup, jamais pour une chaine ou elle etait deja fausse
+   * a l'ouverture ET l'est restee.
+   */
+  async issueForRefresh(params: {
+    userId: UserAccountId;
+    intent: ContextIntent;
+    previousMfaSatisfiedAt: string | null;
+    /** Plafond absolu REEL de la chaine (`RefreshToken.absoluteExpiresAt`, ISO) — COPIE tel quel, jamais recalcule (voir doc de methode). */
+    chainAbsoluteExpiresAt: string;
+  }): Promise<Result<PlatformSessionContext | TenantSessionContext, PostChallengeIssuanceError>> {
+    const materialsResult = await this.resolveMaterials(params.userId, params.intent);
+    if (materialsResult.isFailure()) {
+      const error = materialsResult.getError();
+      if (error === 'ACCOUNT_NOT_FOUND' || error === 'NOT_SUPER_ADMIN') {
+        return Result.failure(error);
+      }
+      // TENANT_NOT_FOUND / TENANT_SUSPENDED / MEMBERSHIP_NOT_FOUND_OR_INACTIVE : meme traitement
+      // qu'`issueAfterChallenge` — le contexte precedemment valide ne l'est structurellement plus.
+      return Result.failure('CONTEXT_NO_LONGER_AVAILABLE');
+    }
+    const materials = materialsResult.getValue();
+
+    if (params.previousMfaSatisfiedAt === null) {
+      const enrollment = await this.unitOfWork.withTransaction(() =>
+        this.mfaEnrollmentRepository.findByUserId(params.userId),
+      );
+      const hasActiveEnrollment = enrollment !== null && enrollment.isActive();
+      if (materials.requiresMfa || hasActiveEnrollment) {
+        // Meme condition que `buildSession` (ligne du haut de ce fichier) — sauf qu'ici il n'y a
+        // pas de session `MFA_PENDING` a emettre en sortie de refresh (ADR-0006 §7) : le seul
+        // chemin sur est de refuser et de renvoyer le client vers un login/`ResolveTenantContext`
+        // complet, qui appliquera la vraie table de decision MFA.
+        return Result.failure('CONTEXT_NO_LONGER_AVAILABLE');
+      }
+    }
+
+    const issuedAt = this.clock.now().toISOString();
+    const sessionId = this.idGenerator.generate();
+
+    if (materials.kind === 'PLATFORM') {
+      return Result.success({
+        sessionId,
+        kind: 'PLATFORM',
+        userId: params.userId.toString(),
+        requiresMfa: true,
+        mfaSatisfiedAt: params.previousMfaSatisfiedAt,
+        issuedAt,
+        sensitivityCategory: materials.sensitivityCategory,
+        absoluteExpiresAt: params.chainAbsoluteExpiresAt,
+      });
+    }
+
+    return Result.success({
+      sessionId,
+      kind: 'TENANT',
+      userId: params.userId.toString(),
+      tenantId: materials.tenantId.toString(),
+      membershipId: materials.membershipId,
+      roleCodes: materials.roleCodes,
+      permissionCodes: materials.permissionCodes,
+      requiresMfa: materials.requiresMfa,
+      mfaSatisfiedAt: params.previousMfaSatisfiedAt,
+      issuedAt,
+      sensitivityCategory: materials.sensitivityCategory,
+      absoluteExpiresAt: params.chainAbsoluteExpiresAt,
+    });
   }
 
   private async resolveMaterials(
@@ -179,7 +285,7 @@ export class SessionContextIssuer {
       if (!account.isSuperAdmin()) {
         return Result.failure('NOT_SUPER_ADMIN');
       }
-      return Result.success({ kind: 'PLATFORM', requiresMfa: requiresMfaForPlatformContext() });
+      return Result.success({ kind: 'PLATFORM', requiresMfa: requiresMfaForPlatformContext(), sensitivityCategory: 'PLATFORM_SUPER_ADMIN' });
     }
 
     const tenantIdResult = TenantId.create(intent.tenantId);
@@ -228,6 +334,7 @@ export class SessionContextIssuer {
       roleCodes: resolved.roles.map((role) => role.code),
       permissionCodes: permissions.map((permission) => permission.code),
       requiresMfa: requiresMfaForMembership(resolved.roles),
+      sensitivityCategory: resolveSessionSensitivityCategory(resolved.roles),
     });
   }
 }

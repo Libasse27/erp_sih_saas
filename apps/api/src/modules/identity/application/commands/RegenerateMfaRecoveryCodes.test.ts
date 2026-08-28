@@ -68,6 +68,8 @@ describe('RegenerateMfaRecoveryCodesHandler', () => {
       requiresMfa: true,
       mfaSatisfiedAt: clock.now().toISOString(),
       issuedAt: clock.now().toISOString(),
+      sensitivityCategory: 'PLATFORM_SUPER_ADMIN',
+      absoluteExpiresAt: new Date(clock.now().getTime() + 60_000).toISOString(),
     };
     await sessions.create(session);
     return session.sessionId;
@@ -106,6 +108,8 @@ describe('RegenerateMfaRecoveryCodesHandler', () => {
       requiresMfa: true,
       mfaSatisfiedAt: null,
       issuedAt: clock.now().toISOString(),
+      sensitivityCategory: 'PLATFORM_SUPER_ADMIN',
+      absoluteExpiresAt: new Date(clock.now().getTime() + 60_000).toISOString(),
     };
     await sessions.create(notSteppedUp);
 
@@ -124,6 +128,8 @@ describe('RegenerateMfaRecoveryCodesHandler', () => {
         requiresMfa: true,
         mfaSatisfiedAt: null,
         issuedAt: clock.now().toISOString(),
+        sensitivityCategory: 'PLATFORM_SUPER_ADMIN',
+        absoluteExpiresAt: new Date(clock.now().getTime() + 60_000).toISOString(),
       };
       await sessions.create(otherUserSession);
 

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantId.js';
 import {
+  buildTestRefreshTokenIssuer,
   FixedClock,
   idFor,
   InMemoryMfaEnrollmentRepository,
@@ -66,7 +67,7 @@ describe('ResolveTenantContextHandler', () => {
       clock,
       idGenerator,
     );
-    handler = new ResolveTenantContextHandler(issuer, sessions);
+    handler = new ResolveTenantContextHandler(issuer, sessions, buildTestRefreshTokenIssuer({ clock, idGenerator }));
   });
 
   async function registerStandardUser(): Promise<UserAccount> {

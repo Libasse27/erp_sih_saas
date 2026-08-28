@@ -10,7 +10,7 @@ import type { TenantAccessChecker } from '../../../src/modules/identity/applicat
 import { seedPermissionCatalog, seedSystemRoles } from '../../../src/modules/identity/infrastructure/seed/seedIdentityCatalog.js';
 import type { MfaPendingSessionContext, TenantSessionContext } from '../../../src/modules/identity/application/ports/SessionStore.js';
 import { buildTenantModule, type TenantModule } from '../../../src/modules/tenant/infrastructure/TenantModule.js';
-import { InMemoryAuditTrail } from '../builders/testKit.js';
+import { InMemoryAuditTrail, InMemorySessionAuditTrail } from '../builders/testKit.js';
 import { createTestPrismaClient, createTestRedisClient, uniqueEmail, uniqueFacilityName } from './dbTestHelpers.js';
 
 /**
@@ -56,12 +56,17 @@ describe('Identity — flux integres (Prisma + Redis reels)', () => {
       idGenerator: new UuidGenerator(),
       tenantAccessChecker,
       auditTrail: new InMemoryAuditTrail(),
+      sessionAuditTrail: new InMemorySessionAuditTrail(),
       mfa: {
         secretEncryptionKey: Buffer.alloc(32, 3),
         secretEncryptionKeyId: 'k1',
         recoveryCodePepper: 'identity-flow-test-recovery-code-pepper-32c',
         recoveryCodePepperId: 'p1',
         totpIssuer: 'SIH-TEST',
+      },
+      refreshToken: {
+        hashPepper: 'identity-flow-test-refresh-token-pepper-32chars',
+        hashPepperId: 'p1',
       },
     });
 

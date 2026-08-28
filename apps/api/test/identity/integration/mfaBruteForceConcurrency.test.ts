@@ -13,6 +13,7 @@ import { buildIdentityModule, type IdentityModule } from '../../../src/modules/i
 import { AesGcmSecretCipher } from '../../../src/modules/identity/infrastructure/security/AesGcmSecretCipher.js';
 import { Rfc6238TotpService } from '../../../src/modules/identity/infrastructure/security/Rfc6238TotpService.js';
 import type { AuditRecordInput, AuditTrail } from '../../../src/modules/identity/application/ports/AuditTrail.js';
+import type { SessionAuditRecordInput, SessionAuditTrail } from '../../../src/modules/identity/application/ports/SessionAuditTrail.js';
 import type { TenantAccessChecker } from '../../../src/modules/identity/application/ports/TenantAccessChecker.js';
 import type { MfaPendingSessionContext } from '../../../src/modules/identity/application/ports/SessionStore.js';
 import { buildAuditModule, type AuditModule } from '../../../src/modules/audit/infrastructure/AuditModule.js';
@@ -25,6 +26,26 @@ class AuditModuleBackedAuditTrail implements AuditTrail {
   async record(input: AuditRecordInput): Promise<void> {
     await this.audit.services.recordEntry({
       category: 'MFA',
+      eventType: input.eventType,
+      outcome: input.outcome,
+      tenantId: input.tenantId,
+      subjectUserId: input.subjectUserId,
+      actorUserId: input.actorUserId,
+      actorRoleCodes: input.actorRoleCodes,
+      reason: input.reason,
+      sessionId: input.sessionId,
+      correlationId: input.correlationId,
+    });
+  }
+}
+
+/** Calque de `AuditModuleBackedSessionAuditTrail` (composition-root.ts) — voir mfaSessionGate.test.ts. */
+class AuditModuleBackedSessionAuditTrail implements SessionAuditTrail {
+  constructor(private readonly audit: AuditModule) {}
+
+  async record(input: SessionAuditRecordInput): Promise<void> {
+    await this.audit.services.recordEntry({
+      category: 'SESSION',
       eventType: input.eventType,
       outcome: input.outcome,
       tenantId: input.tenantId,
@@ -79,12 +100,17 @@ describe('F-3 — verrou anti-bruteforce sous acces concurrent (PrismaMfaEnrollm
       idGenerator,
       tenantAccessChecker,
       auditTrail: new AuditModuleBackedAuditTrail(audit),
+      sessionAuditTrail: new AuditModuleBackedSessionAuditTrail(audit),
       mfa: {
         secretEncryptionKey: MFA_SECRET_ENCRYPTION_KEY,
         secretEncryptionKeyId: MFA_SECRET_ENCRYPTION_KEY_ID,
         recoveryCodePepper: 'mfa-brute-force-concurrency-test-recovery-code-pepper-32c',
         recoveryCodePepperId: 'p1',
         totpIssuer: MFA_TOTP_ISSUER,
+      },
+      refreshToken: {
+        hashPepper: 'mfa-brute-force-concurrency-test-refresh-token-pepper-32c',
+        hashPepperId: 'p1',
       },
     });
   });

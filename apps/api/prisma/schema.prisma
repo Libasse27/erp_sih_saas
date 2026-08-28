@@ -55,6 +55,7 @@ model UserAccount {
   createdAt    DateTime     @map("created_at")
 
   mfaEnrollment MfaEnrollment?
+  refreshTokens RefreshToken[]
 
   @@map("UserAccount")
   @@schema("platform")
@@ -652,6 +653,73 @@ model MfaRecoveryCode {
 }
 
 // =================================================================================================
+// Sessions avancees — refresh token a rotation (Phase 0, etape 8/13, ADR-0006).
+//
+// `platform.RefreshToken`, HORS RLS : meme regime que `MfaEnrollment`/`AuditEntry` (concept
+// d'identite/session globale, pas de donnee clinique tenant-scopee ; `tenantId` NULLABLE car une
+// chaine issue d'un contexte PLATFORM n'a structurellement pas de tenant).
+//
+// Une ligne par GENERATION de la chaine (`chainId` partage, `previousTokenId` chaine) — jamais de
+// mutation en place de la ligne active. Rotation atomique :
+// `UPDATE ... WHERE token_hash = ? AND status = 'ACTIVE'` (voir PrismaRefreshTokenRepository.ts),
+// EXACTEMENT le pattern deja en production pour `MfaRecoveryCode.consumedAt` (ADR-0005 §3).
+//
+// `tokenHash` UNIQUE : enveloppe HMAC-SHA-256 OPAQUE (`v1.<pepperId>.<hmac>`, ADR-0006 §4),
+// jamais le secret en clair. `absoluteExpiresAt` est fixe a la creation de la chaine et copie tel
+// quel a chaque rotation (jamais recalcule) — voir domain/RefreshToken.ts pour l'invariant complet.
+// =================================================================================================
+
+enum RefreshTokenStatus {
+  ACTIVE
+  ROTATED
+  REVOKED
+
+  @@schema("platform")
+}
+
+/// Miroir de `domain/value-objects/SessionSensitivityCategory.ts` (ADR-0006 §1) — jamais une
+/// taxonomie plus fine que ce qu'O-04.1/`MfaPolicy.ts` materialisent deja.
+enum RefreshTokenSensitivityCategory {
+  PLATFORM_SUPER_ADMIN
+  TENANT_MFA_REQUIRED
+  TENANT_STANDARD
+
+  @@schema("platform")
+}
+
+/// Une generation de refresh token au sein d'une chaine de rotation (voir domain/RefreshToken.ts,
+/// ADR-0006 §5). `sessionId` : identifiant Redis de la session COMPLETE actuellement associee a
+/// cette generation — permet de retrouver/revoquer la chaine depuis une fermeture de session
+/// (`revokeChainBySessionId`, deconnexion/revocation).
+model RefreshToken {
+  id                  String                           @id @db.Uuid
+  chainId             String                           @map("chain_id") @db.Uuid
+  userId              String                           @map("user_id") @db.Uuid
+  tenantId            String?                          @map("tenant_id") @db.Uuid
+  membershipId        String?                          @map("membership_id") @db.Uuid
+  sensitivityCategory RefreshTokenSensitivityCategory   @map("sensitivity_category")
+  tokenHash           String                           @unique @map("token_hash")
+  status              RefreshTokenStatus               @default(ACTIVE)
+  sessionId           String                           @map("session_id")
+  previousTokenId     String?                          @map("previous_token_id") @db.Uuid
+  chainStartedAt      DateTime                         @map("chain_started_at")
+  absoluteExpiresAt   DateTime                         @map("absolute_expires_at")
+  inactivityExpiresAt DateTime                         @map("inactivity_expires_at")
+  issuedAt            DateTime                         @map("issued_at")
+  revokedAt           DateTime?                        @map("revoked_at")
+  revokedReason       String?                          @map("revoked_reason")
+
+  account UserAccount @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([chainId])
+  @@index([userId])
+  @@index([membershipId])
+  @@index([sessionId])
+  @@map("RefreshToken")
+  @@schema("platform")
+}
+
+// =================================================================================================
 // Module `audit` — journal minimal (Phase 0, etape 7/13, ADR-0005 §5). Etendu a l'etape 11/13
 // (requetes, retention O-15, console Super Admin) — voir l'ADR pour le perimetre exact.
 //
@@ -669,6 +737,11 @@ model MfaRecoveryCode {
 
 enum AuditCategory {
   MFA
+  /// Ajoutee a l'etape 8/13 (ADR-0006 §8) — evenements de cycle de vie du refresh token
+  /// (rotation, reutilisation detectee, revocation). Port dedie (`SessionAuditTrail`), jamais
+  /// une extension de l'adaptateur MFA existant (meme raisonnement qu'ADR-0005 §5, alternative 7
+  /// explicitement ecartee).
+  SESSION
 
   @@schema("platform")
 }
@@ -697,6 +770,13 @@ enum AuditEventType {
   MFA_RECOVERY_CODES_REGENERATED
   MFA_RE_ENROLLMENT_FORCED
   MFA_FACTOR_LOCKED_OUT
+  /// Categorie SESSION (ADR-0006 §8, etape 8/13) — miroir de
+  /// `identity/application/ports/SessionAuditTrail.ts::SessionAuditEventType`.
+  SESSION_REFRESH_ROTATED
+  SESSION_REFRESH_REUSE_DETECTED
+  SESSION_REFRESH_REVOKED
+  SESSION_ABSOLUTE_CEILING_EXCEEDED
+  SESSION_INACTIVITY_TIMEOUT
 
   @@schema("platform")
 }

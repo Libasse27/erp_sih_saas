@@ -22,6 +22,8 @@ function tenantSession(overrides: Partial<TenantSessionContext> = {}): TenantSes
     requiresMfa: false,
     mfaSatisfiedAt: null,
     issuedAt: '2026-08-24T10:00:00Z',
+    sensitivityCategory: 'TENANT_STANDARD',
+    absoluteExpiresAt: '2026-08-25T10:00:00Z',
     ...overrides,
   };
 }
@@ -34,6 +36,8 @@ function platformSession(overrides: Partial<PlatformSessionContext> = {}): Platf
     requiresMfa: true,
     mfaSatisfiedAt: '2026-08-24T10:00:00Z',
     issuedAt: '2026-08-24T10:00:00Z',
+    sensitivityCategory: 'PLATFORM_SUPER_ADMIN',
+    absoluteExpiresAt: '2026-08-25T10:00:00Z',
     ...overrides,
   };
 }
