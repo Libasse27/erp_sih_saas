@@ -14,6 +14,7 @@ function activeSubscription(params: { periodEndsAt: string; status?: 'TRIALING' 
     tenantId: tenantId(),
     standardPlanId: PlanId.create(uuidAt(10)).getValue(),
     standardPlanPriceId: PlanPriceId.create(uuidAt(20)).getValue(),
+    ownerUserId: uuidAt(500),
     clock: new FixedClock('2026-08-01T00:00:00Z'),
     idGenerator: new SequentialIdGenerator(),
   });

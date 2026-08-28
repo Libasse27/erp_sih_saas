@@ -13,6 +13,7 @@ import {
 import { CheckUsersQuotaHandler } from '../application/services/CheckUsersQuota.js';
 import { ProcessSubscriptionRenewalsHandler } from '../application/services/ProcessSubscriptionRenewals.js';
 import { createReactivateSubscriptionOnPaymentSucceededHandler } from '../application/services/ReactivateSubscriptionOnPaymentSucceeded.js';
+import { createStartTrialSubscriptionOnHealthFacilityCreatedHandler } from '../application/services/StartTrialSubscriptionOnHealthFacilityCreated.js';
 import type { PlanChangeRepository } from '../domain/ports/PlanChangeRepository.js';
 import type { PlanPriceRepository } from '../domain/ports/PlanPriceRepository.js';
 import type { PlanRepository } from '../domain/ports/PlanRepository.js';
@@ -48,6 +49,8 @@ export interface SubscriptionModule {
     readonly reactivateSubscriptionOnPaymentSucceeded: OutboxEventHandler;
     /** Applique enfin un upgrade proratise, une fois son paiement confirme — SEUL appelant de `Subscription.applyPlanUpgrade()`. */
     readonly applyPlanUpgradeOnPaymentSucceeded: OutboxEventHandler;
+    /** Premiere etape chorographiee de la Saga de provisioning (ADR-0008 §1/§4, etape 10/13) — consomme `tenant.health-facility.created`. */
+    readonly startTrialSubscriptionOnHealthFacilityCreated: OutboxEventHandler;
   };
 }
 
@@ -75,18 +78,20 @@ export function buildSubscriptionModule(deps: {
   const planUpgradeRequests = new PrismaPlanUpgradeRequestRepository(deps.prisma);
   const unitOfWork = new PgUnitOfWork(deps.prisma);
 
+  const startTrialSubscription = new StartTrialSubscriptionHandler(
+    plans,
+    planPrices,
+    subscriptions,
+    unitOfWork,
+    deps.clock,
+    deps.idGenerator,
+  );
+
   return {
     repositories: { plans, planPrices, subscriptions, planChanges, planUpgradeRequests },
     unitOfWork,
     handlers: {
-      startTrialSubscription: new StartTrialSubscriptionHandler(
-        plans,
-        planPrices,
-        subscriptions,
-        unitOfWork,
-        deps.clock,
-        deps.idGenerator,
-      ),
+      startTrialSubscription,
       upgradeSubscriptionPlan: new UpgradeSubscriptionPlanHandler(
         plans,
         planPrices,
@@ -125,6 +130,9 @@ export function buildSubscriptionModule(deps: {
         // "propriete presente valant undefined" — passer explicitement `undefined` a un parametre
         // optionnel serait rejete.
         ...(deps.applyPlanUpgradeLogger === undefined ? {} : { logger: deps.applyPlanUpgradeLogger }),
+      }),
+      startTrialSubscriptionOnHealthFacilityCreated: createStartTrialSubscriptionOnHealthFacilityCreatedHandler({
+        startTrialSubscriptionHandler: startTrialSubscription,
       }),
     },
   };

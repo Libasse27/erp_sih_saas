@@ -80,6 +80,7 @@ describe('Subscription — deux agregats DISTINCTS forces sur le MEME tenant, so
         tenantId: tenant,
         standardPlanId: standardPlan.id,
         standardPlanPriceId: standardPrice.id,
+        ownerUserId: idGenerator.generate(),
         clock,
         idGenerator,
       });
@@ -87,6 +88,7 @@ describe('Subscription — deux agregats DISTINCTS forces sur le MEME tenant, so
         tenantId: tenant,
         standardPlanId: standardPlan.id,
         standardPlanPriceId: standardPrice.id,
+        ownerUserId: idGenerator.generate(),
         clock,
         idGenerator,
       });

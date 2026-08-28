@@ -22,8 +22,14 @@ import type {
 } from './modules/identity/application/ports/TenantAccessChecker.js';
 import type { AuditRecordInput, AuditTrail } from './modules/identity/application/ports/AuditTrail.js';
 import type { SessionAuditRecordInput, SessionAuditTrail } from './modules/identity/application/ports/SessionAuditTrail.js';
+import { PrismaUserAccountRepository } from './modules/identity/infrastructure/persistence/PrismaUserAccountRepository.js';
+import { UserAccountId } from './modules/identity/domain/value-objects/UserAccountId.js';
+import type { UserAccountRepository } from './modules/identity/domain/ports/UserAccountRepository.js';
 import { buildAuditModule, type AuditModule } from './modules/audit/infrastructure/AuditModule.js';
 import { buildTenantModule, type TenantModule } from './modules/tenant/infrastructure/TenantModule.js';
+import type { UserAccountExistenceChecker } from './modules/tenant/application/ports/UserAccountExistenceChecker.js';
+import type { HealthFacilityRepository } from './modules/tenant/domain/ports/HealthFacilityRepository.js';
+import type { SubscriptionRepository } from './modules/subscription/domain/ports/SubscriptionRepository.js';
 import {
   buildSubscriptionModule,
   type SubscriptionModule,
@@ -42,24 +48,103 @@ import { NOTIFICATION_QUEUE_NAME, type NotificationJobData } from './modules/not
 
 /**
  * Adaptateur cross-module implementant le port `TenantAccessChecker` d'Identity en s'appuyant
- * sur le `HealthFacilityRepository` de Tenant. Vit ICI et nulle part ailleurs : c'est le seul
- * point du code autorise a connaitre les deux modules a la fois (01-target-architecture.md §5
- * — "un module n'importe jamais le domain/ d'un autre module ; les echanges passent par des
- * evenements ou des ports explicites"). Ni Identity ni Tenant n'importent l'un le domain/ de
- * l'autre : Identity ne connait que son propre port, Tenant ne connait meme pas l'existence
- * d'Identity. C'est ICI, et nulle part ailleurs, que le statut `FacilityStatus` du domain
- * Tenant (`ACTIVE`/`SUSPENDED`) est traduit vers le vocabulaire propre a Identity
- * (`TenantAccessStatus`) — la seule methode autorisee a lire `HealthFacility.isActive()`.
+ * sur le `HealthFacilityRepository` de Tenant ET, depuis ADR-0008 §3 (Phase 0, etape 10/13), sur
+ * le `SubscriptionRepository` du module Subscription. Vit ICI et nulle part ailleurs : c'est le
+ * seul point du code autorise a connaitre les TROIS modules a la fois
+ * (01-target-architecture.md §5 — "un module n'importe jamais le domain/ d'un autre module ; les
+ * echanges passent par des evenements ou des ports explicites"). Ni Identity, ni Tenant, ni
+ * Subscription n'importent le domain/ d'un autre module entre eux : Identity ne connait que son
+ * propre port, Tenant et Subscription ne connaissent meme pas l'existence d'Identity. C'est ICI,
+ * et nulle part ailleurs, que le statut `FacilityStatus` (Tenant) ET l'existence d'un
+ * `Subscription` (Subscription) sont traduits vers le vocabulaire propre a Identity
+ * (`TenantAccessStatus`).
+ *
+ * Regle ADR-0008 §3 (ferme la faille documentee au §Contexte de cette ADR — un tenant dont
+ * `HealthFacility` a reussi mais dont `StartTrialSubscription` a echoue/n'a pas encore ete
+ * rejoue par l'Outbox etait auparavant deja `ACCESSIBLE`) :
+ *
+ *   ACCESSIBLE  ⟺  HealthFacility.isActive() ET Subscription existe pour ce tenant
+ *
+ * `HealthFacility` `SUSPENDED` reste PRIORITAIRE sur tout le reste (inchange). L'ABSENCE de
+ * `Subscription` (provisioning interrompu avant `StartTrialSubscription`, ou pas encore rejoue
+ * par l'Outbox) est traitee comme `NOT_FOUND` — jamais un troisieme statut invente : ADR-0008 §3
+ * est explicite, `SubscriptionStatus` est un type ferme a QUATRE valeurs TOUTES fonctionnelles
+ * (`TRIALING`/`ACTIVE`/`GRACE_PERIOD`/`DEGRADED`, aucun `CANCELLED`/`EXPIRED`) : il n'existe donc
+ * AUCUNE branche "Subscription dans un etat non fonctionnel" a coder, seule son absence refuse
+ * l'acces. `NOT_FOUND` est le mapping le plus coherent avec la regle "ne jamais reveler
+ * l'existence" (meme raisonnement que l'absence de `HealthFacility` elle-meme) : un tenant
+ * partiellement provisionne ne doit pas etre distingue, du point de vue du client, d'un tenant
+ * qui n'existe pas.
+ *
+ * IMPORTANT (ADR-0008 §3, precision actee a la validation) : `ProvisioningCompleted` (dernier
+ * evenement de la Saga, etape 10/13) N'EST JAMAIS consulte ici. Cette methode reste
+ * STATELESS vis-a-vis de la Saga elle-meme — l'acces est TOUJOURS derive DYNAMIQUEMENT de l'etat
+ * REEL de `HealthFacility`/`Subscription` a l'instant de l'appel, jamais d'un indicateur de
+ * progression mis en cache ou stocke sur un agregat.
  */
-class TenantModuleBackedAccessChecker implements TenantAccessChecker {
-  constructor(private readonly tenant: TenantModule) {}
+export class TenantModuleBackedAccessChecker implements TenantAccessChecker {
+  /**
+   * EXPORTE (revue de securite de l'etape 10/13) UNIQUEMENT pour que cette regle — le SEUL
+   * controle d'acces inter-tenant de la plateforme — soit couverte par un test qui exerce LA
+   * CLASSE REELLE, et non une re-implementation manuelle de la meme regle dans chaque suite
+   * d'integration (ce qu'etaient tous ses "tests" jusqu'ici : une regression sur ce fichier
+   * serait passee inapercue, CI au vert). Voir
+   * test/identity/unit/tenantModuleBackedAccessChecker.test.ts. Ne JAMAIS instancier cette classe
+   * ailleurs que dans `buildCompositionRoot()` ci-dessous.
+   *
+   * Prend les DEUX REPOSITORIES dont elle a besoin, jamais les modules entiers (moindre
+   * privilege : cet adaptateur n'a aucune raison d'atteindre les handlers ou l'UnitOfWork de
+   * Tenant/Subscription).
+   */
+  constructor(
+    private readonly healthFacilities: HealthFacilityRepository,
+    private readonly subscriptions: SubscriptionRepository,
+  ) {}
 
   async checkAccess(tenantId: TenantId): Promise<TenantAccessStatus> {
-    const facility = await this.tenant.repositories.healthFacilities.findByTenantId(tenantId);
+    const facility = await this.healthFacilities.findByTenantId(tenantId);
     if (facility === null) {
       return 'NOT_FOUND';
     }
-    return facility.isActive() ? 'ACCESSIBLE' : 'SUSPENDED';
+    if (!facility.isActive()) {
+      return 'SUSPENDED';
+    }
+    const subscription = await this.subscriptions.findByTenantId(tenantId);
+    if (subscription === null) {
+      return 'NOT_FOUND';
+    }
+    return 'ACCESSIBLE';
+  }
+}
+
+/**
+ * Adaptateur cross-module implementant le port `UserAccountExistenceChecker` de Tenant
+ * (ADR-0008 §9, amendement 1, etape 10/13) — SENS INVERSE de `TenantModuleBackedAccessChecker`
+ * ci-dessus : ici c'est Tenant qui a besoin de verifier une donnee d'Identity. Vit ICI et nulle
+ * part ailleurs, meme raisonnement. Construit a partir d'un `PrismaUserAccountRepository` DEDIE
+ * (pas celui expose par `IdentityModule`, construit plus loin) : deux instances qui enveloppent
+ * le MEME `PrismaClient` sont strictement equivalentes (meme raisonnement que `PgUnitOfWork`,
+ * voir le commentaire de tete de TenantModule.ts) — ce choix evite une dependance de
+ * CONSTRUCTION d'Identity avant Tenant, alors que l'inverse (Identity apres Tenant/Subscription,
+ * pour `TenantModuleBackedAccessChecker`) est deja le sens retenu plus bas.
+ */
+export class IdentityModuleBackedUserAccountExistenceChecker implements UserAccountExistenceChecker {
+  /**
+   * EXPORTE (revue de securite de l'etape 10/13) pour la meme raison que
+   * `TenantModuleBackedAccessChecker` ci-dessus : c'est cette classe REELLE qui doit etre
+   * couverte par un test, pas une copie manuelle. Typee sur le PORT `UserAccountRepository`
+   * (jamais sur l'implementation Prisma concrete) — l'existence d'un compte est la seule chose
+   * dont cet adaptateur a besoin.
+   */
+  constructor(private readonly userAccounts: UserAccountRepository) {}
+
+  async exists(userId: string): Promise<boolean> {
+    const idResult = UserAccountId.create(userId);
+    if (idResult.isFailure()) {
+      return false;
+    }
+    const account = await this.userAccounts.findById(idResult.getValue());
+    return account !== null;
   }
 }
 
@@ -200,12 +285,34 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
   const redis = new Redis(env.REDIS_URL, { maxRetriesPerRequest: 3, lazyConnect: false });
   const logger = new ConsoleStructuredLogger();
 
-  // Tenant et Audit cables avant Identity : Identity depend des ports `TenantAccessChecker`
-  // (ResolveTenantContextHandler, Phase 0 etape 3) et `AuditTrail` (MFA, etape 7/13), dont les
-  // implementations ci-dessous ont besoin des modules Tenant/Audit deja construits. L'inverse
-  // n'est jamais vrai : ni Tenant ni Audit ne dependent de rien d'Identity.
-  const tenant = buildTenantModule({ prisma, clock, idGenerator });
-  const tenantAccessChecker = new TenantModuleBackedAccessChecker(tenant);
+  // `userAccountsForExistenceCheck` : instance DEDIEE de `PrismaUserAccountRepository` (ADR-0008
+  // §9, amendement 1, etape 10/13), construite AVANT le module Tenant lui-meme — Tenant a
+  // desormais besoin de verifier l'existence d'un `UserAccount` (`ownerUserId`) des la creation
+  // d'un `HealthFacility`, sans attendre la construction complete du module Identity (qui, elle,
+  // depend en retour de Tenant/Subscription via `TenantAccessChecker`, voir plus bas — d'ou
+  // l'instance DEDIEE plutot qu'un partage de `identity.repositories.userAccounts`, qui creerait
+  // une dependance circulaire de CONSTRUCTION entre les deux modules).
+  const userAccountsForExistenceCheck = new PrismaUserAccountRepository(prisma);
+  const userAccountExistenceChecker = new IdentityModuleBackedUserAccountExistenceChecker(
+    userAccountsForExistenceCheck,
+  );
+
+  // Tenant, Subscription et Audit cables avant Identity : Identity depend des ports
+  // `TenantAccessChecker` (ResolveTenantContextHandler, Phase 0 etape 3 ; compose Tenant ET
+  // Subscription depuis ADR-0008 §3, etape 10/13) et `AuditTrail` (MFA, etape 7/13), dont les
+  // implementations ci-dessous ont besoin des modules Tenant/Subscription/Audit deja construits.
+  // L'inverse n'est jamais vrai au niveau des MODULES eux-memes : ni Tenant, ni Subscription, ni
+  // Audit ne dependent du MODULE Identity — Subscription en particulier "ne depend d'aucun autre
+  // module" (voir le residu documente dans SubscriptionModule.ts sur l'absence volontaire d'un
+  // port `TenantAccessChecker` cote Subscription), sa construction est simplement AVANCEE ici pour
+  // etre disponible au moment ou `TenantModuleBackedAccessChecker` en a besoin. Tenant, lui, recoit
+  // desormais `userAccountExistenceChecker` (port cross-module, pas le module Identity lui-meme).
+  const tenant = buildTenantModule({ prisma, clock, idGenerator, userAccountExistenceChecker });
+  const subscription = buildSubscriptionModule({ prisma, clock, idGenerator, applyPlanUpgradeLogger: logger });
+  const tenantAccessChecker = new TenantModuleBackedAccessChecker(
+    tenant.repositories.healthFacilities,
+    subscription.repositories.subscriptions,
+  );
   const audit = buildAuditModule({ prisma, clock, idGenerator });
   const auditTrail = new AuditModuleBackedAuditTrail(audit);
   const sessionAuditTrail = new AuditModuleBackedSessionAuditTrail(audit);
@@ -229,10 +336,6 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
       hashPepperId: env.REFRESH_TOKEN_HASH_PEPPER_ID,
     },
   });
-  // Subscription (Phase 0, etape 4/13) ne depend d'aucun autre module a ce stade — voir le
-  // residu documente dans SubscriptionModule.ts sur l'absence volontaire d'un port
-  // TenantAccessChecker cote Subscription (hors perimetre de cette etape).
-  const subscription = buildSubscriptionModule({ prisma, clock, idGenerator, applyPlanUpgradeLogger: logger });
 
   // Prestataire de paiement SANDBOX (O-25.3, residu : "fournisseur de paiement SaaS" non
   // choisi) — SEUL point du code qui construit cet adaptateur ; Payment ne connait que le port
@@ -318,10 +421,12 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
         ),
       ],
     ],
-    // Notifications (etape 9/13, ADR-0007 §1) — deux hooks designes des l'etape 4/13 dans
-    // docs/domain/events.md ("notification de bienvenue"/"notification de confirmation, etape
-    // 9"), les SEULS caches ici (voir l'ADR pour la justification de ne pas aller au-dela :
-    // rappels d'impayes/UserAccountCreated hors perimetre).
+    // Notifications (etape 9/13, ADR-0007 §1) — hook "notification de bienvenue" designe des
+    // l'etape 4/13 dans docs/domain/events.md, le SEUL hook de NOTIFICATION cable ici (voir l'ADR
+    // pour la justification de ne pas aller au-dela : rappels d'impayes/UserAccountCreated hors
+    // perimetre). Ce canal porte aussi, depuis le resequencement F3, le deuxieme maillon de la
+    // Saga de provisioning (identity.grantOwnerMembershipOnSubscriptionStarted, voir le
+    // commentaire de tete de la section "Saga de provisioning" plus bas pour le detail complet).
     [
       'subscription.subscription.started',
       [
@@ -329,6 +434,11 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
           prisma,
           'notifications.sendWelcomeEmailOnSubscriptionStarted',
           notifications.outboxHandlers.sendWelcomeEmailOnSubscriptionStarted,
+        ),
+        withOutboxIdempotency(
+          prisma,
+          'identity.grantOwnerMembershipOnSubscriptionStarted',
+          identity.outboxHandlers.grantOwnerMembershipOnSubscriptionStarted,
         ),
       ],
     ],
@@ -339,6 +449,59 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
           prisma,
           'notifications.sendPlanChangeConfirmationOnPlanChanged',
           notifications.outboxHandlers.sendPlanChangeConfirmationOnPlanChanged,
+        ),
+      ],
+    ],
+    // Saga de provisioning (ADR-0008 §1/§4/§9/§10/§11, amendement 1, Phase 0 etape 10/13) —
+    // chorographie COMPLETE et STRICTEMENT SEQUENTIELLE (RESEQUENCEE — correctif F3 de la revue
+    // de securite independante de cette etape, Moyen), CINQ maillons, chacun le consommateur
+    // Outbox UNIQUE de l'evenement emis par le maillon precedent :
+    //   1. HealthFacilityCreated (module tenant) -> subscription.startTrialSubscriptionOnHealthFacilityCreated
+    //      (module subscription) : demarre l'essai gratuit STANDARD, relit desormais `ownerUserId`
+    //      depuis le payload et le propage a SubscriptionStarted (voir §9 de l'ADR).
+    //   2. SubscriptionStarted (module subscription) -> DEUX consommateurs sur le MEME eventType
+    //      (meme pattern que SaaSPaymentSucceeded plus haut, aucune dependance causale entre eux) :
+    //        - notifications.sendWelcomeEmailOnSubscriptionStarted (etape 9/13, inchange) ;
+    //        - identity.grantOwnerMembershipOnSubscriptionStarted (RESEQUENCE ICI, ex-
+    //          `grantOwnerMembershipOnHealthFacilityCreated`, retire du canal
+    //          `tenant.health-facility.created` ci-dessous) : accorde ADMIN_ETABLISSEMENT a
+    //          `ownerUserId`, lu depuis le payload de SubscriptionStarted — NE PEUT PLUS s'executer
+    //          avant que l'abonnement d'essai n'ait ete effectivement demarre (ferme le defaut
+    //          constate par la revue : `MembershipGranted`/`ProvisioningCompleted` pouvaient
+    //          auparavant preceder `SubscriptionStarted` si cette derniere etape prenait du retard).
+    //   3. MembershipGranted (module identity) -> tenant.seedFacilityConfigurationOnMembershipGranted
+    //      (ADR-0008 §10) : seme la configuration technique minimale du tenant.
+    //   4. FacilityConfigurationSeeded (module tenant, EMIS ET CONSOMME par le MEME module) ->
+    //      tenant.completeProvisioningOnFacilityConfigurationSeeded (ADR-0008 §11) : emet
+    //      ProvisioningCompleted, signal de cloture minimal — JAMAIS consulte par
+    //      TenantModuleBackedAccessChecker (voir son commentaire de tete, inchange).
+    [
+      'tenant.health-facility.created',
+      [
+        withOutboxIdempotency(
+          prisma,
+          'subscription.startTrialSubscriptionOnHealthFacilityCreated',
+          subscription.outboxHandlers.startTrialSubscriptionOnHealthFacilityCreated,
+        ),
+      ],
+    ],
+    [
+      'identity.membership.granted',
+      [
+        withOutboxIdempotency(
+          prisma,
+          'tenant.seedFacilityConfigurationOnMembershipGranted',
+          tenant.outboxHandlers.seedFacilityConfigurationOnMembershipGranted,
+        ),
+      ],
+    ],
+    [
+      'tenant.facility-configuration-seeded',
+      [
+        withOutboxIdempotency(
+          prisma,
+          'tenant.completeProvisioningOnFacilityConfigurationSeeded',
+          tenant.outboxHandlers.completeProvisioningOnFacilityConfigurationSeeded,
         ),
       ],
     ],

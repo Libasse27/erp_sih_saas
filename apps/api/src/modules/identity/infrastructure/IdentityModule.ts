@@ -3,6 +3,7 @@ import type { Redis } from 'ioredis';
 import type { Clock } from '../../../shared-kernel/domain/ports/Clock.js';
 import type { IdGenerator } from '../../../shared-kernel/domain/ports/IdGenerator.js';
 import type { UnitOfWork } from '../../../shared-kernel/application/UnitOfWork.js';
+import type { OutboxEventHandler } from '../../../shared-kernel/application/OutboxEventHandler.js';
 import { AuthenticateUserHandler } from '../application/commands/AuthenticateUser.js';
 import { CloseSessionHandler } from '../application/commands/CloseSession.js';
 import { ConfirmMfaEnrollmentHandler } from '../application/commands/ConfirmMfaEnrollment.js';
@@ -15,6 +16,7 @@ import { RevokeMembershipHandler } from '../application/commands/RevokeMembershi
 import { StartMfaEnrollmentHandler } from '../application/commands/StartMfaEnrollment.js';
 import { VerifyMfaChallengeHandler } from '../application/commands/VerifyMfaChallenge.js';
 import { RefreshSessionHandler } from '../application/commands/RefreshSession.js';
+import { createGrantOwnerMembershipOnSubscriptionStartedHandler } from '../application/services/GrantOwnerMembershipOnSubscriptionStarted.js';
 import { SessionContextIssuer } from '../application/services/SessionContextIssuer.js';
 import { ServerContextResolver } from '../application/services/ServerContextResolver.js';
 import { RefreshTokenIssuer } from '../application/services/RefreshTokenIssuer.js';
@@ -80,6 +82,11 @@ export interface IdentityModule {
     readonly regenerateMfaRecoveryCodes: RegenerateMfaRecoveryCodesHandler;
     readonly refreshSession: RefreshSessionHandler;
   };
+  /** Consommateurs Outbox exposes par ce module — cables UNIQUEMENT dans composition-root.ts. */
+  readonly outboxHandlers: {
+    /** Deuxieme etape chorographiee de la Saga de provisioning (ADR-0008 §1/§4/§9, resequencement F3 — revue de securite de l'etape 10/13) — consomme `subscription.subscription.started`, STRICTEMENT APRES que l'abonnement d'essai ait ete demarre (plus jamais en parallele de `subscription.startTrialSubscriptionOnHealthFacilityCreated`). */
+    readonly grantOwnerMembershipOnSubscriptionStarted: OutboxEventHandler;
+  };
   /** Contexte serveur (Phase 0, etape 3) — voir application/services/ServerContextResolver.ts pour la justification de son emplacement dans Identity. */
   readonly serverContextResolver: ServerContextResolver;
 }
@@ -141,6 +148,15 @@ export function buildIdentityModule(deps: {
     deps.idGenerator,
   );
 
+  const grantMembership = new GrantMembershipHandler(
+    userAccounts,
+    memberships,
+    roles,
+    unitOfWork,
+    deps.clock,
+    deps.idGenerator,
+  );
+
   return {
     repositories: { userAccounts, memberships, roles, mfaEnrollments, refreshTokens },
     unitOfWork,
@@ -152,14 +168,7 @@ export function buildIdentityModule(deps: {
         deps.clock,
         deps.idGenerator,
       ),
-      grantMembership: new GrantMembershipHandler(
-        userAccounts,
-        memberships,
-        roles,
-        unitOfWork,
-        deps.clock,
-        deps.idGenerator,
-      ),
+      grantMembership,
       revokeMembership: new RevokeMembershipHandler(
         memberships,
         sessionStore,
@@ -233,6 +242,11 @@ export function buildIdentityModule(deps: {
         deps.clock,
         deps.idGenerator,
       ),
+    },
+    outboxHandlers: {
+      grantOwnerMembershipOnSubscriptionStarted: createGrantOwnerMembershipOnSubscriptionStartedHandler({
+        grantMembershipHandler: grantMembership,
+      }),
     },
     serverContextResolver: new ServerContextResolver(sessionStore, mfaBypassAttemptGuard, deps.auditTrail),
   };

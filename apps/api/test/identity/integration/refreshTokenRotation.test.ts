@@ -11,7 +11,11 @@ import type { SessionAuditRecordInput, SessionAuditTrail } from '../../../src/mo
 import type { TenantSessionContext } from '../../../src/modules/identity/application/ports/SessionStore.js';
 import { seedPermissionCatalog, seedSystemRoles } from '../../../src/modules/identity/infrastructure/seed/seedIdentityCatalog.js';
 import { buildTenantModule, type TenantModule } from '../../../src/modules/tenant/infrastructure/TenantModule.js';
+import type { UserAccountExistenceChecker } from '../../../src/modules/tenant/application/ports/UserAccountExistenceChecker.js';
+import { buildSubscriptionModule, seedPlanCatalog, type SubscriptionModule } from '../../../src/modules/subscription/infrastructure/SubscriptionModule.js';
 import { buildAuditModule, type AuditModule } from '../../../src/modules/audit/infrastructure/AuditModule.js';
+import { PrismaUserAccountRepository } from '../../../src/modules/identity/infrastructure/persistence/PrismaUserAccountRepository.js';
+import { UserAccountId } from '../../../src/modules/identity/domain/value-objects/UserAccountId.js';
 import { createTestPrismaClient, createTestRedisClient, uniqueEmail, uniqueFacilityName } from './dbTestHelpers.js';
 
 /** Calque des adaptateurs de composition-root.ts (voir mfaSessionGate.test.ts pour le meme raisonnement). */
@@ -40,16 +44,35 @@ describe('Refresh token rotation — integration Postgres + Redis reelle (O-06.5
   let redis: Redis;
   let identity: IdentityModule;
   let tenant: TenantModule;
+  let subscription: SubscriptionModule;
 
   beforeAll(async () => {
     prisma = createTestPrismaClient();
     redis = createTestRedisClient();
-    tenant = buildTenantModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator() });
+    // Reproduit fidelement `IdentityModuleBackedUserAccountExistenceChecker` de
+    // composition-root.ts (ADR-0008 §9, amendement 1) — voir le meme commentaire dans
+    // serverContextPropagation.test.ts.
+    const userAccountsForExistenceCheck = new PrismaUserAccountRepository(prisma);
+    const userAccountExistenceChecker: UserAccountExistenceChecker = {
+      exists: async (userId: string) => {
+        const idResult = UserAccountId.create(userId);
+        if (idResult.isFailure()) {
+          return false;
+        }
+        return (await userAccountsForExistenceCheck.findById(idResult.getValue())) !== null;
+      },
+    };
+    tenant = buildTenantModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator(), userAccountExistenceChecker });
+    subscription = buildSubscriptionModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator() });
+    // Compose Subscription depuis ADR-0008 §3 (etape 10/13) : ACCESSIBLE exige desormais un
+    // Subscription existant — voir composition-root.ts pour la justification complete.
     const tenantAccessChecker: TenantAccessChecker = {
       checkAccess: async (tenantId) => {
         const facility = await tenant.repositories.healthFacilities.findByTenantId(tenantId);
         if (facility === null) return 'NOT_FOUND';
-        return facility.isActive() ? 'ACCESSIBLE' : 'SUSPENDED';
+        if (!facility.isActive()) return 'SUSPENDED';
+        const activeSubscription = await subscription.repositories.subscriptions.findByTenantId(tenantId);
+        return activeSubscription === null ? 'NOT_FOUND' : 'ACCESSIBLE';
       },
     };
     const audit = buildAuditModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator() });
@@ -76,6 +99,7 @@ describe('Refresh token rotation — integration Postgres + Redis reelle (O-06.5
 
     await seedPermissionCatalog(prisma);
     await seedSystemRoles(identity.repositories.roles);
+    await seedPlanCatalog(subscription.repositories.plans, subscription.repositories.planPrices, new SystemClock(), new UuidGenerator());
   });
 
   afterAll(async () => {
@@ -91,9 +115,19 @@ describe('Refresh token rotation — integration Postgres + Redis reelle (O-06.5
     return { userId: result.getValue().userAccountId, email, password };
   }
 
+  /** Provisionne un `HealthFacility` ET demarre son essai gratuit (ADR-0008 §3, etape 10/13 — voir identityFlow.test.ts pour la justification complete). `ownerUserId` (ADR-0008 §9, amendement 1) : compte "proprietaire" JETABLE, distinct du compte que chaque test cree ensuite pour ses propres besoins. */
   async function createFacilityTenantId(): Promise<string> {
-    const result = await tenant.handlers.createHealthFacility.execute({ name: uniqueFacilityName('Etablissement Refresh') });
+    const owner = await createAccount();
+    const result = await tenant.handlers.createHealthFacility.execute({
+      name: uniqueFacilityName('Etablissement Refresh'),
+      ownerUserId: owner.userId,
+    });
     if (result.isFailure()) throw new Error(`Echec creation etablissement: ${result.getError()}`);
+    const trial = await subscription.handlers.startTrialSubscription.execute({
+      tenantId: result.getValue().tenantId,
+      ownerUserId: owner.userId,
+    });
+    if (trial.isFailure()) throw new Error(`Echec demarrage essai: ${trial.getError()}`);
     return result.getValue().tenantId;
   }
 

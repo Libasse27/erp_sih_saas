@@ -64,6 +64,7 @@ describe('ProcessSubscriptionRenewalsHandler — scheduler autonome (O-25.6)', (
         tenantId: TENANT,
         standardPlanId: plan.id,
         standardPlanPriceId: price.id,
+        ownerUserId: uuidAt(500),
         clock,
         idGenerator,
       });
@@ -116,7 +117,7 @@ describe('ProcessSubscriptionRenewalsHandler — scheduler autonome (O-25.6)', (
     const idGenerator = new SequentialIdGenerator();
 
     const { plan, price } = await seedStandardPlan(planRepository, planPriceRepository);
-    const subscription = Subscription.startTrial({ tenantId: TENANT, standardPlanId: plan.id, standardPlanPriceId: price.id, clock, idGenerator });
+    const subscription = Subscription.startTrial({ tenantId: TENANT, standardPlanId: plan.id, standardPlanPriceId: price.id, ownerUserId: uuidAt(500), clock, idGenerator });
     await subscriptionRepository.save(subscription, TENANT);
     expect(subscription.status).toBe('TRIALING');
 
@@ -171,6 +172,7 @@ describe('ProcessSubscriptionRenewalsHandler — scheduler autonome (O-25.6)', (
           tenantId: TENANT,
           standardPlanId: plan.id,
           standardPlanPriceId: price.id,
+          ownerUserId: uuidAt(500),
           clock: new FixedClock('2026-08-01T00:00:00Z'),
           idGenerator,
         });

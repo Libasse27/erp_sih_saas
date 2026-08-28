@@ -36,6 +36,7 @@ async function buildScenario(maxUsers: number) {
     tenantId,
     standardPlanId: plan.id,
     standardPlanPriceId: PlanPriceId.create(idGenerator.generate()).getValue(),
+    ownerUserId: uuidAt(500),
     clock,
     idGenerator,
   });

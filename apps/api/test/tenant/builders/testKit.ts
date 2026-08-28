@@ -4,6 +4,9 @@ import type { UnitOfWork, UnitOfWorkContext } from '../../../src/shared-kernel/a
 import type { TenantId } from '../../../src/shared-kernel/domain/value-objects/TenantId.js';
 import type { HealthFacility } from '../../../src/modules/tenant/domain/HealthFacility.js';
 import type { HealthFacilityRepository } from '../../../src/modules/tenant/domain/ports/HealthFacilityRepository.js';
+import type { FacilitySettings } from '../../../src/modules/tenant/domain/FacilitySettings.js';
+import type { FacilitySettingsRepository } from '../../../src/modules/tenant/domain/ports/FacilitySettingsRepository.js';
+import type { UserAccountExistenceChecker } from '../../../src/modules/tenant/application/ports/UserAccountExistenceChecker.js';
 import { Result } from '../../../src/shared-kernel/domain/Result.js';
 
 // Duplique volontairement les primitives generiques de test/identity/builders/testKit.ts plutot
@@ -65,6 +68,40 @@ export class InMemoryHealthFacilityRepository implements HealthFacilityRepositor
       throw new Error("Tentative de sauvegarde d'un HealthFacility hors du tenant du contexte courant.");
     }
     this.byTenantId.set(facility.id.toString(), facility);
+  }
+}
+
+export class InMemoryFacilitySettingsRepository implements FacilitySettingsRepository {
+  private readonly byTenantId = new Map<string, FacilitySettings>();
+
+  async findByTenantId(tenantId: TenantId): Promise<FacilitySettings | null> {
+    return this.byTenantId.get(tenantId.toString()) ?? null;
+  }
+
+  async save(settings: FacilitySettings, tenantId: TenantId): Promise<void> {
+    if (!settings.tenantId.equals(tenantId)) {
+      throw new Error("Tentative de sauvegarde d'un FacilitySettings hors du tenant du contexte courant.");
+    }
+    this.byTenantId.set(settings.tenantId.toString(), settings);
+  }
+}
+
+/**
+ * Fake du port cross-module `UserAccountExistenceChecker` (voir composition-root.ts pour
+ * l'implementation reelle, qui delegue au module Identity). Par defaut AUCUN compte n'existe —
+ * comportement volontairement restrictif, a l'image de `InMemoryTenantAccessChecker`
+ * (test/identity/builders/testKit.ts) : un test doit `seed()` explicitement les `userId` qu'il
+ * attend voir acceptes par `CreateHealthFacilityHandler`.
+ */
+export class InMemoryUserAccountExistenceChecker implements UserAccountExistenceChecker {
+  private readonly known = new Set<string>();
+
+  seed(userId: string): void {
+    this.known.add(userId);
+  }
+
+  async exists(userId: string): Promise<boolean> {
+    return this.known.has(userId);
   }
 }
 

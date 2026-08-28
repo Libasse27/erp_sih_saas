@@ -10,6 +10,10 @@ import type { TenantAccessChecker } from '../../../src/modules/identity/applicat
 import { seedPermissionCatalog, seedSystemRoles } from '../../../src/modules/identity/infrastructure/seed/seedIdentityCatalog.js';
 import type { MfaPendingSessionContext, TenantSessionContext } from '../../../src/modules/identity/application/ports/SessionStore.js';
 import { buildTenantModule, type TenantModule } from '../../../src/modules/tenant/infrastructure/TenantModule.js';
+import type { UserAccountExistenceChecker } from '../../../src/modules/tenant/application/ports/UserAccountExistenceChecker.js';
+import { buildSubscriptionModule, seedPlanCatalog, type SubscriptionModule } from '../../../src/modules/subscription/infrastructure/SubscriptionModule.js';
+import { PrismaUserAccountRepository } from '../../../src/modules/identity/infrastructure/persistence/PrismaUserAccountRepository.js';
+import { UserAccountId } from '../../../src/modules/identity/domain/value-objects/UserAccountId.js';
 import { InMemoryAuditTrail, InMemorySessionAuditTrail } from '../builders/testKit.js';
 import { createTestPrismaClient, createTestRedisClient, uniqueEmail, uniqueFacilityName } from './dbTestHelpers.js';
 
@@ -32,21 +36,41 @@ describe('Identity — flux integres (Prisma + Redis reels)', () => {
   let redis: Redis;
   let identity: IdentityModule;
   let tenant: TenantModule;
+  let subscription: SubscriptionModule;
 
   beforeAll(async () => {
     prisma = createTestPrismaClient();
     redis = createTestRedisClient();
-    tenant = buildTenantModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator() });
+    // Reproduit fidelement `IdentityModuleBackedUserAccountExistenceChecker` de
+    // composition-root.ts (ADR-0008 §9, amendement 1) — voir le meme commentaire dans
+    // serverContextPropagation.test.ts.
+    const userAccountsForExistenceCheck = new PrismaUserAccountRepository(prisma);
+    const userAccountExistenceChecker: UserAccountExistenceChecker = {
+      exists: async (userId: string) => {
+        const idResult = UserAccountId.create(userId);
+        if (idResult.isFailure()) {
+          return false;
+        }
+        return (await userAccountsForExistenceCheck.findById(idResult.getValue())) !== null;
+      },
+    };
+    tenant = buildTenantModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator(), userAccountExistenceChecker });
+    subscription = buildSubscriptionModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator() });
     // Reproduit fidelement TenantModuleBackedAccessChecker de composition-root.ts (voir ce
     // fichier pour la justification) — duplique plutot qu'importe pour ne pas faire dependre ce
-    // test du reste du cablage applicatif (env, Express...).
+    // test du reste du cablage applicatif (env, Express...). Compose Subscription depuis
+    // ADR-0008 §3 (etape 10/13) : ACCESSIBLE exige desormais un Subscription existant.
     const tenantAccessChecker: TenantAccessChecker = {
       checkAccess: async (tenantId) => {
         const facility = await tenant.repositories.healthFacilities.findByTenantId(tenantId);
         if (facility === null) {
           return 'NOT_FOUND';
         }
-        return facility.isActive() ? 'ACCESSIBLE' : 'SUSPENDED';
+        if (!facility.isActive()) {
+          return 'SUSPENDED';
+        }
+        const activeSubscription = await subscription.repositories.subscriptions.findByTenantId(tenantId);
+        return activeSubscription === null ? 'NOT_FOUND' : 'ACCESSIBLE';
       },
     };
     identity = buildIdentityModule({
@@ -72,6 +96,7 @@ describe('Identity — flux integres (Prisma + Redis reels)', () => {
 
     await seedPermissionCatalog(prisma);
     await seedSystemRoles(identity.repositories.roles);
+    await seedPlanCatalog(subscription.repositories.plans, subscription.repositories.planPrices, new SystemClock(), new UuidGenerator());
   });
 
   afterAll(async () => {
@@ -89,11 +114,35 @@ describe('Identity — flux integres (Prisma + Redis reels)', () => {
     return { userId: result.getValue().userAccountId, email, password };
   }
 
-  /** Provisionne un `HealthFacility` reel (module Tenant) et retourne son tenantId. */
+  /**
+   * Provisionne un `HealthFacility` reel (module Tenant) ET demarre son essai gratuit
+   * (module Subscription) — depuis ADR-0008 §3 (etape 10/13),
+   * `TenantModuleBackedAccessChecker.checkAccess()` exige desormais un `Subscription` existant
+   * pour renvoyer `ACCESSIBLE` : un tenant sans abonnement serait refuse (`TENANT_NOT_FOUND`),
+   * ce qu'aucun des tests de ce fichier ne veut exercer (ils testent RBAC/MFA/sessions, pas le
+   * provisioning lui-meme — voir `serverContextPropagation.test.ts` pour la composition
+   * elle-meme). Reproduit le chainage reel de la Saga (etape 10/13) plutot que d'appeler
+   * directement `Subscription.startTrial()`.
+   */
   async function createFacilityTenantId(): Promise<string> {
-    const result = await tenant.handlers.createHealthFacility.execute({ name: uniqueFacilityName('Etablissement Flow') });
+    // `ownerUserId` (ADR-0008 §9, amendement 1) : provisionne un compte "proprietaire" JETABLE,
+    // distinct des comptes que chaque test cree ensuite pour ses propres besoins RBAC/MFA/sessions
+    // — ce fichier n'exerce jamais la Saga de provisioning elle-meme (voir
+    // `serverContextPropagation.test.ts`), seule l'EXISTENCE d'un `UserAccount` valide importe ici.
+    const owner = await createAccount();
+    const result = await tenant.handlers.createHealthFacility.execute({
+      name: uniqueFacilityName('Etablissement Flow'),
+      ownerUserId: owner.userId,
+    });
     if (result.isFailure()) {
       throw new Error(`Echec creation etablissement: ${result.getError()}`);
+    }
+    const trial = await subscription.handlers.startTrialSubscription.execute({
+      tenantId: result.getValue().tenantId,
+      ownerUserId: owner.userId,
+    });
+    if (trial.isFailure()) {
+      throw new Error(`Echec demarrage essai: ${trial.getError()}`);
     }
     return result.getValue().tenantId;
   }

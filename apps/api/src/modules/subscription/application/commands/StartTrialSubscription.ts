@@ -10,6 +10,15 @@ import type { SubscriptionRepository } from '../../domain/ports/SubscriptionRepo
 
 export interface StartTrialSubscriptionCommand {
   readonly tenantId: string;
+  /**
+   * Identifiant du `UserAccount` a l'origine du provisioning (ADR-0008 §9, resequencement F3 de
+   * la revue de securite de l'etape 10/13) — simple donnee de CORRELATION, transmise TELLE QUELLE
+   * a `Subscription.startTrial()` (aucune validation d'existence ici : deja verifiee en amont par
+   * `CreateHealthFacilityHandler`, voir ADR-0008 §9, amendement 1). Relu par l'appelant
+   * (`StartTrialSubscriptionOnHealthFacilityCreated.ts`) depuis le payload de
+   * `HealthFacilityCreated`, jamais invente.
+   */
+  readonly ownerUserId: string;
 }
 
 export type StartTrialSubscriptionError =
@@ -76,6 +85,7 @@ export class StartTrialSubscriptionHandler {
           tenantId,
           standardPlanId: standardPlan.id,
           standardPlanPriceId: standardPrice.id,
+          ownerUserId: command.ownerUserId,
           clock: this.clock,
           idGenerator: this.idGenerator,
         });

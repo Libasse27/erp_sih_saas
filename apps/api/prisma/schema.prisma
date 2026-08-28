@@ -577,6 +577,28 @@ model HealthFacility {
   @@schema("public")
 }
 
+/// Configuration technique minimale d'un tenant, semee en fin de Saga de provisioning (ADR-0008
+/// §10/§11, amendement 1, Phase 0 etape 10/13) — voir modules/tenant/domain/FacilitySettings.ts.
+/// AUCUN CONTENU METIER HOSPITALIER (services, batiments, catalogue d'actes restent Phase 1).
+/// `id` est ICI DISTINCT de `tenant_id` (contrairement a `HealthFacility` ci-dessus) : UNE ligne
+/// au plus par tenant, imposee par la contrainte UNIQUE ci-dessous, en plus du controle
+/// applicatif (`SeedFacilityConfigurationHandler`).
+model FacilitySettings {
+  id                      String    @id @db.Uuid
+  tenantId                String    @unique @map("tenant_id") @db.Uuid
+  locale                  String
+  timezone                String
+  currency                String
+  phoneCountryCode        String    @map("phone_country_code")
+  createdAt               DateTime  @map("created_at")
+  /// Marqueur d'idempotence de la derniere etape de la Saga (ADR-0008 §11) — JAMAIS consulte par
+  /// `TenantModuleBackedAccessChecker` (composition-root.ts, ADR-0008 §3/§11).
+  provisioningCompletedAt DateTime? @map("provisioning_completed_at")
+
+  @@map("FacilitySettings")
+  @@schema("public")
+}
+
 // =================================================================================================
 // Module Identity — MFA TOTP (Phase 0, etape 7/13, ADR-0005).
 //

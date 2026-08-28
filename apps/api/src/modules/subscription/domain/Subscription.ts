@@ -100,11 +100,23 @@ export class Subscription extends AggregateRoot<SubscriptionId> {
    * periodicite reelle a la conversion en abonnement payant, hors perimetre de cette etape,
    * voir O-25). `periodEndsAt` de l'essai est aligne sur `trialEndsAt` (meme date) : il n'existe
    * pas de "periode de facturation" distincte tant qu'aucun paiement n'a eu lieu.
+   *
+   * `ownerUserId` (ADR-0008 §9, resequencement F3 de la revue de securite de l'etape 10/13) :
+   * simple donnee de CORRELATION propagee telle quelle jusqu'a `SubscriptionStarted.ownerUserId`
+   * (voir events/SubscriptionStarted.ts) — jamais interpretee ni validee ici (cet agregat ne
+   * connait pas `UserAccount`, module `identity`), resolue par l'appelant
+   * (`StartTrialSubscription.ts`, qui la relit lui-meme depuis `HealthFacilityCreated.ownerUserId`
+   * via son consommateur Outbox). REQUIS ICI, sans valeur par defaut : un abonnement de
+   * provisioning ne peut pas exister sans l'identite du proprietaire initial destine a recevoir
+   * `ADMIN_ETABLISSEMENT` — le contrat doit etre fort a la SOURCE (echec de compilation pour tout
+   * appelant qui l'omettrait), pas seulement protege plus loin par la validation Zod du
+   * consommateur Outbox (qui reste une seconde ligne de defense, jamais la premiere).
    */
   static startTrial(params: {
     tenantId: TenantId;
     standardPlanId: PlanId;
     standardPlanPriceId: PlanPriceId;
+    ownerUserId: string;
     clock: Clock;
     idGenerator: IdGenerator;
   }): Subscription {
@@ -137,6 +149,7 @@ export class Subscription extends AggregateRoot<SubscriptionId> {
         tenantId: params.tenantId.toString(),
         planId: params.standardPlanId.toString(),
         trialEndsAt,
+        ownerUserId: params.ownerUserId,
         clock: params.clock,
         idGenerator: params.idGenerator,
       }),

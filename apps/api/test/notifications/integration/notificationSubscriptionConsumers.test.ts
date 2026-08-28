@@ -10,6 +10,10 @@ import { buildIdentityModule, type IdentityModule } from '../../../src/modules/i
 import type { TenantAccessChecker } from '../../../src/modules/identity/application/ports/TenantAccessChecker.js';
 import { seedPermissionCatalog, seedSystemRoles } from '../../../src/modules/identity/infrastructure/seed/seedIdentityCatalog.js';
 import { buildTenantModule, type TenantModule } from '../../../src/modules/tenant/infrastructure/TenantModule.js';
+import type { UserAccountExistenceChecker } from '../../../src/modules/tenant/application/ports/UserAccountExistenceChecker.js';
+import { buildSubscriptionModule, type SubscriptionModule } from '../../../src/modules/subscription/infrastructure/SubscriptionModule.js';
+import { PrismaUserAccountRepository } from '../../../src/modules/identity/infrastructure/persistence/PrismaUserAccountRepository.js';
+import { UserAccountId } from '../../../src/modules/identity/domain/value-objects/UserAccountId.js';
 import { InMemoryAuditTrail, InMemorySessionAuditTrail } from '../../identity/builders/testKit.js';
 import { createTestRedisClient, uniqueEmail, uniqueFacilityName } from '../../identity/integration/dbTestHelpers.js';
 import { PrismaNotificationRepository } from '../../../src/modules/notifications/infrastructure/persistence/PrismaNotificationRepository.js';
@@ -35,6 +39,7 @@ describe('Notifications — consommateurs Outbox Subscription contre Identity/Te
   let redis: Redis;
   let identity: IdentityModule;
   let tenantModule: TenantModule;
+  let subscriptionModule: SubscriptionModule;
   let notificationRepository: PrismaNotificationRepository;
   let unitOfWork: PgUnitOfWork;
   let recipientDirectory: RecipientDirectory;
@@ -47,14 +52,38 @@ describe('Notifications — consommateurs Outbox Subscription contre Identity/Te
     unitOfWork = new PgUnitOfWork(prisma);
     notificationRepository = new PrismaNotificationRepository(prisma);
 
-    tenantModule = buildTenantModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator() });
+    // Reproduit fidelement `IdentityModuleBackedUserAccountExistenceChecker` de
+    // composition-root.ts (ADR-0008 §9, amendement 1) — voir le meme commentaire dans
+    // serverContextPropagation.test.ts.
+    const userAccountsForExistenceCheck = new PrismaUserAccountRepository(prisma);
+    const userAccountExistenceChecker: UserAccountExistenceChecker = {
+      exists: async (userId: string) => {
+        const idResult = UserAccountId.create(userId);
+        if (idResult.isFailure()) {
+          return false;
+        }
+        return (await userAccountsForExistenceCheck.findById(idResult.getValue())) !== null;
+      },
+    };
+    tenantModule = buildTenantModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator(), userAccountExistenceChecker });
+    subscriptionModule = buildSubscriptionModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator() });
+    // Compose Subscription depuis ADR-0008 §3 (etape 10/13) — voir composition-root.ts. Ce
+    // fichier n'exerce jamais `resolveTenantContext` directement (il invoque les consommateurs
+    // Outbox de Notifications avec une enveloppe fabriquee a la main), donc aucun test existant
+    // ne depend de cette branche — mise a jour uniquement pour rester fidele a
+    // TenantModuleBackedAccessChecker (meme discipline "duplique plutot qu'importe" que les
+    // autres tests d'integration de ce depot).
     const tenantAccessChecker: TenantAccessChecker = {
       checkAccess: async (tenantId) => {
         const facility = await tenantModule.repositories.healthFacilities.findByTenantId(tenantId);
         if (facility === null) {
           return 'NOT_FOUND';
         }
-        return facility.isActive() ? 'ACCESSIBLE' : 'SUSPENDED';
+        if (!facility.isActive()) {
+          return 'SUSPENDED';
+        }
+        const activeSubscription = await subscriptionModule.repositories.subscriptions.findByTenantId(tenantId);
+        return activeSubscription === null ? 'NOT_FOUND' : 'ACCESSIBLE';
       },
     };
     identity = buildIdentityModule({
@@ -128,8 +157,13 @@ describe('Notifications — consommateurs Outbox Subscription contre Identity/Te
     return { userId: result.getValue().userAccountId, email };
   }
 
+  /** `ownerUserId` (ADR-0008 §9, amendement 1) : compte "proprietaire" JETABLE, distinct des comptes ADMIN_ETABLISSEMENT crees ensuite par chaque test via `grantAdmin`. */
   async function createFacilityTenantId(): Promise<string> {
-    const result = await tenantModule.handlers.createHealthFacility.execute({ name: uniqueFacilityName('Etablissement Notif') });
+    const owner = await createAccount('facility-owner');
+    const result = await tenantModule.handlers.createHealthFacility.execute({
+      name: uniqueFacilityName('Etablissement Notif'),
+      ownerUserId: owner.userId,
+    });
     if (result.isFailure()) {
       throw new Error(`Echec creation etablissement: ${result.getError()}`);
     }

@@ -9,6 +9,8 @@ function tenantId(): TenantId {
   return TenantId.create(uuidAt(1)).getValue();
 }
 
+const OWNER_USER_ID = uuidAt(500);
+
 function planId(counter: number): PlanId {
   return PlanId.create(uuidAt(counter)).getValue();
 }
@@ -29,6 +31,7 @@ describe('Subscription', () => {
       tenantId: tenant,
       standardPlanId,
       standardPlanPriceId,
+      ownerUserId: OWNER_USER_ID,
       clock,
       idGenerator,
     });
@@ -50,6 +53,7 @@ describe('Subscription', () => {
       tenantId: tenant,
       standardPlanId: planId(10),
       standardPlanPriceId: planPriceId(20),
+      ownerUserId: OWNER_USER_ID,
       clock: new FixedClock('2026-08-24T10:00:00Z'),
       idGenerator: new SequentialIdGenerator(),
     });
@@ -59,6 +63,7 @@ describe('Subscription', () => {
     expect(events[0]?.eventType).toBe('subscription.subscription.started');
     expect(events[0]?.tenantId).toBe(tenant.toString());
     expect(events[0]?.aggregateId).toBe(subscription.id.toString());
+    expect((events[0] as unknown as { ownerUserId: string }).ownerUserId).toBe(OWNER_USER_ID);
   });
 
   it('applyPlanUpgrade() met a jour planId/currentPlanPriceId sans modifier la periode en cours', () => {
@@ -66,6 +71,7 @@ describe('Subscription', () => {
       tenantId: tenantId(),
       standardPlanId: planId(10),
       standardPlanPriceId: planPriceId(20),
+      ownerUserId: OWNER_USER_ID,
       clock: new FixedClock('2026-08-24T10:00:00Z'),
       idGenerator: new SequentialIdGenerator(),
     });
@@ -95,6 +101,7 @@ describe('Subscription', () => {
       tenantId: tenantId(),
       standardPlanId: initialPlanId,
       standardPlanPriceId: planPriceId(20),
+      ownerUserId: OWNER_USER_ID,
       clock: new FixedClock('2026-08-24T10:00:00Z'),
       idGenerator: new SequentialIdGenerator(),
     });
@@ -121,6 +128,7 @@ describe('Subscription', () => {
       tenantId: tenantId(),
       standardPlanId: planId(10),
       standardPlanPriceId: planPriceId(20),
+      ownerUserId: OWNER_USER_ID,
       clock: new FixedClock('2026-08-24T10:00:00Z'),
       idGenerator: new SequentialIdGenerator(),
     });

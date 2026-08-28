@@ -53,6 +53,16 @@ export class HealthFacility extends AggregateRoot<TenantId> {
 
   static create(params: {
     name: FacilityName;
+    /**
+     * Identifiant du `UserAccount` a l'origine du provisioning (ADR-0008 §9, amendement 1) —
+     * PORTE UNIQUEMENT PAR L'EVENEMENT EMIS ICI (`HealthFacilityCreated.ownerUserId`), jamais
+     * stocke sur cet agregat (voir le commentaire de tete de la classe : `HealthFacility` reste
+     * volontairement minimal, `ACTIVE`/`SUSPENDED` uniquement). Deja valide comme un
+     * `UserAccountId` EXISTANT par l'appelant (`CreateHealthFacilityHandler`, via le port
+     * `UserAccountExistenceChecker`) — cette methode ne revalide pas l'existence, elle fait
+     * seulement circuler la valeur vers l'evenement.
+     */
+    ownerUserId: string;
     clock: Clock;
     idGenerator: IdGenerator;
   }): HealthFacility {
@@ -72,6 +82,7 @@ export class HealthFacility extends AggregateRoot<TenantId> {
       HealthFacilityCreated.create({
         healthFacilityId: id.toString(),
         name: params.name.value,
+        ownerUserId: params.ownerUserId,
         clock: params.clock,
         idGenerator: params.idGenerator,
       }),
