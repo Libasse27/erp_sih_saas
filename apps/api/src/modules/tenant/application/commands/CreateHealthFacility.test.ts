@@ -3,6 +3,7 @@ import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantI
 import {
   FixedClock,
   InMemoryHealthFacilityRepository,
+  InMemoryProvisioningAuditTrail,
   InMemoryUnitOfWork,
   InMemoryUserAccountExistenceChecker,
   SequentialIdGenerator,
@@ -16,6 +17,7 @@ function buildHandler() {
   const repository = new InMemoryHealthFacilityRepository();
   const unitOfWork = new InMemoryUnitOfWork();
   const userAccountExistenceChecker = new InMemoryUserAccountExistenceChecker();
+  const provisioningAuditTrail = new InMemoryProvisioningAuditTrail();
   userAccountExistenceChecker.seed(OWNER_USER_ID);
   const handler = new CreateHealthFacilityHandler(
     repository,
@@ -23,8 +25,9 @@ function buildHandler() {
     new FixedClock('2026-08-24T10:00:00Z'),
     new SequentialIdGenerator(),
     userAccountExistenceChecker,
+    provisioningAuditTrail,
   );
-  return { repository, unitOfWork, userAccountExistenceChecker, handler };
+  return { repository, unitOfWork, userAccountExistenceChecker, provisioningAuditTrail, handler };
 }
 
 describe('CreateHealthFacilityHandler', () => {
@@ -99,5 +102,24 @@ describe('CreateHealthFacilityHandler', () => {
     expect(events).toHaveLength(1);
     expect(events[0]?.eventType).toBe('tenant.health-facility.created');
     expect((events[0] as unknown as { ownerUserId: string }).ownerUserId).toBe(OWNER_USER_ID);
+  });
+
+  it('ecrit une entree PROVISIONING_FACILITY_CREATED (ADR-0009 §2.2) dans la meme transaction', async () => {
+    const { handler, provisioningAuditTrail } = buildHandler();
+
+    const result = await handler.execute({ name: 'Etablissement Audite', ownerUserId: OWNER_USER_ID });
+
+    expect(result.isSuccess()).toBe(true);
+    expect(provisioningAuditTrail.records).toHaveLength(1);
+    expect(provisioningAuditTrail.records[0]).toMatchObject({
+      eventType: 'PROVISIONING_FACILITY_CREATED',
+      outcome: 'SUCCESS',
+      tenantId: result.getValue().tenantId,
+      actorKind: 'SYSTEM',
+      actorUserId: null,
+      subjectUserId: OWNER_USER_ID,
+      targetType: 'HEALTH_FACILITY',
+      targetId: result.getValue().tenantId,
+    });
   });
 });

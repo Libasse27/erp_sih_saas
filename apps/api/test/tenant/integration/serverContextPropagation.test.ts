@@ -14,7 +14,9 @@ import { buildSubscriptionModule, seedPlanCatalog, type SubscriptionModule } fro
 import { PrismaUserAccountRepository } from '../../../src/modules/identity/infrastructure/persistence/PrismaUserAccountRepository.js';
 import { UserAccountId } from '../../../src/modules/identity/domain/value-objects/UserAccountId.js';
 import { createTestPrismaClient, createTestRedisClient, uniqueEmail, uniqueFacilityName } from '../../identity/integration/dbTestHelpers.js';
-import { InMemoryAuditTrail, InMemorySessionAuditTrail } from '../../identity/builders/testKit.js';
+import { InMemoryAuditTrail, InMemoryMembershipAuditTrail, InMemorySessionAuditTrail } from '../../identity/builders/testKit.js';
+import { InMemoryProvisioningAuditTrail } from '../builders/testKit.js';
+import { InMemorySubscriptionAuditTrail } from '../../subscription/builders/testKit.js';
 
 /**
  * Preuve bout en bout du "contexte serveur" (Phase 0, etape 3, point 4) : depuis un `sessionId`
@@ -51,8 +53,19 @@ describe('Contexte serveur — de sessionId a une requete RLS-scopee reelle (Ide
         return (await userAccounts.findById(idResult.getValue())) !== null;
       },
     };
-    tenant = buildTenantModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator(), userAccountExistenceChecker });
-    subscription = buildSubscriptionModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator() });
+    tenant = buildTenantModule({
+      prisma,
+      clock: new SystemClock(),
+      idGenerator: new UuidGenerator(),
+      userAccountExistenceChecker,
+      provisioningAuditTrail: new InMemoryProvisioningAuditTrail(),
+    });
+    subscription = buildSubscriptionModule({
+      prisma,
+      clock: new SystemClock(),
+      idGenerator: new UuidGenerator(),
+      subscriptionAuditTrail: new InMemorySubscriptionAuditTrail(),
+    });
     // Reproduit fidelement TenantModuleBackedAccessChecker de composition-root.ts — compose
     // Subscription depuis ADR-0008 §3 (etape 10/13) : ACCESSIBLE exige desormais un Subscription
     // existant pour ce tenant, en plus de HealthFacility.isActive().
@@ -77,6 +90,7 @@ describe('Contexte serveur — de sessionId a une requete RLS-scopee reelle (Ide
       tenantAccessChecker,
       auditTrail: new InMemoryAuditTrail(),
       sessionAuditTrail: new InMemorySessionAuditTrail(),
+      membershipAuditTrail: new InMemoryMembershipAuditTrail(),
       mfa: {
         secretEncryptionKey: Buffer.alloc(32, 5),
         secretEncryptionKeyId: 'k1',

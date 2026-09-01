@@ -15,8 +15,9 @@ import type { TenantAccessChecker, TenantAccessStatus } from '../../../src/modul
 import { seedPermissionCatalog, seedSystemRoles } from '../../../src/modules/identity/infrastructure/seed/seedIdentityCatalog.js';
 import { PrismaUserAccountRepository } from '../../../src/modules/identity/infrastructure/persistence/PrismaUserAccountRepository.js';
 import { UserAccountId } from '../../../src/modules/identity/domain/value-objects/UserAccountId.js';
-import { InMemoryAuditTrail, InMemorySessionAuditTrail } from '../../identity/builders/testKit.js';
-import { InMemoryPlanPriceRepository, InMemoryPlanRepository } from '../../subscription/builders/testKit.js';
+import { InMemoryAuditTrail, InMemoryMembershipAuditTrail, InMemorySessionAuditTrail } from '../../identity/builders/testKit.js';
+import { InMemoryPlanPriceRepository, InMemoryPlanRepository, InMemorySubscriptionAuditTrail } from '../../subscription/builders/testKit.js';
+import { InMemoryProvisioningAuditTrail } from '../../tenant/builders/testKit.js';
 import { createTestRedisClient, uniqueEmail } from '../../identity/integration/dbTestHelpers.js';
 import { createRawPgClient, createTestPrismaClient, uniqueFacilityName } from './dbTestHelpers.js';
 
@@ -67,8 +68,19 @@ describe('Saga de provisioning — chaine complete reelle (ADR-0008, amendement 
         return (await userAccountsForExistenceCheck.findById(idResult.getValue())) !== null;
       },
     };
-    tenant = buildTenantModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator(), userAccountExistenceChecker });
-    subscription = buildSubscriptionModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator() });
+    tenant = buildTenantModule({
+      prisma,
+      clock: new SystemClock(),
+      idGenerator: new UuidGenerator(),
+      userAccountExistenceChecker,
+      provisioningAuditTrail: new InMemoryProvisioningAuditTrail(),
+    });
+    subscription = buildSubscriptionModule({
+      prisma,
+      clock: new SystemClock(),
+      idGenerator: new UuidGenerator(),
+      subscriptionAuditTrail: new InMemorySubscriptionAuditTrail(),
+    });
 
     // Reproduit fidelement `TenantModuleBackedAccessChecker` de composition-root.ts (ADR-0008 §3)
     // — utilise aussi directement plus bas (`resolveAccess`) pour prouver la statelessness
@@ -94,6 +106,7 @@ describe('Saga de provisioning — chaine complete reelle (ADR-0008, amendement 
       tenantAccessChecker,
       auditTrail: new InMemoryAuditTrail(),
       sessionAuditTrail: new InMemorySessionAuditTrail(),
+      membershipAuditTrail: new InMemoryMembershipAuditTrail(),
       mfa: {
         secretEncryptionKey: Buffer.alloc(32, 7),
         secretEncryptionKeyId: 'k1',
@@ -424,6 +437,7 @@ describe('Saga de provisioning — chaine complete reelle (ADR-0008, amendement 
       subscription.unitOfWork,
       new SystemClock(),
       new UuidGenerator(),
+      new InMemorySubscriptionAuditTrail(),
     );
     const transientlyFailingHandler = createStartTrialSubscriptionOnHealthFacilityCreatedHandler({
       startTrialSubscriptionHandler: transientlyFailingStartTrialSubscription,

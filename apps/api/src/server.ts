@@ -78,6 +78,11 @@ export function createApp(root: CompositionRoot): Express {
     res.status(200).json({ status: 'ok', now: root.clock.now().toISOString() });
   });
 
+  // PREMIER endpoint HTTP authentifie du depot (ADR-0009 §8) — `requireAuthenticatedContext`
+  // est le SEUL middleware d'authentification existant, construit une fois dans
+  // composition-root.ts (seul point du code autorise a connaitre `identity` ET `audit`).
+  app.get('/api/v1/audit-entries', root.presentation.requireAuthenticatedContext, root.presentation.auditEntryController.list);
+
   // Monte APRES toutes les routes (contrat Express des middlewares d'erreur) — voir
   // `createErrorHandler` ci-dessus pour le detail de ce qu'il couvre et pourquoi.
   app.use(createErrorHandler(root.logger));

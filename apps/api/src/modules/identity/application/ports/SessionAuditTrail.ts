@@ -14,12 +14,29 @@ export type SessionAuditEventType =
   | 'SESSION_REFRESH_REUSE_DETECTED'
   | 'SESSION_REFRESH_REVOKED'
   | 'SESSION_ABSOLUTE_CEILING_EXCEEDED'
-  | 'SESSION_INACTIVITY_TIMEOUT';
+  | 'SESSION_INACTIVITY_TIMEOUT'
+  // Etape 11/13 (ADR-0009 §2.1) — fermeture de la lacune "la connexion elle-meme n'est pas
+  // auditee". `SESSION_LOGIN_FAILED` uniquement pour un compte EXISTANT (sujet identifiable),
+  // deduplique par la meme mecanique que `MfaBypassAttemptGuard` (voir AuthenticateUser.ts).
+  | 'SESSION_LOGIN_SUCCEEDED'
+  | 'SESSION_LOGIN_FAILED'
+  | 'SESSION_CONTEXT_OPENED'
+  | 'SESSION_CONTEXT_DENIED'
+  | 'SESSION_CLOSED';
+
+/**
+ * "Depuis quel contexte" — miroir primitif d'`ActorKind` (ADR-0009 §3). Jamais `SYSTEM` : tous les
+ * producteurs de `SESSION` (`AuthenticateUser`/`ResolveTenantContext`/`CloseSession`) partent d'un
+ * acteur humain deja authentifie (`actorUserId` obligatoire dans ce port, jamais nullable) — meme
+ * discipline que `MembershipAuditTrail.ts::MembershipActorKind`.
+ */
+export type SessionActorKind = 'USER_TENANT' | 'USER_PLATFORM';
 
 export interface SessionAuditRecordInput {
   readonly eventType: SessionAuditEventType;
   readonly outcome: 'SUCCESS' | 'FAILURE' | 'DENIED';
   readonly tenantId: string | null;
+  readonly actorKind: SessionActorKind;
   readonly subjectUserId: string;
   readonly actorUserId: string;
   readonly actorRoleCodes: readonly string[];

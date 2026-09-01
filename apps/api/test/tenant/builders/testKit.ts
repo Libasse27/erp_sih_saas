@@ -7,6 +7,10 @@ import type { HealthFacilityRepository } from '../../../src/modules/tenant/domai
 import type { FacilitySettings } from '../../../src/modules/tenant/domain/FacilitySettings.js';
 import type { FacilitySettingsRepository } from '../../../src/modules/tenant/domain/ports/FacilitySettingsRepository.js';
 import type { UserAccountExistenceChecker } from '../../../src/modules/tenant/application/ports/UserAccountExistenceChecker.js';
+import type {
+  ProvisioningAuditRecordInput,
+  ProvisioningAuditTrail,
+} from '../../../src/modules/tenant/application/ports/ProvisioningAuditTrail.js';
 import { Result } from '../../../src/shared-kernel/domain/Result.js';
 
 // Duplique volontairement les primitives generiques de test/identity/builders/testKit.ts plutot
@@ -102,6 +106,15 @@ export class InMemoryUserAccountExistenceChecker implements UserAccountExistence
 
   async exists(userId: string): Promise<boolean> {
     return this.known.has(userId);
+  }
+}
+
+/** Fake du port `ProvisioningAuditTrail` (ADR-0009 §2.2/§4) — accumule les entrees enregistrees, sans I/O. */
+export class InMemoryProvisioningAuditTrail implements ProvisioningAuditTrail {
+  public readonly records: ProvisioningAuditRecordInput[] = [];
+
+  async record(input: ProvisioningAuditRecordInput): Promise<void> {
+    this.records.push(input);
   }
 }
 

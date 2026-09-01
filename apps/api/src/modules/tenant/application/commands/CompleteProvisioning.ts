@@ -4,6 +4,7 @@ import type { IdGenerator } from '../../../../shared-kernel/domain/ports/IdGener
 import type { UnitOfWork } from '../../../../shared-kernel/application/UnitOfWork.js';
 import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantId.js';
 import type { FacilitySettingsRepository } from '../../domain/ports/FacilitySettingsRepository.js';
+import type { ProvisioningAuditTrail } from '../ports/ProvisioningAuditTrail.js';
 
 export type CompleteProvisioningError =
   | 'INVALID_TENANT_ID'
@@ -38,6 +39,7 @@ export class CompleteProvisioningHandler {
     private readonly unitOfWork: UnitOfWork,
     private readonly clock: Clock,
     private readonly idGenerator: IdGenerator,
+    private readonly provisioningAuditTrail: ProvisioningAuditTrail,
   ) {}
 
   async execute(
@@ -62,6 +64,20 @@ export class CompleteProvisioningHandler {
         }
 
         await this.repository.save(settings, tenantId);
+
+        await this.provisioningAuditTrail.record({
+          eventType: 'PROVISIONING_COMPLETED',
+          outcome: 'SUCCESS',
+          tenantId: tenantId.toString(),
+          actorKind: 'SYSTEM',
+          actorUserId: null,
+          subjectUserId: null,
+          targetType: 'HEALTH_FACILITY',
+          targetId: tenantId.toString(),
+          reason: null,
+          sessionId: null,
+          correlationId: null,
+        });
 
         return Result.success({ facilitySettingsId: settings.id.toString() });
       },

@@ -7,6 +7,7 @@ import { Money } from '../../../../shared-kernel/domain/value-objects/Money.js';
 import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantId.js';
 import { PlatformInvoice } from '../../domain/PlatformInvoice.js';
 import type { PlatformInvoiceRepository } from '../../domain/ports/PlatformInvoiceRepository.js';
+import type { BillingAuditTrail } from '../ports/BillingAuditTrail.js';
 
 /**
  * Forme attendue du payload de `subscription.subscription.upgrade-requested` (module
@@ -51,6 +52,7 @@ const SubscriptionUpgradeRequestedPayloadSchema = z
  */
 export function createIssuePlatformInvoiceOnUpgradeRequestedHandler(deps: {
   platformInvoiceRepository: PlatformInvoiceRepository;
+  billingAuditTrail: BillingAuditTrail;
   unitOfWork: UnitOfWork;
   clock: Clock;
   idGenerator: IdGenerator;
@@ -91,7 +93,25 @@ export function createIssuePlatformInvoiceOnUpgradeRequestedHandler(deps: {
           clock: deps.clock,
           idGenerator: deps.idGenerator,
         });
-        await deps.platformInvoiceRepository.issue(invoice);
+        // Voir IssuePlatformInvoiceOnRenewalDue.ts pour le raisonnement complet : comparer
+        // l'identifiant REELLEMENT persiste a celui construit localement est la seule maniere de
+        // distinguer une creation reelle d'un no-op idempotent (`source_reference` deja connue) —
+        // aucune entree d'audit dupliquee sur un rejeu.
+        const issued = await deps.platformInvoiceRepository.issue(invoice);
+        if (issued.id.equals(invoice.id)) {
+          await deps.billingAuditTrail.record({
+            eventType: 'BILLING_PLATFORM_INVOICE_ISSUED',
+            outcome: 'SUCCESS',
+            tenantId: tenantId.toString(),
+            actorKind: 'SYSTEM',
+            actorUserId: null,
+            targetType: 'PLATFORM_INVOICE',
+            targetId: issued.id.toString(),
+            reason: null,
+            sessionId: null,
+            correlationId: null,
+          });
+        }
       },
       { tenantId },
     );

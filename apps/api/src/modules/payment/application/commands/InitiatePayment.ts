@@ -11,6 +11,7 @@ import { isPaymentMethod } from '../../domain/value-objects/PaymentMethod.js';
 import type { PaymentPurpose } from '../../domain/value-objects/PaymentPurpose.js';
 import { PlatformInvoiceId } from '../../domain/value-objects/PlatformInvoiceId.js';
 import type { PlatformInvoicePurpose } from '../../domain/value-objects/PlatformInvoicePurpose.js';
+import type { BillingAuditTrail } from '../ports/BillingAuditTrail.js';
 
 /**
  * Mapping 1-1 entre la nature de la FACTURE et celle du PAIEMENT qui la regle. Deux enumerations
@@ -71,6 +72,7 @@ export class InitiatePaymentHandler {
     private readonly unitOfWork: UnitOfWork,
     private readonly clock: Clock,
     private readonly idGenerator: IdGenerator,
+    private readonly billingAuditTrail: BillingAuditTrail,
   ) {}
 
   async execute(command: InitiatePaymentCommand): Promise<Result<InitiatePaymentResult, InitiatePaymentError>> {
@@ -130,6 +132,21 @@ export class InitiatePaymentHandler {
         });
 
         await this.paymentRepository.save(payment, tenantId);
+
+        // ADR-0009 §2.2/§4 — meme transaction. `actorKind: 'SYSTEM'` : aucun endpoint HTTP
+        // interactif n'invoque encore cette commande (voir le rapport de cette etape).
+        await this.billingAuditTrail.record({
+          eventType: 'BILLING_PAYMENT_INITIATED',
+          outcome: 'SUCCESS',
+          tenantId: tenantId.toString(),
+          actorKind: 'SYSTEM',
+          actorUserId: null,
+          targetType: 'PAYMENT',
+          targetId: payment.id.toString(),
+          reason: null,
+          sessionId: null,
+          correlationId: null,
+        });
 
         return Result.success({
           paymentId: payment.id.toString(),

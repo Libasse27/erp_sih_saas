@@ -10,6 +10,7 @@ import type { PaymentId } from '../../../src/modules/payment/domain/value-object
 import type { PlatformInvoice } from '../../../src/modules/payment/domain/PlatformInvoice.js';
 import type { PlatformInvoiceRepository } from '../../../src/modules/payment/domain/ports/PlatformInvoiceRepository.js';
 import type { PlatformInvoiceId } from '../../../src/modules/payment/domain/value-objects/PlatformInvoiceId.js';
+import type { BillingAuditRecordInput, BillingAuditTrail } from '../../../src/modules/payment/application/ports/BillingAuditTrail.js';
 import type {
   InitiatePaymentRequest,
   InitiatePaymentResult,
@@ -242,6 +243,15 @@ export class InMemoryPaymentProvider implements PaymentProvider {
   /** Outil de test : fixe l'issue "connue du prestataire" pour le rapprochement, sans passer par un webhook. */
   simulateProviderOutcome(providerTransactionId: string, status: ProviderTransactionStatus): void {
     this.transactions.set(providerTransactionId, { status });
+  }
+}
+
+/** Fake du port `BillingAuditTrail` (ADR-0009 §2.2/§4) — accumule les entrees enregistrees, sans I/O. */
+export class InMemoryBillingAuditTrail implements BillingAuditTrail {
+  public readonly records: BillingAuditRecordInput[] = [];
+
+  async record(input: BillingAuditRecordInput): Promise<void> {
+    this.records.push(input);
   }
 }
 

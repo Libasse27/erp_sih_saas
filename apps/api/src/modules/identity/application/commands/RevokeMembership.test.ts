@@ -4,6 +4,7 @@ import {
   buildTestRefreshTokenIssuer,
   FixedClock,
   idFor,
+  InMemoryMembershipAuditTrail,
   InMemorySessionStore,
   InMemoryUnitOfWork,
   InMemoryUserTenantMembershipRepository,
@@ -22,12 +23,14 @@ describe('RevokeMembershipHandler', () => {
   let clock: FixedClock;
   let idGenerator: SequentialIdGenerator;
   let membership: UserTenantMembership;
+  let membershipAuditTrail: InMemoryMembershipAuditTrail;
 
   beforeEach(async () => {
     memberships = new InMemoryUserTenantMembershipRepository();
     sessions = new InMemorySessionStore();
     clock = new FixedClock('2026-08-23T10:00:00Z');
     idGenerator = new SequentialIdGenerator();
+    membershipAuditTrail = new InMemoryMembershipAuditTrail();
     handler = new RevokeMembershipHandler(
       memberships,
       sessions,
@@ -35,6 +38,7 @@ describe('RevokeMembershipHandler', () => {
       new InMemoryUnitOfWork(),
       clock,
       idGenerator,
+      membershipAuditTrail,
     );
 
     membership = UserTenantMembership.grant({

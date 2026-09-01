@@ -14,7 +14,9 @@ import type { UserAccountExistenceChecker } from '../../../src/modules/tenant/ap
 import { buildSubscriptionModule, seedPlanCatalog, type SubscriptionModule } from '../../../src/modules/subscription/infrastructure/SubscriptionModule.js';
 import { PrismaUserAccountRepository } from '../../../src/modules/identity/infrastructure/persistence/PrismaUserAccountRepository.js';
 import { UserAccountId } from '../../../src/modules/identity/domain/value-objects/UserAccountId.js';
-import { InMemoryAuditTrail, InMemorySessionAuditTrail } from '../builders/testKit.js';
+import { InMemoryAuditTrail, InMemoryMembershipAuditTrail, InMemorySessionAuditTrail } from '../builders/testKit.js';
+import { InMemoryProvisioningAuditTrail } from '../../tenant/builders/testKit.js';
+import { InMemorySubscriptionAuditTrail } from '../../subscription/builders/testKit.js';
 import { createTestPrismaClient, createTestRedisClient, uniqueEmail, uniqueFacilityName } from './dbTestHelpers.js';
 
 /**
@@ -54,8 +56,19 @@ describe('Identity — flux integres (Prisma + Redis reels)', () => {
         return (await userAccountsForExistenceCheck.findById(idResult.getValue())) !== null;
       },
     };
-    tenant = buildTenantModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator(), userAccountExistenceChecker });
-    subscription = buildSubscriptionModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator() });
+    tenant = buildTenantModule({
+      prisma,
+      clock: new SystemClock(),
+      idGenerator: new UuidGenerator(),
+      userAccountExistenceChecker,
+      provisioningAuditTrail: new InMemoryProvisioningAuditTrail(),
+    });
+    subscription = buildSubscriptionModule({
+      prisma,
+      clock: new SystemClock(),
+      idGenerator: new UuidGenerator(),
+      subscriptionAuditTrail: new InMemorySubscriptionAuditTrail(),
+    });
     // Reproduit fidelement TenantModuleBackedAccessChecker de composition-root.ts (voir ce
     // fichier pour la justification) — duplique plutot qu'importe pour ne pas faire dependre ce
     // test du reste du cablage applicatif (env, Express...). Compose Subscription depuis
@@ -81,6 +94,7 @@ describe('Identity — flux integres (Prisma + Redis reels)', () => {
       tenantAccessChecker,
       auditTrail: new InMemoryAuditTrail(),
       sessionAuditTrail: new InMemorySessionAuditTrail(),
+      membershipAuditTrail: new InMemoryMembershipAuditTrail(),
       mfa: {
         secretEncryptionKey: Buffer.alloc(32, 3),
         secretEncryptionKeyId: 'k1',

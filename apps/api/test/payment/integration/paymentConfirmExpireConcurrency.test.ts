@@ -11,7 +11,7 @@ import { PlatformInvoice } from '../../../src/modules/payment/domain/PlatformInv
 import { ConfirmPaymentHandler } from '../../../src/modules/payment/application/commands/ConfirmPayment.js';
 import { PrismaPaymentRepository } from '../../../src/modules/payment/infrastructure/persistence/PrismaPaymentRepository.js';
 import { PrismaPlatformInvoiceRepository } from '../../../src/modules/payment/infrastructure/persistence/PrismaPlatformInvoiceRepository.js';
-import { InMemoryPaymentProvider, mustSucceed } from '../../../test/payment/builders/testKit.js';
+import { InMemoryBillingAuditTrail, InMemoryPaymentProvider, mustSucceed } from '../../../test/payment/builders/testKit.js';
 import { createRawPgClient, createTestPrismaClient, uniqueId } from './dbTestHelpers.js';
 
 /**
@@ -122,6 +122,7 @@ describe('Payment — race webhook SUCCEEDED vs rapprochement EXPIRED (verrouill
       unitOfWork,
       clock,
       idGenerator,
+      new InMemoryBillingAuditTrail(),
     );
     const webhook = provider.buildWebhook({
       providerTransactionId,

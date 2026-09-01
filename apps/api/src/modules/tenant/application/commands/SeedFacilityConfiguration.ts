@@ -5,6 +5,7 @@ import type { UnitOfWork } from '../../../../shared-kernel/application/UnitOfWor
 import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantId.js';
 import { FacilitySettings } from '../../domain/FacilitySettings.js';
 import type { FacilitySettingsRepository } from '../../domain/ports/FacilitySettingsRepository.js';
+import type { ProvisioningAuditTrail } from '../ports/ProvisioningAuditTrail.js';
 
 export interface SeedFacilityConfigurationCommand {
   readonly tenantId: string;
@@ -32,6 +33,7 @@ export class SeedFacilityConfigurationHandler {
     private readonly unitOfWork: UnitOfWork,
     private readonly clock: Clock,
     private readonly idGenerator: IdGenerator,
+    private readonly provisioningAuditTrail: ProvisioningAuditTrail,
   ) {}
 
   async execute(
@@ -52,6 +54,20 @@ export class SeedFacilityConfigurationHandler {
 
         const settings = FacilitySettings.create({ tenantId, clock: this.clock, idGenerator: this.idGenerator });
         await this.repository.save(settings, tenantId);
+
+        await this.provisioningAuditTrail.record({
+          eventType: 'PROVISIONING_CONFIGURATION_SEEDED',
+          outcome: 'SUCCESS',
+          tenantId: tenantId.toString(),
+          actorKind: 'SYSTEM',
+          actorUserId: null,
+          subjectUserId: null,
+          targetType: 'FACILITY_SETTINGS',
+          targetId: settings.id.toString(),
+          reason: null,
+          sessionId: null,
+          correlationId: null,
+        });
 
         return Result.success({ facilitySettingsId: settings.id.toString() });
       },

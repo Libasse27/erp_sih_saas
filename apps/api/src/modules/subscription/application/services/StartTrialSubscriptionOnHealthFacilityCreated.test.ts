@@ -11,6 +11,7 @@ import {
   FixedClock,
   InMemoryPlanPriceRepository,
   InMemoryPlanRepository,
+  InMemorySubscriptionAuditTrail,
   InMemorySubscriptionRepository,
   InMemoryUnitOfWork,
   SequentialIdGenerator,
@@ -75,6 +76,7 @@ describe('StartTrialSubscriptionOnHealthFacilityCreated (ADR-0008 §1/§4)', () 
       new InMemoryUnitOfWork(),
       clock,
       idGenerator,
+      new InMemorySubscriptionAuditTrail(),
     );
 
     const handler = createStartTrialSubscriptionOnHealthFacilityCreatedHandler({ startTrialSubscriptionHandler });
@@ -143,6 +145,7 @@ describe('StartTrialSubscriptionOnHealthFacilityCreated (ADR-0008 §1/§4)', () 
       new InMemoryUnitOfWork(),
       new FixedClock('2026-08-28T00:00:00.000Z'),
       new SequentialIdGenerator(),
+      new InMemorySubscriptionAuditTrail(),
     );
     const handler = createStartTrialSubscriptionOnHealthFacilityCreatedHandler({ startTrialSubscriptionHandler });
 

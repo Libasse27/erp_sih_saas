@@ -22,8 +22,15 @@ import type { SessionSensitivityCategory } from '../value-objects/SessionSensiti
  * ressource `mfa` a TENANT_ADMIN_RESOURCES") — quiconque detient `mfa:reset` (peut forcer le
  * ré-enrolement d'un tiers) est lui-meme soumis au MFA, application directe de l'escalade que ce
  * fichier documentait deja lui-meme.
+ *
+ * `audit` ajoutee a l'etape 11/13 (ADR-0009 §9) : quiconque detient `audit:read` — y compris via
+ * un role personnalise d'etablissement — est lui-meme soumis au MFA, meme application directe de
+ * l'escalade documentee ci-dessus ("a faire valider par l'architecte des qu'un module ulterieur
+ * introduit une nouvelle ressource sensible ; en cas de doute, le choix retenu est d'inclure").
+ * `ADMIN_ETABLISSEMENT` y etait deja soumis (via `membership`/`role`/`tenant-config`) ; cet ajout
+ * couvre les futurs roles personnalises qui ne porteraient QUE `audit:read`.
  */
-const TENANT_ADMIN_RESOURCES: ReadonlySet<string> = new Set(['membership', 'role', 'tenant-config', 'mfa']);
+const TENANT_ADMIN_RESOURCES: ReadonlySet<string> = new Set(['membership', 'role', 'tenant-config', 'mfa', 'audit']);
 
 const HIGH_IMPACT_FINANCE_PERMISSION_CODES: ReadonlySet<string> = new Set([
   'invoice:cancel',

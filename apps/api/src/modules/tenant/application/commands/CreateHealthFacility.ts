@@ -6,6 +6,7 @@ import { HealthFacility } from '../../domain/HealthFacility.js';
 import type { HealthFacilityRepository } from '../../domain/ports/HealthFacilityRepository.js';
 import { FacilityName } from '../../domain/value-objects/FacilityName.js';
 import type { UserAccountExistenceChecker } from '../ports/UserAccountExistenceChecker.js';
+import type { ProvisioningAuditTrail } from '../ports/ProvisioningAuditTrail.js';
 
 export interface CreateHealthFacilityCommand {
   readonly name: string;
@@ -67,6 +68,7 @@ export class CreateHealthFacilityHandler {
     private readonly clock: Clock,
     private readonly idGenerator: IdGenerator,
     private readonly userAccountExistenceChecker: UserAccountExistenceChecker,
+    private readonly provisioningAuditTrail: ProvisioningAuditTrail,
   ) {}
 
   async execute(
@@ -98,6 +100,23 @@ export class CreateHealthFacilityHandler {
     return this.unitOfWork.withTransaction(
       async () => {
         await this.repository.save(facility, facility.id);
+        // ADR-0009 §2.2/§4 — ecrite DANS LA MEME transaction que la mutation de l'agregat.
+        // `actorKind: 'SYSTEM'` : aucun acteur n'est threade jusqu'ici (aucune session
+        // n'existe encore au moment de l'auto-inscription, voir le rapport de cette etape) ;
+        // `subjectUserId: ownerUserId` reste renseigne (le sujet REEL de ce provisioning).
+        await this.provisioningAuditTrail.record({
+          eventType: 'PROVISIONING_FACILITY_CREATED',
+          outcome: 'SUCCESS',
+          tenantId: facility.id.toString(),
+          actorKind: 'SYSTEM',
+          actorUserId: null,
+          subjectUserId: ownerUserId,
+          targetType: 'HEALTH_FACILITY',
+          targetId: facility.id.toString(),
+          reason: null,
+          sessionId: null,
+          correlationId: null,
+        });
         return Result.success({ tenantId: facility.id.toString() });
       },
       { tenantId: facility.id },

@@ -3,6 +3,7 @@ import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantI
 import type { OutboxEventEnvelope } from '../../../../shared-kernel/application/OutboxEventHandler.js';
 import {
   FixedClock,
+  InMemorySubscriptionAuditTrail,
   InMemorySubscriptionRepository,
   InMemoryUnitOfWork,
   SequentialIdGenerator,
@@ -68,14 +69,16 @@ async function buildScenario(status: SubscriptionStatus) {
   await subscriptionRepository.save(subscriptionWithStatus(status), TENANT);
   subscriptionRepository.publishedEvents.length = 0;
 
+  const subscriptionAuditTrail = new InMemorySubscriptionAuditTrail();
   const handler = createReactivateSubscriptionOnPaymentSucceededHandler({
     subscriptionRepository,
+    subscriptionAuditTrail,
     unitOfWork,
     clock,
     idGenerator,
   });
 
-  return { handler, subscriptionRepository };
+  return { handler, subscriptionRepository, subscriptionAuditTrail };
 }
 
 describe('ReactivateSubscriptionOnPaymentSucceeded — filtrage par nature du paiement', () => {

@@ -15,6 +15,7 @@ import {
   SubscriptionConcurrencyConflictError,
   type SubscriptionRepository,
 } from '../../domain/ports/SubscriptionRepository.js';
+import type { SubscriptionAuditTrail } from '../ports/SubscriptionAuditTrail.js';
 
 export interface UpgradeSubscriptionPlanCommand {
   readonly tenantId: string;
@@ -87,6 +88,7 @@ export class UpgradeSubscriptionPlanHandler {
     private readonly unitOfWork: UnitOfWork,
     private readonly clock: Clock,
     private readonly idGenerator: IdGenerator,
+    private readonly subscriptionAuditTrail: SubscriptionAuditTrail,
   ) {}
 
   async execute(
@@ -206,6 +208,20 @@ export class UpgradeSubscriptionPlanHandler {
         // demande ci-dessus (D9) : la facture ne peut donc jamais etre emise pour une demande qui
         // n'aurait pas ete persistee, ni l'inverse.
         await this.subscriptionRepository.save(subscription, tenantId);
+
+        // ADR-0009 §2.2/§4 — meme transaction. `actorKind: 'SYSTEM'` : aucun endpoint HTTP
+        // interactif n'invoque encore cette commande (voir le rapport de cette etape).
+        await this.subscriptionAuditTrail.record({
+          eventType: 'SUBSCRIPTION_PLAN_UPGRADE_REQUESTED',
+          outcome: 'SUCCESS',
+          tenantId: tenantId.toString(),
+          actorKind: 'SYSTEM',
+          actorUserId: null,
+          targetId: subscription.id.toString(),
+          reason: null,
+          sessionId: null,
+          correlationId: null,
+        });
 
         return Result.success({
           planChangeId,

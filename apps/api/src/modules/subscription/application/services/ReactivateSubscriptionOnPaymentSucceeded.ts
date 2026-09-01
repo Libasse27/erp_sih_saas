@@ -10,6 +10,7 @@ import {
   SubscriptionConcurrencyConflictError,
   type SubscriptionRepository,
 } from '../../domain/ports/SubscriptionRepository.js';
+import type { SubscriptionAuditTrail } from '../ports/SubscriptionAuditTrail.js';
 
 /** Nombre d'essais de `save()` face a des conflits de verrouillage optimiste repetes — meme valeur et meme raisonnement que `ApplyPlanUpgradeOnPaymentSucceeded.ts`. */
 const MAX_SAVE_ATTEMPTS = 3;
@@ -61,6 +62,7 @@ const SaaSPaymentSucceededPayloadSchema = z
  */
 export function createReactivateSubscriptionOnPaymentSucceededHandler(deps: {
   subscriptionRepository: SubscriptionRepository;
+  subscriptionAuditTrail: SubscriptionAuditTrail;
   unitOfWork: UnitOfWork;
   clock: Clock;
   idGenerator: IdGenerator;
@@ -102,15 +104,36 @@ export function createReactivateSubscriptionOnPaymentSucceededHandler(deps: {
           return;
         }
 
+        // ADR-0009 §2.2/§4 : capture le fait REELLEMENT applique (celui de la derniere tentative
+        // reussie) pour choisir l'evenement d'audit correct — jamais suppose depuis l'etat lu au
+        // debut de la transaction (qui peut avoir change de branche apres un conflit, voir
+        // commentaire ci-dessous).
+        let appliedEventType: 'SUBSCRIPTION_REACTIVATED' | 'SUBSCRIPTION_RENEWED' = 'SUBSCRIPTION_RENEWED';
         await saveWithConcurrencyRetry(deps.subscriptionRepository, subscription, (current) => {
           // Le statut est relu sur l'agregat COURANT a chaque tentative (et non capture une fois
           // avant la boucle) : apres un conflit, l'etat relu peut avoir change de branche — un
           // abonnement lu `GRACE_PERIOD` peut avoir ete reactive entre-temps par un autre writer.
           if (current.status === 'GRACE_PERIOD' || current.status === 'DEGRADED') {
             current.reactivate({ newPeriodStartsAt, newPeriodEndsAt, clock: deps.clock, idGenerator: deps.idGenerator });
+            appliedEventType = 'SUBSCRIPTION_REACTIVATED';
           } else {
             current.renew({ newPeriodStartsAt, newPeriodEndsAt, clock: deps.clock, idGenerator: deps.idGenerator });
+            appliedEventType = 'SUBSCRIPTION_RENEWED';
           }
+        });
+
+        // `actorKind: 'SYSTEM'` : consommateur Outbox qui EXECUTE lui-meme la commande (autorise,
+        // §4) — meme transaction que la mutation de l'agregat.
+        await deps.subscriptionAuditTrail.record({
+          eventType: appliedEventType,
+          outcome: 'SUCCESS',
+          tenantId: tenantId.toString(),
+          actorKind: 'SYSTEM',
+          actorUserId: null,
+          targetId: subscriptionId.toString(),
+          reason: null,
+          sessionId: null,
+          correlationId: null,
         });
       },
       { tenantId },

@@ -7,6 +7,7 @@ import { Money } from '../../../../shared-kernel/domain/value-objects/Money.js';
 import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantId.js';
 import { PlatformInvoice } from '../../domain/PlatformInvoice.js';
 import type { PlatformInvoiceRepository } from '../../domain/ports/PlatformInvoiceRepository.js';
+import type { BillingAuditTrail } from '../ports/BillingAuditTrail.js';
 
 /** Forme attendue du payload de `subscription.subscription.renewal-due` (module `subscription`) — voir le commentaire equivalent dans ReactivateSubscriptionOnPaymentSucceeded.ts sur la raison d'un schema de frontiere ici. */
 const SubscriptionRenewalDuePayloadSchema = z
@@ -34,6 +35,7 @@ const SubscriptionRenewalDuePayloadSchema = z
  */
 export function createIssuePlatformInvoiceOnRenewalDueHandler(deps: {
   platformInvoiceRepository: PlatformInvoiceRepository;
+  billingAuditTrail: BillingAuditTrail;
   unitOfWork: UnitOfWork;
   clock: Clock;
   idGenerator: IdGenerator;
@@ -74,7 +76,27 @@ export function createIssuePlatformInvoiceOnRenewalDueHandler(deps: {
           clock: deps.clock,
           idGenerator: deps.idGenerator,
         });
-        await deps.platformInvoiceRepository.issue(invoice);
+        // `issue()` renvoie la facture EXISTANTE en cas de conflit `(subscriptionId,
+        // periodStartsAt)` (idempotence, voir le commentaire de tete) : c'est ELLE, jamais
+        // l'objet localement construit, qui porte l'identifiant REELLEMENT persiste. Comparer les
+        // deux identifiants (frais localement vs celui reellement persiste) est la SEULE maniere
+        // de distinguer une creation reelle d'un no-op idempotent avec ce contrat de port — aucune
+        // entree d'audit dupliquee sur un rejeu (ADR-0009, "Tests attendus").
+        const issued = await deps.platformInvoiceRepository.issue(invoice);
+        if (issued.id.equals(invoice.id)) {
+          await deps.billingAuditTrail.record({
+            eventType: 'BILLING_PLATFORM_INVOICE_ISSUED',
+            outcome: 'SUCCESS',
+            tenantId: tenantId.toString(),
+            actorKind: 'SYSTEM',
+            actorUserId: null,
+            targetType: 'PLATFORM_INVOICE',
+            targetId: issued.id.toString(),
+            reason: null,
+            sessionId: null,
+            correlationId: null,
+          });
+        }
       },
       { tenantId },
     );

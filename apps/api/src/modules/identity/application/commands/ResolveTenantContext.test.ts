@@ -6,6 +6,7 @@ import {
   idFor,
   InMemoryMfaEnrollmentRepository,
   InMemoryRoleRepository,
+  InMemorySessionAuditTrail,
   InMemorySessionStore,
   InMemoryTenantAccessChecker,
   InMemoryUnitOfWork,
@@ -41,6 +42,7 @@ describe('ResolveTenantContextHandler', () => {
   let handler: ResolveTenantContextHandler;
   let clock: FixedClock;
   let idGenerator: SequentialIdGenerator;
+  let sessionAuditTrail: InMemorySessionAuditTrail;
 
   beforeEach(() => {
     accounts = new InMemoryUserAccountRepository();
@@ -49,6 +51,7 @@ describe('ResolveTenantContextHandler', () => {
     sessions = new InMemorySessionStore();
     tenants = new InMemoryTenantAccessChecker();
     mfaEnrollments = new InMemoryMfaEnrollmentRepository();
+    sessionAuditTrail = new InMemorySessionAuditTrail();
     // Les tenants utilises par la grande majorite des scenarios de cette suite existent deja
     // (le comportement "tenant absent" a sa propre suite dediee ci-dessous, sur un tenant non
     // seed ici).
@@ -67,7 +70,13 @@ describe('ResolveTenantContextHandler', () => {
       clock,
       idGenerator,
     );
-    handler = new ResolveTenantContextHandler(issuer, sessions, buildTestRefreshTokenIssuer({ clock, idGenerator }));
+    handler = new ResolveTenantContextHandler(
+      issuer,
+      sessions,
+      buildTestRefreshTokenIssuer({ clock, idGenerator }),
+      sessionAuditTrail,
+      unitOfWork,
+    );
   });
 
   async function registerStandardUser(): Promise<UserAccount> {

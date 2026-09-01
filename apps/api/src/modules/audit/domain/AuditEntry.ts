@@ -5,42 +5,63 @@ import { AuditEntryId } from './value-objects/AuditEntryId.js';
 import type { AuditCategory } from './value-objects/AuditCategory.js';
 import type { AuditEventType } from './value-objects/AuditEventType.js';
 import type { AuditOutcome } from './value-objects/AuditOutcome.js';
+import type { ActorKind } from './value-objects/ActorKind.js';
+import type { AuditTargetType } from './value-objects/AuditTargetType.js';
+import { AuditChainKey } from './value-objects/AuditChainKey.js';
+import type { AuditSessionReferenceDeriver } from './ports/AuditSessionReferenceDeriver.js';
 
 interface AuditEntryProps {
   readonly category: AuditCategory;
   readonly eventType: AuditEventType;
   readonly outcome: AuditOutcome;
   readonly tenantId: string | null;
-  readonly subjectUserId: string;
-  readonly actorUserId: string;
+  readonly actorKind: ActorKind;
+  readonly actorUserId: string | null;
   readonly actorRoleCodes: readonly string[];
+  readonly subjectUserId: string | null;
+  readonly targetType: AuditTargetType;
+  readonly targetId: string | null;
   readonly reason: string | null;
-  readonly sessionId: string | null;
+  /**
+   * Reference DERIVEE non reversible de la session (ADR-0009 §3.1, correctif securite
+   * 2026-09-01) — JAMAIS le `sessionId` (jeton de session vivant, rejouable en
+   * `Authorization: Bearer`). Calculee UNIQUEMENT dans `record()` ci-dessous, voir ce
+   * commentaire de fabrique.
+   */
+  readonly sessionRef: string | null;
   readonly correlationId: string | null;
   readonly occurredAt: Date;
+  /**
+   * Position et empreintes de chaine (ADR-0009 §5) — TOUJOURS `null` sur une entree fraichement
+   * `record()`ee (ces valeurs ne sont determinables qu'au moment de l'INSERT, sous verrou
+   * consultatif, voir `PrismaAuditEntryRepository.append()`) ; renseignees UNIQUEMENT sur une
+   * entree `reconstitute()`e depuis une ligne deja persistee.
+   */
+  readonly chainSequence: number | null;
+  readonly previousEntryHash: string | null;
+  readonly entryHash: string | null;
 }
 
 /**
- * Preuve APPEND-ONLY d'une action MFA (ADR-0005 §5, O-04.7). N'etend `AggregateRoot` QUE pour
- * l'identite/egalite qu'il fournit (`Entity`) — cette classe N'EMET ET N'EMETTRA JAMAIS de
- * `DomainEvent` : ce n'est pas un evenement d'INTEGRATION (asynchrone, at-least-once), c'est
- * DIRECTEMENT la preuve persistee, ecrite dans la transaction de l'action auditee (voir
- * `PrismaAuditEntryRepository.append()`, jamais via l'Outbox — ADR-0005 §5, raisons 1-3).
+ * Preuve APPEND-ONLY d'une action sensible du SaaS Core (ADR-0005 §5, O-04.7 ; etendue ADR-0009).
+ * N'etend `AggregateRoot` QUE pour l'identite/egalite qu'il fournit (`Entity`) — cette classe
+ * N'EMET ET N'EMETTRA JAMAIS de `DomainEvent` : ce n'est pas un evenement d'INTEGRATION
+ * (asynchrone, at-least-once), c'est DIRECTEMENT la preuve persistee, ecrite dans la transaction
+ * de l'action auditee (voir `PrismaAuditEntryRepository.append()`, jamais via l'Outbox —
+ * ADR-0005 §5, raisons 1-3 ; ADR-0009 §4).
  *
  * Refuse (leve, PAS un `Result.failure` : c'est un bug de l'appelant, pas un echec metier
  * attendu) l'absence de motif quand `eventType === 'MFA_RE_ENROLLMENT_FORCED'` ET
- * `outcome === 'SUCCESS'` — le motif est OBLIGATOIRE pour la REUSSITE de cette action administree
- * (O-04, residu 3), et n'existe QUE dans cette entree d'audit (jamais dans le payload Outbox de
- * `MfaReEnrollmentForced`, voir ADR-0005 §6).
+ * `outcome === 'SUCCESS'` — inchange depuis ADR-0005 §6/§Contexte.
  *
- * Restriction a `outcome === 'SUCCESS'` (correctif securite, revue independante F-4) : un REFUS
- * (`DENIED`, ex. acteur sans permission `mfa:reset`, sans step-up, ou sujet hors du tenant de
- * l'acteur) doit lui aussi produire une preuve d'audit — l'invariant ne peut donc pas exiger un
- * motif metier non vide pour un chemin ou l'appelant n'en a justement pas encore recueilli un
- * (le motif n'est demande qu'APRES verification de l'habilitation, voir `ForceMfaReEnrollment.ts`).
- * Exiger un motif pour un refus aurait forme un `null`/vide silencieusement rejete par cet
- * invariant, empechant precisement la tracabilite que l'audit doit garantir pour une tentative de
- * contournement.
+ * ADR-0009 §3 — DEUX invariants supplementaires, VERIFIES ICI EN PLUS de la contrainte `CHECK`
+ * en base (doctrine des deux defenses independantes, jamais une seule) :
+ *   - `actorKind === 'SYSTEM'` <=> `actorUserId === null` (jamais de sentinelle, un discriminant
+ *     EXPLICITE — alternative ecartee #7 de l'ADR) ;
+ *   - `targetType === 'USER_ACCOUNT'` => `subjectUserId !== null`.
+ * Une violation ici est TOUJOURS un bug appelant (l'adaptateur cross-module qui construit les
+ * parametres a mal derive `actorKind`/`targetType`), jamais un echec metier attendu — leve, pas
+ * `Result.failure`.
  */
 export class AuditEntry extends AggregateRoot<AuditEntryId> {
   private readonly props: AuditEntryProps;
@@ -50,19 +71,32 @@ export class AuditEntry extends AggregateRoot<AuditEntryId> {
     this.props = props;
   }
 
+  /**
+   * SEULE fabrique de l'agregat, SEUL point de derivation de `sessionRef` (ADR-0009 §3.1,
+   * correctif securite 2026-09-01). `params.sessionId` reste nomme ainsi car c'est bien un
+   * `sessionId` BRUT a cet instant (le paramètre d'entree, toujours passe tel quel par les 5
+   * producteurs — `identity`/`subscription`/`tenant`/`payment`/le controleur HTTP, AUCUN d'entre
+   * eux ne derive lui-meme) ; c'est le CHAMP RESULTANT, conserve dans `props.sessionRef`, qui rend
+   * la transformation visible a la lecture. `reconstitute()` ci-dessous ne derive JAMAIS rien : il
+   * recoit `sessionRef` deja calcule, tel que persiste.
+   */
   static record(params: {
     category: AuditCategory;
     eventType: AuditEventType;
     outcome: AuditOutcome;
     tenantId: string | null;
-    subjectUserId: string;
-    actorUserId: string;
+    actorKind: ActorKind;
+    actorUserId: string | null;
     actorRoleCodes: readonly string[];
+    subjectUserId: string | null;
+    targetType: AuditTargetType;
+    targetId: string | null;
     reason: string | null;
     sessionId: string | null;
     correlationId: string | null;
     clock: Clock;
     idGenerator: IdGenerator;
+    sessionReferenceDeriver: AuditSessionReferenceDeriver;
   }): AuditEntry {
     if (
       params.eventType === 'MFA_RE_ENROLLMENT_FORCED' &&
@@ -71,6 +105,21 @@ export class AuditEntry extends AggregateRoot<AuditEntryId> {
     ) {
       throw new Error(
         'AuditEntry.record : motif obligatoire pour un MFA_RE_ENROLLMENT_FORCED en SUCCESS (bug appelant, pas un echec metier attendu).',
+      );
+    }
+    if (params.actorKind === 'SYSTEM' && params.actorUserId !== null) {
+      throw new Error(
+        'AuditEntry.record : actorUserId doit etre null quand actorKind === "SYSTEM" (bug appelant, invariant §3 ADR-0009).',
+      );
+    }
+    if (params.actorKind !== 'SYSTEM' && params.actorUserId === null) {
+      throw new Error(
+        'AuditEntry.record : actorUserId est obligatoire quand actorKind !== "SYSTEM" (bug appelant, invariant §3 ADR-0009).',
+      );
+    }
+    if (params.targetType === 'USER_ACCOUNT' && params.subjectUserId === null) {
+      throw new Error(
+        'AuditEntry.record : subjectUserId est obligatoire quand targetType === "USER_ACCOUNT" (bug appelant, invariant §3 ADR-0009).',
       );
     }
     const idResult = AuditEntryId.create(params.idGenerator.generate());
@@ -82,17 +131,23 @@ export class AuditEntry extends AggregateRoot<AuditEntryId> {
       eventType: params.eventType,
       outcome: params.outcome,
       tenantId: params.tenantId,
-      subjectUserId: params.subjectUserId,
+      actorKind: params.actorKind,
       actorUserId: params.actorUserId,
       actorRoleCodes: params.actorRoleCodes,
+      subjectUserId: params.subjectUserId,
+      targetType: params.targetType,
+      targetId: params.targetId,
       reason: params.reason,
-      sessionId: params.sessionId,
+      sessionRef: params.sessionReferenceDeriver.derive(params.sessionId),
       correlationId: params.correlationId,
       occurredAt: params.clock.now(),
+      chainSequence: null,
+      previousEntryHash: null,
+      entryHash: null,
     });
   }
 
-  /** Reconstruction depuis la persistance (`findById`). */
+  /** Reconstruction depuis la persistance (`findById`/`listFor*`/`readChainSegment`) — porte les champs de chaine tels que persistes. */
   static reconstitute(id: AuditEntryId, props: AuditEntryProps): AuditEntry {
     return new AuditEntry(id, props);
   }
@@ -113,11 +168,11 @@ export class AuditEntry extends AggregateRoot<AuditEntryId> {
     return this.props.tenantId;
   }
 
-  get subjectUserId(): string {
-    return this.props.subjectUserId;
+  get actorKind(): ActorKind {
+    return this.props.actorKind;
   }
 
-  get actorUserId(): string {
+  get actorUserId(): string | null {
     return this.props.actorUserId;
   }
 
@@ -125,12 +180,24 @@ export class AuditEntry extends AggregateRoot<AuditEntryId> {
     return this.props.actorRoleCodes;
   }
 
+  get subjectUserId(): string | null {
+    return this.props.subjectUserId;
+  }
+
+  get targetType(): AuditTargetType {
+    return this.props.targetType;
+  }
+
+  get targetId(): string | null {
+    return this.props.targetId;
+  }
+
   get reason(): string | null {
     return this.props.reason;
   }
 
-  get sessionId(): string | null {
-    return this.props.sessionId;
+  get sessionRef(): string | null {
+    return this.props.sessionRef;
   }
 
   get correlationId(): string | null {
@@ -139,5 +206,22 @@ export class AuditEntry extends AggregateRoot<AuditEntryId> {
 
   get occurredAt(): Date {
     return this.props.occurredAt;
+  }
+
+  /** Derive TOUJOURS depuis `tenantId` (colonne generee cote base, ADR-0009 §5.1) — jamais un champ stocke separement. */
+  get chainKey(): AuditChainKey {
+    return AuditChainKey.derive(this.props.tenantId);
+  }
+
+  get chainSequence(): number | null {
+    return this.props.chainSequence;
+  }
+
+  get previousEntryHash(): string | null {
+    return this.props.previousEntryHash;
+  }
+
+  get entryHash(): string | null {
+    return this.props.entryHash;
   }
 }

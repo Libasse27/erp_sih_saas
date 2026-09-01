@@ -4,6 +4,7 @@ import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantI
 import {
   FixedClock,
   idFor,
+  InMemoryMembershipAuditTrail,
   InMemoryRoleRepository,
   InMemoryUnitOfWork,
   InMemoryUserAccountRepository,
@@ -54,6 +55,7 @@ describe('GrantOwnerMembershipOnSubscriptionStarted (ADR-0008 §1/§4/§9, reseq
       new InMemoryUnitOfWork(),
       clock,
       idGenerator,
+      new InMemoryMembershipAuditTrail(),
     );
     const handler = createGrantOwnerMembershipOnSubscriptionStartedHandler({ grantMembershipHandler });
     return { handler, memberships, owner };

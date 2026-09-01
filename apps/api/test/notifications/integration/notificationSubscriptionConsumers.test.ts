@@ -14,7 +14,9 @@ import type { UserAccountExistenceChecker } from '../../../src/modules/tenant/ap
 import { buildSubscriptionModule, type SubscriptionModule } from '../../../src/modules/subscription/infrastructure/SubscriptionModule.js';
 import { PrismaUserAccountRepository } from '../../../src/modules/identity/infrastructure/persistence/PrismaUserAccountRepository.js';
 import { UserAccountId } from '../../../src/modules/identity/domain/value-objects/UserAccountId.js';
-import { InMemoryAuditTrail, InMemorySessionAuditTrail } from '../../identity/builders/testKit.js';
+import { InMemoryAuditTrail, InMemoryMembershipAuditTrail, InMemorySessionAuditTrail } from '../../identity/builders/testKit.js';
+import { InMemoryProvisioningAuditTrail } from '../../tenant/builders/testKit.js';
+import { InMemorySubscriptionAuditTrail } from '../../subscription/builders/testKit.js';
 import { createTestRedisClient, uniqueEmail, uniqueFacilityName } from '../../identity/integration/dbTestHelpers.js';
 import { PrismaNotificationRepository } from '../../../src/modules/notifications/infrastructure/persistence/PrismaNotificationRepository.js';
 import { createSendWelcomeEmailOnSubscriptionStartedHandler } from '../../../src/modules/notifications/application/services/SendWelcomeEmailOnSubscriptionStarted.js';
@@ -65,8 +67,19 @@ describe('Notifications — consommateurs Outbox Subscription contre Identity/Te
         return (await userAccountsForExistenceCheck.findById(idResult.getValue())) !== null;
       },
     };
-    tenantModule = buildTenantModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator(), userAccountExistenceChecker });
-    subscriptionModule = buildSubscriptionModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator() });
+    tenantModule = buildTenantModule({
+      prisma,
+      clock: new SystemClock(),
+      idGenerator: new UuidGenerator(),
+      userAccountExistenceChecker,
+      provisioningAuditTrail: new InMemoryProvisioningAuditTrail(),
+    });
+    subscriptionModule = buildSubscriptionModule({
+      prisma,
+      clock: new SystemClock(),
+      idGenerator: new UuidGenerator(),
+      subscriptionAuditTrail: new InMemorySubscriptionAuditTrail(),
+    });
     // Compose Subscription depuis ADR-0008 §3 (etape 10/13) — voir composition-root.ts. Ce
     // fichier n'exerce jamais `resolveTenantContext` directement (il invoque les consommateurs
     // Outbox de Notifications avec une enveloppe fabriquee a la main), donc aucun test existant
@@ -94,6 +107,7 @@ describe('Notifications — consommateurs Outbox Subscription contre Identity/Te
       tenantAccessChecker,
       auditTrail: new InMemoryAuditTrail(),
       sessionAuditTrail: new InMemorySessionAuditTrail(),
+      membershipAuditTrail: new InMemoryMembershipAuditTrail(),
       mfa: {
         secretEncryptionKey: Buffer.alloc(32, 4),
         secretEncryptionKeyId: 'k1',

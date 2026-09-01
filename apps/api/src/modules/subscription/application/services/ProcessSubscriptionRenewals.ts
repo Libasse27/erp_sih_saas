@@ -7,6 +7,7 @@ import {
   SubscriptionConcurrencyConflictError,
   type SubscriptionRepository,
 } from '../../domain/ports/SubscriptionRepository.js';
+import type { SubscriptionAuditTrail } from '../ports/SubscriptionAuditTrail.js';
 
 export interface ProcessSubscriptionRenewalsResult {
   readonly scanned: number;
@@ -70,6 +71,7 @@ export class ProcessSubscriptionRenewalsHandler {
     private readonly unitOfWork: UnitOfWork,
     private readonly clock: Clock,
     private readonly idGenerator: IdGenerator,
+    private readonly subscriptionAuditTrail: SubscriptionAuditTrail,
   ) {}
 
   /**
@@ -134,6 +136,61 @@ export class ProcessSubscriptionRenewalsHandler {
             }
 
             await this.subscriptionRepository.save(subscription, subscription.tenantId);
+
+            // ADR-0009 §2.2/§4 — meme transaction que la mutation. `actorKind: 'SYSTEM'` : ce
+            // handler est TOUJOURS invoque par le planificateur (SubscriptionRenewalScheduler),
+            // jamais par une session interactive — exemple canonique cite par l'ADR (§3).
+            // `RENEWAL_DUE` mute DEUX invariants dans la meme transaction (echeance ATTEINTE +
+            // grace DEMARREE) : deux entrees distinctes, chacune reflete fidelement UN fait.
+            if (cycleOutcome === 'RENEWAL_DUE') {
+              await this.subscriptionAuditTrail.record({
+                eventType: 'SUBSCRIPTION_RENEWED',
+                outcome: 'SUCCESS',
+                tenantId: subscription.tenantId.toString(),
+                actorKind: 'SYSTEM',
+                actorUserId: null,
+                targetId: subscription.id.toString(),
+                reason: null,
+                sessionId: null,
+                correlationId: null,
+              });
+              await this.subscriptionAuditTrail.record({
+                eventType: 'SUBSCRIPTION_GRACE_PERIOD_STARTED',
+                outcome: 'SUCCESS',
+                tenantId: subscription.tenantId.toString(),
+                actorKind: 'SYSTEM',
+                actorUserId: null,
+                targetId: subscription.id.toString(),
+                reason: null,
+                sessionId: null,
+                correlationId: null,
+              });
+            } else if (cycleOutcome === 'DEGRADED_ENTERED') {
+              await this.subscriptionAuditTrail.record({
+                eventType: 'SUBSCRIPTION_DEGRADED_MODE_ENTERED',
+                outcome: 'SUCCESS',
+                tenantId: subscription.tenantId.toString(),
+                actorKind: 'SYSTEM',
+                actorUserId: null,
+                targetId: subscription.id.toString(),
+                reason: null,
+                sessionId: null,
+                correlationId: null,
+              });
+            } else if (cycleOutcome === 'SUSTAIN_NOTIFIED') {
+              await this.subscriptionAuditTrail.record({
+                eventType: 'SUBSCRIPTION_DEGRADED_MODE_SUSTAINED',
+                outcome: 'SUCCESS',
+                tenantId: subscription.tenantId.toString(),
+                actorKind: 'SYSTEM',
+                actorUserId: null,
+                targetId: subscription.id.toString(),
+                reason: null,
+                sessionId: null,
+                correlationId: null,
+              });
+            }
+
             return cycleOutcome;
           },
           { tenantId: candidate.tenantId },

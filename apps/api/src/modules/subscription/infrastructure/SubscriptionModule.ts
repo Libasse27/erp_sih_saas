@@ -19,6 +19,7 @@ import type { PlanPriceRepository } from '../domain/ports/PlanPriceRepository.js
 import type { PlanRepository } from '../domain/ports/PlanRepository.js';
 import type { PlanUpgradeRequestRepository } from '../domain/ports/PlanUpgradeRequestRepository.js';
 import type { SubscriptionRepository } from '../domain/ports/SubscriptionRepository.js';
+import type { SubscriptionAuditTrail } from '../application/ports/SubscriptionAuditTrail.js';
 import { PrismaPlanChangeRepository } from './persistence/PrismaPlanChangeRepository.js';
 import { PrismaPlanPriceRepository } from './persistence/PrismaPlanPriceRepository.js';
 import { PrismaPlanRepository } from './persistence/PrismaPlanRepository.js';
@@ -70,6 +71,8 @@ export function buildSubscriptionModule(deps: {
   idGenerator: IdGenerator;
   /** Trace les paiements d'upgrade sans demande applicable (regularisation manuelle) — voir ApplyPlanUpgradeOnPaymentSucceeded.ts. */
   applyPlanUpgradeLogger?: ApplyPlanUpgradeLogger;
+  /** Port sortant vers le module `audit`, categorie `SUBSCRIPTION` (ADR-0009 §2.2/§4) — l'adaptateur reel est cable par composition-root.ts. */
+  subscriptionAuditTrail: SubscriptionAuditTrail;
 }): SubscriptionModule {
   const plans = new PrismaPlanRepository(deps.prisma);
   const planPrices = new PrismaPlanPriceRepository(deps.prisma);
@@ -85,6 +88,7 @@ export function buildSubscriptionModule(deps: {
     unitOfWork,
     deps.clock,
     deps.idGenerator,
+    deps.subscriptionAuditTrail,
   );
 
   return {
@@ -100,6 +104,7 @@ export function buildSubscriptionModule(deps: {
         unitOfWork,
         deps.clock,
         deps.idGenerator,
+        deps.subscriptionAuditTrail,
       ),
     },
     services: {
@@ -110,11 +115,13 @@ export function buildSubscriptionModule(deps: {
         unitOfWork,
         deps.clock,
         deps.idGenerator,
+        deps.subscriptionAuditTrail,
       ),
     },
     outboxHandlers: {
       reactivateSubscriptionOnPaymentSucceeded: createReactivateSubscriptionOnPaymentSucceededHandler({
         subscriptionRepository: subscriptions,
+        subscriptionAuditTrail: deps.subscriptionAuditTrail,
         unitOfWork,
         clock: deps.clock,
         idGenerator: deps.idGenerator,
@@ -123,6 +130,7 @@ export function buildSubscriptionModule(deps: {
         subscriptionRepository: subscriptions,
         planUpgradeRequestRepository: planUpgradeRequests,
         planChangeRepository: planChanges,
+        subscriptionAuditTrail: deps.subscriptionAuditTrail,
         unitOfWork,
         clock: deps.clock,
         idGenerator: deps.idGenerator,

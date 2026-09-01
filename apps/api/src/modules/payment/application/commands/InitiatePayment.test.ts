@@ -3,6 +3,7 @@ import { Money } from '../../../../shared-kernel/domain/value-objects/Money.js';
 import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantId.js';
 import {
   FixedClock,
+  InMemoryBillingAuditTrail,
   InMemoryPaymentProvider,
   InMemoryPaymentRepository,
   InMemoryPlatformInvoiceRepository,
@@ -39,7 +40,15 @@ async function buildScenario() {
   });
   await invoiceRepository.issue(invoice);
 
-  const handler = new InitiatePaymentHandler(invoiceRepository, paymentRepository, provider, unitOfWork, CLOCK, idGenerator);
+  const handler = new InitiatePaymentHandler(
+    invoiceRepository,
+    paymentRepository,
+    provider,
+    unitOfWork,
+    CLOCK,
+    idGenerator,
+    new InMemoryBillingAuditTrail(),
+  );
 
   return { paymentRepository, invoiceRepository, provider, handler, invoice };
 }

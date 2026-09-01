@@ -4,6 +4,7 @@ import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantI
 import {
   FixedClock,
   InMemoryFacilitySettingsRepository,
+  InMemoryProvisioningAuditTrail,
   InMemoryUnitOfWork,
   SequentialIdGenerator,
   uuidAt,
@@ -34,6 +35,7 @@ describe('SeedFacilityConfigurationOnMembershipGranted (ADR-0008 §10, amendemen
       new InMemoryUnitOfWork(),
       new FixedClock('2026-08-28T00:00:00.000Z'),
       new SequentialIdGenerator(),
+      new InMemoryProvisioningAuditTrail(),
     );
     const handler = createSeedFacilityConfigurationOnMembershipGrantedHandler({ seedFacilityConfigurationHandler });
     return { handler, repository };

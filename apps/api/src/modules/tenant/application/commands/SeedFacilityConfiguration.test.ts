@@ -3,6 +3,7 @@ import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantI
 import {
   FixedClock,
   InMemoryFacilitySettingsRepository,
+  InMemoryProvisioningAuditTrail,
   InMemoryUnitOfWork,
   SequentialIdGenerator,
   uuidAt,
@@ -12,13 +13,15 @@ import { SeedFacilityConfigurationHandler } from './SeedFacilityConfiguration.js
 function buildHandler() {
   const repository = new InMemoryFacilitySettingsRepository();
   const unitOfWork = new InMemoryUnitOfWork();
+  const provisioningAuditTrail = new InMemoryProvisioningAuditTrail();
   const handler = new SeedFacilityConfigurationHandler(
     repository,
     unitOfWork,
     new FixedClock('2026-08-28T10:00:00Z'),
     new SequentialIdGenerator(),
+    provisioningAuditTrail,
   );
-  return { repository, handler };
+  return { repository, provisioningAuditTrail, handler };
 }
 
 describe('SeedFacilityConfigurationHandler (ADR-0008 §10, amendement 1)', () => {
@@ -56,5 +59,23 @@ describe('SeedFacilityConfigurationHandler (ADR-0008 §10, amendement 1)', () =>
 
     const settings = await repository.findByTenantId(TenantId.create(tenantId).getValue());
     expect(settings?.id.toString()).toBe(first.getValue().facilitySettingsId);
+  });
+
+  it('ecrit une entree PROVISIONING_CONFIGURATION_SEEDED (ADR-0009 §2.2)', async () => {
+    const { handler, provisioningAuditTrail } = buildHandler();
+    const tenantId = uuidAt(3);
+
+    const result = await handler.execute({ tenantId });
+
+    expect(result.isSuccess()).toBe(true);
+    expect(provisioningAuditTrail.records).toHaveLength(1);
+    expect(provisioningAuditTrail.records[0]).toMatchObject({
+      eventType: 'PROVISIONING_CONFIGURATION_SEEDED',
+      outcome: 'SUCCESS',
+      tenantId,
+      actorKind: 'SYSTEM',
+      targetType: 'FACILITY_SETTINGS',
+      targetId: result.getValue().facilitySettingsId,
+    });
   });
 });

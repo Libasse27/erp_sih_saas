@@ -5,6 +5,7 @@ import type { OutboxEventEnvelope, OutboxEventHandler } from '../../../../shared
 import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantId.js';
 import { PlatformInvoiceId } from '../../domain/value-objects/PlatformInvoiceId.js';
 import type { PlatformInvoiceRepository } from '../../domain/ports/PlatformInvoiceRepository.js';
+import type { BillingAuditTrail } from '../ports/BillingAuditTrail.js';
 
 /** Forme attendue du payload de `payment.payment.saas-payment-succeeded` (voir domain/events/SaaSPaymentSucceeded.ts). */
 const SaaSPaymentSucceededPayloadSchema = z
@@ -23,6 +24,7 @@ const SaaSPaymentSucceededPayloadSchema = z
  */
 export function createMarkPlatformInvoicePaidOnPaymentSucceededHandler(deps: {
   platformInvoiceRepository: PlatformInvoiceRepository;
+  billingAuditTrail: BillingAuditTrail;
   unitOfWork: UnitOfWork;
   clock: Clock;
 }): OutboxEventHandler {
@@ -49,8 +51,28 @@ export function createMarkPlatformInvoicePaidOnPaymentSucceededHandler(deps: {
         if (invoice === null) {
           return;
         }
+        // Idempotence PAR CONSTRUCTION (`markPaid()` est un no-op si deja `PAID`, voir
+        // PlatformInvoice.ts) : la verification EXPLICITE de l'etat AVANT mutation est ici
+        // NECESSAIRE (contrairement au reste de ce fichier) pour ne jamais ecrire une seconde
+        // entree d'audit sur un rejeu at-least-once du MEME evenement.
+        const alreadyPaid = invoice.status === 'PAID';
         invoice.markPaid(deps.clock.now());
         await deps.platformInvoiceRepository.save(invoice, tenantId);
+
+        if (!alreadyPaid) {
+          await deps.billingAuditTrail.record({
+            eventType: 'BILLING_PLATFORM_INVOICE_SETTLED',
+            outcome: 'SUCCESS',
+            tenantId: tenantId.toString(),
+            actorKind: 'SYSTEM',
+            actorUserId: null,
+            targetType: 'PLATFORM_INVOICE',
+            targetId: invoiceId.toString(),
+            reason: null,
+            sessionId: null,
+            correlationId: null,
+          });
+        }
       },
       { tenantId },
     );

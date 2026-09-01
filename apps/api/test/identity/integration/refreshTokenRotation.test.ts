@@ -16,19 +16,33 @@ import { buildSubscriptionModule, seedPlanCatalog, type SubscriptionModule } fro
 import { buildAuditModule, type AuditModule } from '../../../src/modules/audit/infrastructure/AuditModule.js';
 import { PrismaUserAccountRepository } from '../../../src/modules/identity/infrastructure/persistence/PrismaUserAccountRepository.js';
 import { UserAccountId } from '../../../src/modules/identity/domain/value-objects/UserAccountId.js';
+import { InMemoryProvisioningAuditTrail } from '../../tenant/builders/testKit.js';
+import { InMemorySubscriptionAuditTrail } from '../../subscription/builders/testKit.js';
+import { InMemoryMembershipAuditTrail } from '../builders/testKit.js';
 import { createTestPrismaClient, createTestRedisClient, uniqueEmail, uniqueFacilityName } from './dbTestHelpers.js';
 
 /** Calque des adaptateurs de composition-root.ts (voir mfaSessionGate.test.ts pour le meme raisonnement). */
 class AuditModuleBackedAuditTrail implements AuditTrail {
   constructor(private readonly audit: AuditModule) {}
   async record(input: AuditRecordInput): Promise<void> {
-    await this.audit.services.recordEntry({ category: 'MFA', ...input });
+    await this.audit.services.recordEntry({
+      category: 'MFA',
+      actorKind: input.tenantId === null ? 'USER_PLATFORM' : 'USER_TENANT',
+      targetType: 'USER_ACCOUNT',
+      targetId: input.subjectUserId,
+      ...input,
+    });
   }
 }
 class AuditModuleBackedSessionAuditTrail implements SessionAuditTrail {
   constructor(private readonly audit: AuditModule) {}
   async record(input: SessionAuditRecordInput): Promise<void> {
-    await this.audit.services.recordEntry({ category: 'SESSION', ...input });
+    await this.audit.services.recordEntry({
+      category: 'SESSION',
+      targetType: 'USER_ACCOUNT',
+      targetId: input.subjectUserId,
+      ...input,
+    });
   }
 }
 
@@ -62,8 +76,19 @@ describe('Refresh token rotation — integration Postgres + Redis reelle (O-06.5
         return (await userAccountsForExistenceCheck.findById(idResult.getValue())) !== null;
       },
     };
-    tenant = buildTenantModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator(), userAccountExistenceChecker });
-    subscription = buildSubscriptionModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator() });
+    tenant = buildTenantModule({
+      prisma,
+      clock: new SystemClock(),
+      idGenerator: new UuidGenerator(),
+      userAccountExistenceChecker,
+      provisioningAuditTrail: new InMemoryProvisioningAuditTrail(),
+    });
+    subscription = buildSubscriptionModule({
+      prisma,
+      clock: new SystemClock(),
+      idGenerator: new UuidGenerator(),
+      subscriptionAuditTrail: new InMemorySubscriptionAuditTrail(),
+    });
     // Compose Subscription depuis ADR-0008 §3 (etape 10/13) : ACCESSIBLE exige desormais un
     // Subscription existant — voir composition-root.ts pour la justification complete.
     const tenantAccessChecker: TenantAccessChecker = {
@@ -84,6 +109,7 @@ describe('Refresh token rotation — integration Postgres + Redis reelle (O-06.5
       tenantAccessChecker,
       auditTrail: new AuditModuleBackedAuditTrail(audit),
       sessionAuditTrail: new AuditModuleBackedSessionAuditTrail(audit),
+      membershipAuditTrail: new InMemoryMembershipAuditTrail(),
       mfa: {
         secretEncryptionKey: Buffer.alloc(32, 17),
         secretEncryptionKeyId: 'k1',

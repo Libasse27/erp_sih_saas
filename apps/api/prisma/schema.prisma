@@ -764,6 +764,13 @@ enum AuditCategory {
   /// une extension de l'adaptateur MFA existant (meme raisonnement qu'ADR-0005 §5, alternative 7
   /// explicitement ecartee).
   SESSION
+  /// Cinq valeurs ajoutees a l'etape 11/13 (ADR-0009 §2) — la categorie decrit la NATURE du fait
+  /// audite, jamais l'identite de qui l'a produit (voir `actorKind`).
+  PROVISIONING
+  MEMBERSHIP
+  SUBSCRIPTION
+  BILLING
+  AUDIT_ACCESS
 
   @@schema("platform")
 }
@@ -772,6 +779,29 @@ enum AuditOutcome {
   SUCCESS
   FAILURE
   DENIED
+
+  @@schema("platform")
+}
+
+/// "Depuis quel contexte" une action a ete accomplie (ADR-0009 §3, B1) — ajoute a l'etape 11/13.
+enum ActorKind {
+  USER_TENANT
+  USER_PLATFORM
+  SYSTEM
+
+  @@schema("platform")
+}
+
+/// Nature de la cible d'une action auditee (ADR-0009 §3, B1) — ajoute a l'etape 11/13.
+enum AuditTargetType {
+  USER_ACCOUNT
+  MEMBERSHIP
+  HEALTH_FACILITY
+  SUBSCRIPTION
+  PAYMENT
+  PLATFORM_INVOICE
+  FACILITY_SETTINGS
+  AUDIT_TRAIL
 
   @@schema("platform")
 }
@@ -799,31 +829,89 @@ enum AuditEventType {
   SESSION_REFRESH_REVOKED
   SESSION_ABSOLUTE_CEILING_EXCEEDED
   SESSION_INACTIVITY_TIMEOUT
+  /// Etape 11/13 (ADR-0009 §2.1) — fermeture de la lacune "la connexion elle-meme n'est pas auditee".
+  SESSION_LOGIN_SUCCEEDED
+  SESSION_LOGIN_FAILED
+  SESSION_CONTEXT_OPENED
+  SESSION_CONTEXT_DENIED
+  SESSION_CLOSED
+  /// Etape 11/13 (ADR-0009 §2.2) — Saga de provisioning (ADR-0008).
+  PROVISIONING_FACILITY_CREATED
+  PROVISIONING_CONFIGURATION_SEEDED
+  PROVISIONING_COMPLETED
+  /// Etape 11/13 (ADR-0009 §2.2) — agregat UserTenantMembership/MembershipRole.
+  MEMBERSHIP_GRANTED
+  MEMBERSHIP_REVOKED
+  MEMBERSHIP_ROLE_ASSIGNED
+  MEMBERSHIP_ROLE_UNASSIGNED
+  /// Etape 11/13 (ADR-0009 §2.2) — cycle de vie commercial de l'abonnement.
+  SUBSCRIPTION_TRIAL_STARTED
+  SUBSCRIPTION_PLAN_UPGRADE_REQUESTED
+  SUBSCRIPTION_PLAN_CHANGED
+  SUBSCRIPTION_RENEWED
+  SUBSCRIPTION_GRACE_PERIOD_STARTED
+  SUBSCRIPTION_DEGRADED_MODE_ENTERED
+  SUBSCRIPTION_DEGRADED_MODE_SUSTAINED
+  SUBSCRIPTION_REACTIVATED
+  /// Etape 11/13 (ADR-0009 §2.2) — Payment (PSP) et PlatformInvoice.
+  BILLING_PAYMENT_INITIATED
+  BILLING_PAYMENT_CONFIRMED
+  BILLING_PLATFORM_INVOICE_ISSUED
+  BILLING_PLATFORM_INVOICE_SETTLED
+  /// Etape 11/13 (ADR-0009 §7) — consultation du journal lui-meme.
+  AUDIT_TRAIL_QUERIED
+  AUDIT_TRAIL_QUERY_DENIED
 
   @@schema("platform")
 }
 
-/// Preuve APPEND-ONLY d'une action MFA (voir domain/AuditEntry.ts). Ecrite DANS LA MEME
-/// transaction que l'action auditee (`resolvePrismaClient`, jamais via l'Outbox — ADR-0005 §5).
-/// `reason` : motif en texte libre, UNIQUEMENT renseigne pour `MFA_RE_ENROLLMENT_FORCED` — jamais
-/// porte par l'evenement Outbox correspondant (minimisation, ADR-0005 §6).
+/// Preuve APPEND-ONLY d'une action sensible du SaaS Core (voir domain/AuditEntry.ts). Ecrite DANS
+/// LA MEME transaction que l'action auditee (`resolvePrismaClient`, jamais via l'Outbox —
+/// ADR-0005 §5, ADR-0009 §4). `reason` : motif en texte libre, UNIQUEMENT renseigne pour
+/// `MFA_RE_ENROLLMENT_FORCED` — jamais porte par l'evenement Outbox correspondant (minimisation,
+/// ADR-0005 §6).
+///
+/// Etendue ADR-0009 §3/§5 (etape 11/13), MIGRATION STRICTEMENT ADDITIVE (`ADD COLUMN ... DEFAULT`,
+/// aucun `UPDATE` sur les lignes existantes) :
+///   - `actorKind`/`targetType`/`targetId` : "qui" (depuis quel contexte) / "quoi" (quelle
+///     nature de cible). `actorUserId`/`subjectUserId` deviennent NULLABLES, sous contrainte
+///     `CHECK` ajoutee en SQL brut (non exprimable en schema Prisma) — voir la migration.
+///   - `chainKey` : colonne GENEREE (`GENERATED ALWAYS AS (COALESCE(tenant_id::text, 'PLATFORM'))
+///     STORED`) — `@default(dbgenerated(""))` indique a Prisma de ne JAMAIS l'inclure dans un
+///     INSERT (la base la calcule seule) ; un `AuditChainKey.derive()` cote domaine calcule
+///     EXACTEMENT la meme valeur pour la charge canonique hachee (§5.2).
+///   - `chainSequence`/`previousEntryHash`/`entryHash` : position et empreintes de chaine (§5).
+///     NULL sur toute ligne ecrite AVANT cette migration (segment "pre-chaine", §5.3, jamais
+///     retro-chaine — cela exigerait un `UPDATE`, donc la suspension du trigger append-only).
+///     Un trigger `BEFORE INSERT` (voir la migration) refuse toute NOUVELLE ligne dont
+///     `entry_hash` est NULL — deuxieme defense independante du contrat applicatif.
 model AuditEntry {
-  id              String         @id @db.Uuid
-  category        AuditCategory
-  eventType       AuditEventType @map("event_type")
-  outcome         AuditOutcome
-  tenantId        String?        @map("tenant_id") @db.Uuid
-  subjectUserId   String         @map("subject_user_id") @db.Uuid
-  actorUserId     String         @map("actor_user_id") @db.Uuid
-  actorRoleCodes  String[]       @map("actor_role_codes")
-  reason          String?
-  sessionId       String?        @map("session_id")
-  correlationId   String?        @map("correlation_id")
-  occurredAt      DateTime       @map("occurred_at")
-  createdAt       DateTime       @default(now()) @map("created_at")
+  id                String          @id @db.Uuid
+  category          AuditCategory
+  eventType         AuditEventType  @map("event_type")
+  outcome           AuditOutcome
+  tenantId          String?         @map("tenant_id") @db.Uuid
+  actorKind         ActorKind       @default(USER_TENANT) @map("actor_kind")
+  actorUserId       String?         @map("actor_user_id") @db.Uuid
+  actorRoleCodes    String[]        @map("actor_role_codes")
+  subjectUserId     String?         @map("subject_user_id") @db.Uuid
+  targetType        AuditTargetType @default(USER_ACCOUNT) @map("target_type")
+  targetId          String?         @map("target_id")
+  reason            String?
+  sessionId         String?         @map("session_id")
+  correlationId     String?         @map("correlation_id")
+  occurredAt        DateTime        @map("occurred_at")
+  createdAt         DateTime        @default(now()) @map("created_at")
+  /// Colonne GENEREE STORED (voir commentaire de tete) — jamais ecrite par Prisma (`dbgenerated`).
+  chainKey          String          @default(dbgenerated("COALESCE(tenant_id::text, 'PLATFORM'::text)")) @map("chain_key")
+  chainSequence     BigInt?         @map("chain_sequence")
+  previousEntryHash String?         @map("previous_entry_hash")
+  entryHash         String?         @map("entry_hash")
 
   @@index([tenantId])
   @@index([subjectUserId])
+  @@index([tenantId, occurredAt(sort: Desc), id(sort: Desc)])
+  @@index([chainKey, chainSequence(sort: Desc)])
   @@map("AuditEntry")
   @@schema("platform")
 }

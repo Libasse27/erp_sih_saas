@@ -7,6 +7,7 @@ import {
   InMemoryPlanPriceRepository,
   InMemoryPlanRepository,
   InMemoryPlanUpgradeRequestRepository,
+  InMemorySubscriptionAuditTrail,
   InMemorySubscriptionRepository,
   InMemoryUnitOfWork,
   SequentialIdGenerator,
@@ -100,6 +101,7 @@ async function buildScenario(status: SubscriptionStatus = 'ACTIVE') {
   subscriptionRepository.publishedEvents.length = 0;
 
   const clock = new FixedClock('2026-08-16T00:00:00Z'); // 15 jours restants sur 30
+  const subscriptionAuditTrail = new InMemorySubscriptionAuditTrail();
   const handler = new UpgradeSubscriptionPlanHandler(
     planRepository,
     planPriceRepository,
@@ -108,6 +110,7 @@ async function buildScenario(status: SubscriptionStatus = 'ACTIVE') {
     unitOfWork,
     clock,
     idGenerator,
+    subscriptionAuditTrail,
   );
 
   return {
@@ -118,6 +121,7 @@ async function buildScenario(status: SubscriptionStatus = 'ACTIVE') {
     planUpgradeRequestRepository,
     unitOfWork,
     clock,
+    subscriptionAuditTrail,
     handler,
     standard,
     professionnel,

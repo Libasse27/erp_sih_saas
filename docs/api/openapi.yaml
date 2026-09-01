@@ -1,12 +1,13 @@
 openapi: 3.1.0
 info:
-  title: SIH SaaS API — Paiement d'abonnement (O-25)
-  version: 0.1.0
+  title: SIH SaaS API — Paiement d'abonnement (O-25) et audit plateforme (ADR-0009)
+  version: 0.2.0
   description: >
-    Premier fichier OpenAPI de ce depot (Phase 0, etape 5/13). Documente UNIQUEMENT l'endpoint
-    HTTP existant a ce stade : la confirmation de paiement d'abonnement SaaS serveur-a-serveur
-    (O-25.5). Aucune route CRUD Payment/PlatformInvoice n'est exposee (aucun besoin identifie a
-    cette etape) — voir docs/architecture/03-open-decisions.md, O-25.
+    Premier fichier OpenAPI de ce depot (Phase 0, etape 5/13 : confirmation de paiement
+    d'abonnement SaaS serveur-a-serveur, O-25.5). Etendu a l'etape 11/13 (ADR-0009) avec le
+    PREMIER endpoint HTTP AUTHENTIFIE du depot : consultation du journal d'audit plateforme
+    (`GET /api/v1/audit-entries`). Aucune autre route CRUD Payment/PlatformInvoice/Audit n'est
+    exposee (aucun besoin identifie a ce stade, B2 ADR-0009 : aucune interface graphique).
 
 servers:
   - url: https://api.exemple.sn
@@ -67,7 +68,179 @@ paths:
             inconnue) — reponse volontairement identique dans tous les cas (O-25.5, "rejet
             silencieux, pas d'erreur qui fuite d'info"). Corps toujours vide.
 
+  /api/v1/audit-entries:
+    get:
+      operationId: listAuditEntries
+      tags: [Audit]
+      summary: Consulter le journal d'audit plateforme (ADR-0009 §8)
+      description: >
+        PREMIER endpoint HTTP authentifie du depot. Transport du `sessionId` opaque en en-tete
+        `Authorization: Bearer` (jamais un cookie — ADR-0009 §8.3). Un principal `TENANT` (session
+        d'etablissement portant `audit:read`) ne voit QUE les entrees de son propre tenant et NE
+        PEUT FOURNIR aucun parametre de perimetre (`scope`/`tenantId`) — la seule presence de l'un
+        de ces deux parametres est rejetee en `400`, jamais ignoree silencieusement. Un principal
+        `PLATFORM` (`SUPER_ADMIN`) peut, lui, cibler un perimetre explicite via `scope`
+        (`all` | `platform` | `tenant`) et `tenantId` — y compris un tenant arbitraire dans lequel
+        il ne detient aucun membership (supervision plateforme, ADR-0009 §7/§9). Chaque
+        consultation (autorisee OU refusee) est elle-meme journalisee AVANT toute lecture
+        (`AUDIT_TRAIL_QUERIED`/`AUDIT_TRAIL_QUERY_DENIED`, categorie `AUDIT_ACCESS`).
+      security:
+        - bearerSessionAuth: []
+      parameters:
+        - name: category
+          in: query
+          schema:
+            type: string
+            enum: [MFA, SESSION, PROVISIONING, MEMBERSHIP, SUBSCRIPTION, BILLING, AUDIT_ACCESS]
+          example: SUBSCRIPTION
+        - name: eventType
+          in: query
+          schema:
+            type: string
+          example: SUBSCRIPTION_DEGRADED_MODE_ENTERED
+        - name: outcome
+          in: query
+          schema:
+            type: string
+            enum: [SUCCESS, FAILURE, DENIED]
+          example: SUCCESS
+        - name: actorKind
+          in: query
+          schema:
+            type: string
+            enum: [USER_TENANT, USER_PLATFORM, SYSTEM]
+          example: USER_TENANT
+        - name: actorUserId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: subjectUserId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: targetType
+          in: query
+          schema:
+            type: string
+            enum: [USER_ACCOUNT, MEMBERSHIP, HEALTH_FACILITY, SUBSCRIPTION, PAYMENT, PLATFORM_INVOICE, FACILITY_SETTINGS, AUDIT_TRAIL]
+        - name: targetId
+          in: query
+          schema:
+            type: string
+        - name: from
+          in: query
+          description: Borne basse ISO 8601 UTC (inclusive) sur `occurredAt`.
+          schema:
+            type: string
+            format: date-time
+          example: '2026-09-01T00:00:00Z'
+        - name: to
+          in: query
+          description: Borne haute ISO 8601 UTC (inclusive) sur `occurredAt`.
+          schema:
+            type: string
+            format: date-time
+          example: '2026-09-01T23:59:59Z'
+        - name: cursor
+          in: query
+          description: Curseur opaque `keyset` (base64url) de la page precedente — jamais un `OFFSET` (ADR-0009 §6).
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Defaut 50, plafond 200. Un depassement est un rejet explicite (`400`), jamais un plafonnement silencieux.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: scope
+          in: query
+          description: Reserve a un principal `PLATFORM` — rejete en `400` pour un principal `TENANT`, meme valeur `all`.
+          schema:
+            type: string
+            enum: [all, platform, tenant]
+        - name: tenantId
+          in: query
+          description: Reserve a un principal `PLATFORM`, requis quand `scope=tenant` — rejete en `400` pour un principal `TENANT`.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Page de resultats, la plus recente en premier.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditEntryListResponse'
+              example:
+                entries:
+                  - id: 7c8f0a2e-4b1d-4e9a-9f3e-1a2b3c4d5e6f
+                    category: SUBSCRIPTION
+                    eventType: SUBSCRIPTION_DEGRADED_MODE_ENTERED
+                    outcome: SUCCESS
+                    tenantId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    actorKind: SYSTEM
+                    actorUserId: null
+                    actorRoleCodes: []
+                    subjectUserId: null
+                    targetType: SUBSCRIPTION
+                    targetId: 9c858901-8a57-4791-81fe-4c455b099bc9
+                    reason: null
+                    sessionRef: null
+                    correlationId: 01J4Z6X9K3Q7R8S9T0U1V2W3X4
+                    occurredAt: '2026-09-01T03:00:00.123Z'
+                nextCursor: null
+        '400':
+          description: Payload malforme (curseur/limite invalides), OU parametre de perimetre fourni par un principal `TENANT`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: invalid_request
+        '401':
+          description: Aucune session valide (en-tete absent, mal forme, ou `sessionId` inconnu/expire).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: unauthenticated
+        '403':
+          description: >
+            Authentifie mais non autorise — soit `audit:read` absent (`forbidden`), soit une
+            session `MFA_PENDING` (`mfa_required`, aucun `ServerContext` n'est jamais construit
+            pour ce statut de session).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              examples:
+                forbidden:
+                  value: { error: forbidden }
+                mfaRequired:
+                  value: { error: mfa_required }
+        '500':
+          description: Defaillance technique — jamais de detail interne expose.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: internal_error
+
 components:
+  securitySchemes:
+    bearerSessionAuth:
+      type: http
+      scheme: bearer
+      description: >
+        `sessionId` opaque (jamais un JWT auto-porteur) — ADR-0009 §8.3. Choix delibere et
+        minimaliste, explicitement revisable a l'arrivee d'`apps/web` (transport definitif du
+        `sessionId`, residu 5 de l'ADR).
   schemas:
     ProblemDetails:
       type: object
@@ -90,3 +263,105 @@ components:
           type: string
         correlationId:
           type: string
+
+    SimpleError:
+      type: object
+      description: >
+        Format d'erreur REELLEMENT produit par `GET /api/v1/audit-entries` (ADR-0009 §8.5) — PAS
+        `ProblemDetails` (RFC 9457) : ce premier endpoint authentifie suit le meme regime minimal
+        que `PaymentWebhookController`/`createErrorHandler` (src/server.ts), jamais de detail
+        interne expose. Ne pas confondre avec `ProblemDetails` ci-dessus, reserve aux futurs
+        endpoints CRUD.
+      required: [error]
+      properties:
+        error:
+          type: string
+          enum: [invalid_request, unauthenticated, forbidden, mfa_required, internal_error]
+
+    AuditEntryDto:
+      type: object
+      description: >
+        DTO explicite (jamais l'agregat `AuditEntry` ni une ligne Prisma brute exposee — regle 6
+        du system prompt). Porte les six questions de B1 (ADR-0009 §1) : qui / quoi / quand / sur
+        quel tenant / avec quel resultat / depuis quel contexte. N'expose JAMAIS les champs
+        internes de chainage (`chainSequence`/`previousEntryHash`/`entryHash`) — B2, aucune
+        interface de verification n'est exposee en HTTP a cette etape.
+      required:
+        - id
+        - category
+        - eventType
+        - outcome
+        - tenantId
+        - actorKind
+        - actorUserId
+        - actorRoleCodes
+        - subjectUserId
+        - targetType
+        - targetId
+        - reason
+        - sessionRef
+        - correlationId
+        - occurredAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        category:
+          type: string
+          enum: [MFA, SESSION, PROVISIONING, MEMBERSHIP, SUBSCRIPTION, BILLING, AUDIT_ACCESS]
+        eventType:
+          type: string
+        outcome:
+          type: string
+          enum: [SUCCESS, FAILURE, DENIED]
+        tenantId:
+          type: [string, 'null']
+          format: uuid
+          description: '`null` = fait de niveau plateforme.'
+        actorKind:
+          type: string
+          enum: [USER_TENANT, USER_PLATFORM, SYSTEM]
+        actorUserId:
+          type: [string, 'null']
+          format: uuid
+          description: '`null` uniquement quand `actorKind = SYSTEM` (planificateur, consommateur Outbox qui execute lui-meme la commande).'
+        actorRoleCodes:
+          type: array
+          items:
+            type: string
+        subjectUserId:
+          type: [string, 'null']
+          format: uuid
+        targetType:
+          type: string
+          enum: [USER_ACCOUNT, MEMBERSHIP, HEALTH_FACILITY, SUBSCRIPTION, PAYMENT, PLATFORM_INVOICE, FACILITY_SETTINGS, AUDIT_TRAIL]
+        targetId:
+          type: [string, 'null']
+        reason:
+          type: [string, 'null']
+        sessionRef:
+          type: [string, 'null']
+          description: >
+            Reference DERIVEE non reversible de la session (ADR-0009 §3.1, correctif securite
+            2026-09-01) — `"v1." + base64url(SHA-256("audit-session:v1|" + sessionId))`. Permet
+            de CORRELER les entrees d'une meme session (meme valeur = meme session) ; ne permet
+            JAMAIS de remonter au `sessionId` ni de rejouer une session (rejouee en
+            `Authorization: Bearer`, elle produit systematiquement `401`). N'est JAMAIS le jeton
+            de session vivant.
+        correlationId:
+          type: [string, 'null']
+        occurredAt:
+          type: string
+          format: date-time
+
+    AuditEntryListResponse:
+      type: object
+      required: [entries, nextCursor]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEntryDto'
+        nextCursor:
+          type: [string, 'null']
+          description: Curseur opaque (base64url) de la page suivante — `null` si la page courante est la derniere.

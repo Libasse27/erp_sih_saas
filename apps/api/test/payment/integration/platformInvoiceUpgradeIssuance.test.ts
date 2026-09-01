@@ -10,6 +10,7 @@ import { PlatformInvoice } from '../../../src/modules/payment/domain/PlatformInv
 import { createIssuePlatformInvoiceOnUpgradeRequestedHandler } from '../../../src/modules/payment/application/services/IssuePlatformInvoiceOnUpgradeRequested.js';
 import { PrismaPlatformInvoiceRepository } from '../../../src/modules/payment/infrastructure/persistence/PrismaPlatformInvoiceRepository.js';
 import { createRawPgClient, createTestPrismaClient, uniqueId } from './dbTestHelpers.js';
+import { InMemoryBillingAuditTrail } from '../builders/testKit.js';
 
 /**
  * Couvre les DEUX consequences de la generalisation de la contrainte UNIQUE de
@@ -97,6 +98,7 @@ describe('PlatformInvoice — facture d_UPGRADE (coexistence avec le renouvellem
     const idGenerator = new UuidGenerator();
     const handler = createIssuePlatformInvoiceOnUpgradeRequestedHandler({
       platformInvoiceRepository: invoiceRepository,
+      billingAuditTrail: new InMemoryBillingAuditTrail(),
       unitOfWork: new PgUnitOfWork(prisma),
       clock,
       idGenerator,
@@ -142,6 +144,7 @@ describe('PlatformInvoice — facture d_UPGRADE (coexistence avec le renouvellem
     const idGenerator = new UuidGenerator();
     const handler = createIssuePlatformInvoiceOnUpgradeRequestedHandler({
       platformInvoiceRepository: invoiceRepository,
+      billingAuditTrail: new InMemoryBillingAuditTrail(),
       unitOfWork: new PgUnitOfWork(prisma),
       clock,
       idGenerator,

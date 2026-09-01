@@ -3,6 +3,8 @@ import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantI
 import {
   FakePasswordHasher,
   FixedClock,
+  InMemoryMfaBypassAttemptGuard,
+  InMemorySessionAuditTrail,
   InMemoryUnitOfWork,
   InMemoryUserAccountRepository,
   InMemoryUserTenantMembershipRepository,
@@ -24,6 +26,8 @@ describe('AuthenticateUserHandler', () => {
   let handler: AuthenticateUserHandler;
   let clock: FixedClock;
   let idGenerator: SequentialIdGenerator;
+  let sessionAuditTrail: InMemorySessionAuditTrail;
+  let loginFailureAttemptGuard: InMemoryMfaBypassAttemptGuard;
 
   beforeEach(() => {
     accounts = new InMemoryUserAccountRepository();
@@ -31,7 +35,16 @@ describe('AuthenticateUserHandler', () => {
     hasher = new FakePasswordHasher();
     clock = new FixedClock('2026-08-23T10:00:00Z');
     idGenerator = new SequentialIdGenerator();
-    handler = new AuthenticateUserHandler(accounts, memberships, hasher, new InMemoryUnitOfWork());
+    sessionAuditTrail = new InMemorySessionAuditTrail();
+    loginFailureAttemptGuard = new InMemoryMfaBypassAttemptGuard();
+    handler = new AuthenticateUserHandler(
+      accounts,
+      memberships,
+      hasher,
+      new InMemoryUnitOfWork(),
+      sessionAuditTrail,
+      loginFailureAttemptGuard,
+    );
   });
 
   async function registerAccount(email: string, plainPassword: string): Promise<UserAccount> {
@@ -107,5 +120,29 @@ describe('AuthenticateUserHandler', () => {
     const result = await handler.execute({ email: 'inconnu@hopital.sn', plainPassword: 'quelconque123' });
     expect(result.isFailure()).toBe(true);
     expect(result.getError()).toBe('INVALID_CREDENTIALS');
+  });
+
+  it('ecrit SESSION_LOGIN_SUCCEEDED (ADR-0009 §2.1) a une authentification reussie', async () => {
+    await registerAccount('medecin2@hopital.sn', 'mot-de-passe-2');
+
+    await handler.execute({ email: 'medecin2@hopital.sn', plainPassword: 'mot-de-passe-2' });
+
+    expect(sessionAuditTrail.records).toHaveLength(1);
+    expect(sessionAuditTrail.records[0]).toMatchObject({ eventType: 'SESSION_LOGIN_SUCCEEDED', outcome: 'SUCCESS', tenantId: null });
+  });
+
+  it('ecrit SESSION_LOGIN_FAILED (compte existant) sur mot de passe incorrect, une seule fois par fenetre de dedup', async () => {
+    await registerAccount('medecin3@hopital.sn', 'bon-mdp');
+
+    await handler.execute({ email: 'medecin3@hopital.sn', plainPassword: 'mauvais' });
+    await handler.execute({ email: 'medecin3@hopital.sn', plainPassword: 'mauvais-encore' });
+
+    expect(sessionAuditTrail.records).toHaveLength(1);
+    expect(sessionAuditTrail.records[0]).toMatchObject({ eventType: 'SESSION_LOGIN_FAILED', outcome: 'FAILURE' });
+  });
+
+  it("n'ecrit AUCUNE entree pour un identifiant inconnu (minimisation, ADR-0009 §2.1)", async () => {
+    await handler.execute({ email: 'inconnu2@hopital.sn', plainPassword: 'quelconque' });
+    expect(sessionAuditTrail.records).toHaveLength(0);
   });
 });

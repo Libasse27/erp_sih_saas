@@ -20,6 +20,10 @@ import type { SubscriptionId } from '../../../src/modules/subscription/domain/va
 import type { PlanChange } from '../../../src/modules/subscription/domain/PlanChange.js';
 import type { PlanChangeRepository } from '../../../src/modules/subscription/domain/ports/PlanChangeRepository.js';
 import type { PlanUpgradeRequest } from '../../../src/modules/subscription/domain/PlanUpgradeRequest.js';
+import type {
+  SubscriptionAuditRecordInput,
+  SubscriptionAuditTrail,
+} from '../../../src/modules/subscription/application/ports/SubscriptionAuditTrail.js';
 import {
   PlanUpgradeRequestConflictError,
   type PlanUpgradeRequestRepository,
@@ -286,6 +290,15 @@ export class InMemoryPlanUpgradeRequestRepository implements PlanUpgradeRequestR
   /** Outil de test : nombre de demandes en attente, toutes tenants confondus. */
   count(): number {
     return this.requests.size;
+  }
+}
+
+/** Fake du port `SubscriptionAuditTrail` (ADR-0009 §2.2/§4) — accumule les entrees enregistrees, sans I/O. */
+export class InMemorySubscriptionAuditTrail implements SubscriptionAuditTrail {
+  public readonly records: SubscriptionAuditRecordInput[] = [];
+
+  async record(input: SubscriptionAuditRecordInput): Promise<void> {
+    this.records.push(input);
   }
 }
 

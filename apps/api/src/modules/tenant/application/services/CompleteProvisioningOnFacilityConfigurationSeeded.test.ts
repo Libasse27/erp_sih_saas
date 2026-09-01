@@ -4,6 +4,7 @@ import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantI
 import {
   FixedClock,
   InMemoryFacilitySettingsRepository,
+  InMemoryProvisioningAuditTrail,
   InMemoryUnitOfWork,
   SequentialIdGenerator,
   uuidAt,
@@ -37,12 +38,14 @@ describe('CompleteProvisioningOnFacilityConfigurationSeeded (ADR-0008 §11, amen
       new InMemoryUnitOfWork(),
       clock,
       idGenerator,
+      new InMemoryProvisioningAuditTrail(),
     );
     const completeProvisioningHandler = new CompleteProvisioningHandler(
       repository,
       new InMemoryUnitOfWork(),
       clock,
       idGenerator,
+      new InMemoryProvisioningAuditTrail(),
     );
     const handler = createCompleteProvisioningOnFacilityConfigurationSeededHandler({ completeProvisioningHandler });
     return { handler, repository, seedFacilityConfigurationHandler };

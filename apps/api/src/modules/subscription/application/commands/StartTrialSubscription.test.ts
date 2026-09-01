@@ -5,6 +5,7 @@ import {
   FixedClock,
   InMemoryPlanPriceRepository,
   InMemoryPlanRepository,
+  InMemorySubscriptionAuditTrail,
   InMemorySubscriptionRepository,
   InMemoryUnitOfWork,
   SequentialIdGenerator,
@@ -49,6 +50,7 @@ function buildHandler() {
   const planPriceRepository = new InMemoryPlanPriceRepository();
   const subscriptionRepository = new InMemorySubscriptionRepository();
   const unitOfWork = new InMemoryUnitOfWork();
+  const subscriptionAuditTrail = new InMemorySubscriptionAuditTrail();
   const handler = new StartTrialSubscriptionHandler(
     planRepository,
     planPriceRepository,
@@ -56,8 +58,9 @@ function buildHandler() {
     unitOfWork,
     new FixedClock('2026-08-24T10:00:00Z'),
     new SequentialIdGenerator(),
+    subscriptionAuditTrail,
   );
-  return { planRepository, planPriceRepository, subscriptionRepository, unitOfWork, handler };
+  return { planRepository, planPriceRepository, subscriptionRepository, unitOfWork, subscriptionAuditTrail, handler };
 }
 
 describe('StartTrialSubscriptionHandler', () => {

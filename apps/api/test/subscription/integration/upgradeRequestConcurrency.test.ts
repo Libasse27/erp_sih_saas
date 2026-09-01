@@ -14,6 +14,7 @@ import { PrismaSubscriptionRepository } from '../../../src/modules/subscription/
 import { seedPlanCatalog } from '../../../src/modules/subscription/infrastructure/seed/seedSubscriptionCatalog.js';
 import { SubscriptionId } from '../../../src/modules/subscription/domain/value-objects/SubscriptionId.js';
 import { createRawPgClient, createTestPrismaClient, uniqueTenantId } from './dbTestHelpers.js';
+import { InMemorySubscriptionAuditTrail } from '../builders/testKit.js';
 
 /**
  * Adversarial : DOUBLE SOUMISSION d'une demande d'upgrade (double-clic, requete rejouee par un
@@ -98,6 +99,7 @@ describe('PlanUpgradeRequest — double soumission concurrente (contrainte UNIQU
       unitOfWork,
       clock,
       idGenerator,
+      new InMemorySubscriptionAuditTrail(),
     );
   });
 

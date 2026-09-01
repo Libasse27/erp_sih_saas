@@ -13,6 +13,7 @@ import { ReconcilePendingPaymentsHandler } from '../application/services/Reconci
 import type { PaymentProvider } from '../domain/ports/PaymentProvider.js';
 import type { PaymentRepository } from '../domain/ports/PaymentRepository.js';
 import type { PlatformInvoiceRepository } from '../domain/ports/PlatformInvoiceRepository.js';
+import type { BillingAuditTrail } from '../application/ports/BillingAuditTrail.js';
 import { PrismaPaymentRepository } from './persistence/PrismaPaymentRepository.js';
 import { PrismaPlatformInvoiceRepository } from './persistence/PrismaPlatformInvoiceRepository.js';
 import { PaymentWebhookController, type PaymentWebhookControllerLogger } from '../presentation/http/PaymentWebhookController.js';
@@ -61,6 +62,8 @@ export function buildPaymentModule(deps: {
   paymentProvider: PaymentProvider;
   confirmPaymentLogger?: ConfirmPaymentLogger;
   webhookControllerLogger?: PaymentWebhookControllerLogger;
+  /** Port sortant vers le module `audit`, categorie `BILLING` (ADR-0009 §2.2/§4) — l'adaptateur reel est cable par composition-root.ts. */
+  billingAuditTrail: BillingAuditTrail;
 }): PaymentModule {
   const payments = new PrismaPaymentRepository(deps.prisma);
   const platformInvoices = new PrismaPlatformInvoiceRepository(deps.prisma);
@@ -73,6 +76,7 @@ export function buildPaymentModule(deps: {
     unitOfWork,
     deps.clock,
     deps.idGenerator,
+    deps.billingAuditTrail,
   );
   const confirmPayment = new ConfirmPaymentHandler(
     payments,
@@ -81,6 +85,7 @@ export function buildPaymentModule(deps: {
     unitOfWork,
     deps.clock,
     deps.idGenerator,
+    deps.billingAuditTrail,
     deps.confirmPaymentLogger,
   );
   const reconcilePendingPayments = new ReconcilePendingPaymentsHandler(
@@ -94,18 +99,21 @@ export function buildPaymentModule(deps: {
 
   const issuePlatformInvoiceOnRenewalDue = createIssuePlatformInvoiceOnRenewalDueHandler({
     platformInvoiceRepository: platformInvoices,
+    billingAuditTrail: deps.billingAuditTrail,
     unitOfWork,
     clock: deps.clock,
     idGenerator: deps.idGenerator,
   });
   const issuePlatformInvoiceOnUpgradeRequested = createIssuePlatformInvoiceOnUpgradeRequestedHandler({
     platformInvoiceRepository: platformInvoices,
+    billingAuditTrail: deps.billingAuditTrail,
     unitOfWork,
     clock: deps.clock,
     idGenerator: deps.idGenerator,
   });
   const markPlatformInvoicePaidOnPaymentSucceeded = createMarkPlatformInvoicePaidOnPaymentSucceededHandler({
     platformInvoiceRepository: platformInvoices,
+    billingAuditTrail: deps.billingAuditTrail,
     unitOfWork,
     clock: deps.clock,
   });

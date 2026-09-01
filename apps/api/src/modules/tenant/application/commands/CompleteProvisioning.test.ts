@@ -3,6 +3,7 @@ import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantI
 import {
   FixedClock,
   InMemoryFacilitySettingsRepository,
+  InMemoryProvisioningAuditTrail,
   InMemoryUnitOfWork,
   SequentialIdGenerator,
   uuidAt,
@@ -15,9 +16,16 @@ function buildHandlers() {
   const unitOfWork = new InMemoryUnitOfWork();
   const clock = new FixedClock('2026-08-28T10:00:00Z');
   const idGenerator = new SequentialIdGenerator();
-  const seedFacilityConfiguration = new SeedFacilityConfigurationHandler(repository, unitOfWork, clock, idGenerator);
-  const completeProvisioning = new CompleteProvisioningHandler(repository, unitOfWork, clock, idGenerator);
-  return { repository, seedFacilityConfiguration, completeProvisioning };
+  const provisioningAuditTrail = new InMemoryProvisioningAuditTrail();
+  const seedFacilityConfiguration = new SeedFacilityConfigurationHandler(
+    repository,
+    unitOfWork,
+    clock,
+    idGenerator,
+    provisioningAuditTrail,
+  );
+  const completeProvisioning = new CompleteProvisioningHandler(repository, unitOfWork, clock, idGenerator, provisioningAuditTrail);
+  return { repository, seedFacilityConfiguration, completeProvisioning, provisioningAuditTrail };
 }
 
 describe('CompleteProvisioningHandler (ADR-0008 §11, amendement 1)', () => {
@@ -61,5 +69,18 @@ describe('CompleteProvisioningHandler (ADR-0008 §11, amendement 1)', () => {
 
     expect(second.isFailure()).toBe(true);
     expect(second.getError()).toBe('PROVISIONING_ALREADY_COMPLETED');
+  });
+
+  it('ecrit une entree PROVISIONING_COMPLETED (ADR-0009 §2.2)', async () => {
+    const { seedFacilityConfiguration, completeProvisioning, provisioningAuditTrail } = buildHandlers();
+    const tenantId = uuidAt(4);
+    await seedFacilityConfiguration.execute({ tenantId });
+
+    const result = await completeProvisioning.execute({ tenantId });
+
+    expect(result.isSuccess()).toBe(true);
+    const completedEntries = provisioningAuditTrail.records.filter((entry) => entry.eventType === 'PROVISIONING_COMPLETED');
+    expect(completedEntries).toHaveLength(1);
+    expect(completedEntries[0]).toMatchObject({ outcome: 'SUCCESS', tenantId, actorKind: 'SYSTEM', targetType: 'HEALTH_FACILITY', targetId: tenantId });
   });
 });

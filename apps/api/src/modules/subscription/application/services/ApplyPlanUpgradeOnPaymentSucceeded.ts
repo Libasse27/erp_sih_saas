@@ -12,6 +12,7 @@ import {
   SubscriptionConcurrencyConflictError,
   type SubscriptionRepository,
 } from '../../domain/ports/SubscriptionRepository.js';
+import type { SubscriptionAuditTrail } from '../ports/SubscriptionAuditTrail.js';
 
 /**
  * Forme attendue du payload de `payment.payment.saas-payment-succeeded` (module `payment`) — meme
@@ -76,6 +77,7 @@ export function createApplyPlanUpgradeOnPaymentSucceededHandler(deps: {
   subscriptionRepository: SubscriptionRepository;
   planUpgradeRequestRepository: PlanUpgradeRequestRepository;
   planChangeRepository: PlanChangeRepository;
+  subscriptionAuditTrail: SubscriptionAuditTrail;
   unitOfWork: UnitOfWork;
   clock: Clock;
   idGenerator: IdGenerator;
@@ -205,6 +207,20 @@ export function createApplyPlanUpgradeOnPaymentSucceededHandler(deps: {
         // La demande a rempli son role : l'historique definitif est desormais `PlanChange`, et sa
         // suppression libere la contrainte UNIQUE `subscription_id` pour un futur upgrade.
         await deps.planUpgradeRequestRepository.delete(request.id.toString(), tenantId);
+
+        // ADR-0009 §2.2/§4 — meme transaction. `actorKind: 'SYSTEM'` : consommateur Outbox qui
+        // EXECUTE lui-meme la commande (autorise, §4) — jamais un traducteur d'evenement dedie.
+        await deps.subscriptionAuditTrail.record({
+          eventType: 'SUBSCRIPTION_PLAN_CHANGED',
+          outcome: 'SUCCESS',
+          tenantId: tenantId.toString(),
+          actorKind: 'SYSTEM',
+          actorUserId: null,
+          targetId: subscription.id.toString(),
+          reason: null,
+          sessionId: null,
+          correlationId: null,
+        });
       },
       { tenantId },
     );

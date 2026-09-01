@@ -8,6 +8,7 @@ import type { RoleRepository } from '../../domain/ports/RoleRepository.js';
 import type { UserAccountRepository } from '../../domain/ports/UserAccountRepository.js';
 import type { UserTenantMembershipRepository } from '../../domain/ports/UserTenantMembershipRepository.js';
 import { UserAccountId } from '../../domain/value-objects/UserAccountId.js';
+import type { MembershipAuditTrail } from '../ports/MembershipAuditTrail.js';
 
 export interface GrantMembershipCommand {
   readonly userId: string;
@@ -40,6 +41,7 @@ export class GrantMembershipHandler {
     private readonly unitOfWork: UnitOfWork,
     private readonly clock: Clock,
     private readonly idGenerator: IdGenerator,
+    private readonly membershipAuditTrail: MembershipAuditTrail,
   ) {}
 
   async execute(
@@ -92,6 +94,25 @@ export class GrantMembershipHandler {
         idGenerator: this.idGenerator,
       });
       await this.membershipRepository.save(membership, tenantId);
+
+      // ADR-0009 §2.2/§4 — meme transaction que la mutation de l'agregat. `createdBy` est le
+      // SEUL acteur reellement threade jusqu'a cette commande (via la Saga de provisioning,
+      // "auto-accorde", ou un futur endpoint interactif) : traite comme `USER_TENANT`, jamais
+      // `SYSTEM` (un identifiant reel est toujours disponible ici, contrairement a
+      // `RevokeMembershipHandler` — voir son propre commentaire).
+      await this.membershipAuditTrail.record({
+        eventType: 'MEMBERSHIP_GRANTED',
+        outcome: 'SUCCESS',
+        tenantId: tenantId.toString(),
+        actorKind: 'USER_TENANT',
+        actorUserId: createdBy.toString(),
+        actorRoleCodes: [],
+        subjectUserId: userId.toString(),
+        targetId: membership.id.toString(),
+        reason: null,
+        sessionId: null,
+        correlationId: null,
+      });
 
       return Result.success({ membershipId: membership.id.toString() });
     }, { tenantId });

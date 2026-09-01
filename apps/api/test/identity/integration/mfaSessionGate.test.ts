@@ -10,6 +10,7 @@ import type { SessionAuditRecordInput, SessionAuditTrail } from '../../../src/mo
 import type { TenantAccessChecker } from '../../../src/modules/identity/application/ports/TenantAccessChecker.js';
 import type { MfaPendingSessionContext } from '../../../src/modules/identity/application/ports/SessionStore.js';
 import { buildAuditModule, type AuditModule } from '../../../src/modules/audit/infrastructure/AuditModule.js';
+import { InMemoryMembershipAuditTrail } from '../builders/testKit.js';
 import { createTestPrismaClient, createTestRedisClient } from './dbTestHelpers.js';
 
 /**
@@ -37,9 +38,12 @@ class AuditModuleBackedAuditTrail implements AuditTrail {
       eventType: input.eventType,
       outcome: input.outcome,
       tenantId: input.tenantId,
+      actorKind: input.tenantId === null ? 'USER_PLATFORM' : 'USER_TENANT',
       subjectUserId: input.subjectUserId,
       actorUserId: input.actorUserId,
       actorRoleCodes: input.actorRoleCodes,
+      targetType: 'USER_ACCOUNT',
+      targetId: input.subjectUserId,
       reason: input.reason,
       sessionId: input.sessionId,
       correlationId: input.correlationId,
@@ -56,9 +60,12 @@ class AuditModuleBackedSessionAuditTrail implements SessionAuditTrail {
       eventType: input.eventType,
       outcome: input.outcome,
       tenantId: input.tenantId,
+      actorKind: input.actorKind,
       subjectUserId: input.subjectUserId,
       actorUserId: input.actorUserId,
       actorRoleCodes: input.actorRoleCodes,
+      targetType: 'USER_ACCOUNT',
+      targetId: input.subjectUserId,
       reason: input.reason,
       sessionId: input.sessionId,
       correlationId: input.correlationId,
@@ -100,6 +107,7 @@ describe('ADR-0005 §4 — le gate MFA_PENDING empeche structurellement toute tr
       tenantAccessChecker,
       auditTrail: new AuditModuleBackedAuditTrail(audit),
       sessionAuditTrail: new AuditModuleBackedSessionAuditTrail(audit),
+      membershipAuditTrail: new InMemoryMembershipAuditTrail(),
       mfa: {
         secretEncryptionKey: Buffer.alloc(32, 11),
         secretEncryptionKeyId: 'k1',
@@ -140,7 +148,11 @@ describe('ADR-0005 §4 — le gate MFA_PENDING empeche structurellement toute tr
     await identity.serverContextResolver.resolve(pending.sessionId, 'corr-gate-2');
     await identity.serverContextResolver.resolve(pending.sessionId, 'corr-gate-2');
 
-    const rows = await prisma.auditEntry.findMany({ where: { sessionId: pending.sessionId, eventType: 'MFA_BYPASS_ATTEMPTED' } });
+    // Filtre par `subjectUserId` (unique a ce test), PAS `sessionId` : depuis le correctif
+    // securite 2026-09-01 (ADR-0009 §3.1), la colonne `session_id` ne porte plus le `sessionId`
+    // brut mais sa reference DERIVEE non reversible (`sessionRef`) — comparer a `pending.sessionId`
+    // ne matcherait plus jamais aucune ligne.
+    const rows = await prisma.auditEntry.findMany({ where: { subjectUserId: pending.userId, eventType: 'MFA_BYPASS_ATTEMPTED' } });
     expect(rows).toHaveLength(1);
     expect(rows[0]?.outcome).toBe('DENIED');
     expect(rows[0]?.subjectUserId).toBe(pending.userId);

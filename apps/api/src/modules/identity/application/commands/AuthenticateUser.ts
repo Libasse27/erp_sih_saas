@@ -5,6 +5,9 @@ import type { UserAccountRepository } from '../../domain/ports/UserAccountReposi
 import type { UserTenantMembershipRepository } from '../../domain/ports/UserTenantMembershipRepository.js';
 import { Email } from '../../domain/value-objects/Email.js';
 import { PasswordHash } from '../../domain/value-objects/PasswordHash.js';
+import { MFA_PENDING_SESSION_WINDOW_SECONDS } from '../../domain/MfaTuning.js';
+import type { SessionAuditTrail } from '../ports/SessionAuditTrail.js';
+import type { MfaBypassAttemptGuard } from '../ports/MfaBypassAttemptGuard.js';
 
 export interface AuthenticateUserCommand {
   readonly email: string;
@@ -35,6 +38,17 @@ const DUMMY_HASH = PasswordHash.fromHash(
  * Cas d'usage 2.4 : identite verifiee (email + mot de passe), **sans** resolution de tenant —
  * cette derniere est une etape distincte (ResolveTenantContext, 2.5), le serveur seul decide
  * du contexte (01-target-architecture.md §7.1).
+ *
+ * ADR-0009 §2.1 — ferme la lacune constatee au §Contexte 3 (« la connexion elle-meme n'est pas
+ * auditee ») :
+ *   - `SESSION_LOGIN_SUCCEEDED` a chaque authentification reussie ;
+ *   - `SESSION_LOGIN_FAILED` UNIQUEMENT pour un compte EXISTANT (sujet identifiable) — jamais pour
+ *     un identifiant inconnu (minimisation, ADR-0005 §6 : auditer un echec sur un identifiant
+ *     inconnu obligerait a stocker l'email tente). Deduplique par la MEME mecanique que les
+ *     tentatives de contournement MFA (`MfaBypassAttemptGuard`, Redis `SET NX EX`), reutilisee
+ *     TELLE QUELLE (jamais un second mecanisme invente), meme fenetre
+ *     `MFA_PENDING_SESSION_WINDOW_SECONDS`, cle namespacee `login-failed:<userAccountId>` pour ne
+ *     jamais collisionner avec la cle `sessionId` du garde-fou MFA.
  */
 export class AuthenticateUserHandler {
   constructor(
@@ -42,6 +56,8 @@ export class AuthenticateUserHandler {
     private readonly membershipRepository: UserTenantMembershipRepository,
     private readonly passwordHasher: PasswordHasher,
     private readonly unitOfWork: UnitOfWork,
+    private readonly sessionAuditTrail: SessionAuditTrail,
+    private readonly loginFailureAttemptGuard: MfaBypassAttemptGuard,
   ) {}
 
   async execute(
@@ -59,13 +75,50 @@ export class AuthenticateUserHandler {
 
     if (account === null) {
       await this.passwordHasher.verify(DUMMY_HASH, command.plainPassword);
+      // Identifiant INCONNU : aucune entree d'audit (ADR-0009 §2.1 — minimisation + vecteur de
+      // saturation auto-infligee sur un point d'entree non authentifie, voir alternative ecartee #9).
       return Result.failure('INVALID_CREDENTIALS');
     }
 
     const passwordMatches = await this.passwordHasher.verify(account.passwordHash, command.plainPassword);
     if (!passwordMatches) {
+      const shouldRecord = await this.loginFailureAttemptGuard.tryMark(
+        `login-failed:${account.id.toString()}`,
+        MFA_PENDING_SESSION_WINDOW_SECONDS,
+      );
+      if (shouldRecord) {
+        await this.unitOfWork.withTransaction(async () => {
+          await this.sessionAuditTrail.record({
+            eventType: 'SESSION_LOGIN_FAILED',
+            outcome: 'FAILURE',
+            tenantId: null,
+            actorKind: account.isSuperAdmin() ? 'USER_PLATFORM' : 'USER_TENANT',
+            actorUserId: account.id.toString(),
+            actorRoleCodes: [],
+            subjectUserId: account.id.toString(),
+            reason: null,
+            sessionId: null,
+            correlationId: null,
+          });
+        });
+      }
       return Result.failure('INVALID_CREDENTIALS');
     }
+
+    await this.unitOfWork.withTransaction(async () => {
+      await this.sessionAuditTrail.record({
+        eventType: 'SESSION_LOGIN_SUCCEEDED',
+        outcome: 'SUCCESS',
+        tenantId: null,
+        actorKind: account.isSuperAdmin() ? 'USER_PLATFORM' : 'USER_TENANT',
+        actorUserId: account.id.toString(),
+        actorRoleCodes: [],
+        subjectUserId: account.id.toString(),
+        reason: null,
+        sessionId: null,
+        correlationId: null,
+      });
+    });
 
     if (account.isSuperAdmin()) {
       return Result.success({

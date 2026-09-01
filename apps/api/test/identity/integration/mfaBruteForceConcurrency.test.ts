@@ -17,6 +17,7 @@ import type { SessionAuditRecordInput, SessionAuditTrail } from '../../../src/mo
 import type { TenantAccessChecker } from '../../../src/modules/identity/application/ports/TenantAccessChecker.js';
 import type { MfaPendingSessionContext } from '../../../src/modules/identity/application/ports/SessionStore.js';
 import { buildAuditModule, type AuditModule } from '../../../src/modules/audit/infrastructure/AuditModule.js';
+import { InMemoryMembershipAuditTrail } from '../builders/testKit.js';
 import { createTestPrismaClient, createTestRedisClient, uniqueEmail } from './dbTestHelpers.js';
 
 /** Calque de `AuditModuleBackedAuditTrail` (composition-root.ts) — voir mfaSessionGate.test.ts. */
@@ -29,9 +30,12 @@ class AuditModuleBackedAuditTrail implements AuditTrail {
       eventType: input.eventType,
       outcome: input.outcome,
       tenantId: input.tenantId,
+      actorKind: input.tenantId === null ? 'USER_PLATFORM' : 'USER_TENANT',
       subjectUserId: input.subjectUserId,
       actorUserId: input.actorUserId,
       actorRoleCodes: input.actorRoleCodes,
+      targetType: 'USER_ACCOUNT',
+      targetId: input.subjectUserId,
       reason: input.reason,
       sessionId: input.sessionId,
       correlationId: input.correlationId,
@@ -49,9 +53,12 @@ class AuditModuleBackedSessionAuditTrail implements SessionAuditTrail {
       eventType: input.eventType,
       outcome: input.outcome,
       tenantId: input.tenantId,
+      actorKind: input.actorKind,
       subjectUserId: input.subjectUserId,
       actorUserId: input.actorUserId,
       actorRoleCodes: input.actorRoleCodes,
+      targetType: 'USER_ACCOUNT',
+      targetId: input.subjectUserId,
       reason: input.reason,
       sessionId: input.sessionId,
       correlationId: input.correlationId,
@@ -101,6 +108,7 @@ describe('F-3 — verrou anti-bruteforce sous acces concurrent (PrismaMfaEnrollm
       tenantAccessChecker,
       auditTrail: new AuditModuleBackedAuditTrail(audit),
       sessionAuditTrail: new AuditModuleBackedSessionAuditTrail(audit),
+      membershipAuditTrail: new InMemoryMembershipAuditTrail(),
       mfa: {
         secretEncryptionKey: MFA_SECRET_ENCRYPTION_KEY,
         secretEncryptionKeyId: MFA_SECRET_ENCRYPTION_KEY_ID,

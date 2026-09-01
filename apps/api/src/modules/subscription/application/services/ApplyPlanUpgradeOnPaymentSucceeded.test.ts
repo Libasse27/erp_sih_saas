@@ -6,6 +6,7 @@ import {
   FixedClock,
   InMemoryPlanChangeRepository,
   InMemoryPlanUpgradeRequestRepository,
+  InMemorySubscriptionAuditTrail,
   InMemorySubscriptionRepository,
   InMemoryUnitOfWork,
   SequentialIdGenerator,
@@ -108,17 +109,19 @@ async function buildScenario(options: { withPendingRequest: boolean; currentPlan
   await subscriptionRepository.save(subscription, TENANT);
   subscriptionRepository.publishedEvents.length = 0;
 
+  const subscriptionAuditTrail = new InMemorySubscriptionAuditTrail();
   const handler = createApplyPlanUpgradeOnPaymentSucceededHandler({
     subscriptionRepository,
     planUpgradeRequestRepository,
     planChangeRepository,
+    subscriptionAuditTrail,
     unitOfWork,
     clock,
     idGenerator,
     logger,
   });
 
-  return { handler, subscriptionRepository, planUpgradeRequestRepository, planChangeRepository, logger };
+  return { handler, subscriptionRepository, planUpgradeRequestRepository, planChangeRepository, subscriptionAuditTrail, logger };
 }
 
 describe('ApplyPlanUpgradeOnPaymentSucceeded — application d_un upgrade APRES confirmation du paiement', () => {

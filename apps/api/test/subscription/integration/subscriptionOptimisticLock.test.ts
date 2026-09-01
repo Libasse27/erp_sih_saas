@@ -17,6 +17,7 @@ import { PrismaSubscriptionRepository } from '../../../src/modules/subscription/
 import { seedPlanCatalog } from '../../../src/modules/subscription/infrastructure/seed/seedSubscriptionCatalog.js';
 import { SubscriptionId } from '../../../src/modules/subscription/domain/value-objects/SubscriptionId.js';
 import { createRawPgClient, createTestPrismaClient, uniqueTenantId } from './dbTestHelpers.js';
+import { InMemorySubscriptionAuditTrail } from '../builders/testKit.js';
 
 /**
  * Adversarial : pendant de `test/payment/integration/paymentConfirmExpireConcurrency.test.ts`, mais
@@ -137,6 +138,7 @@ describe('Subscription — ecritures concurrentes (verrouillage optimiste, adver
       subscriptionRepository,
       planUpgradeRequestRepository,
       planChangeRepository,
+      subscriptionAuditTrail: new InMemorySubscriptionAuditTrail(),
       unitOfWork: new PgUnitOfWork(prisma),
       clock,
       idGenerator,

@@ -10,6 +10,7 @@ import { SeedFacilityConfigurationHandler } from '../application/commands/SeedFa
 import { createCompleteProvisioningOnFacilityConfigurationSeededHandler } from '../application/services/CompleteProvisioningOnFacilityConfigurationSeeded.js';
 import { createSeedFacilityConfigurationOnMembershipGrantedHandler } from '../application/services/SeedFacilityConfigurationOnMembershipGranted.js';
 import type { UserAccountExistenceChecker } from '../application/ports/UserAccountExistenceChecker.js';
+import type { ProvisioningAuditTrail } from '../application/ports/ProvisioningAuditTrail.js';
 import type { FacilitySettingsRepository } from '../domain/ports/FacilitySettingsRepository.js';
 import type { HealthFacilityRepository } from '../domain/ports/HealthFacilityRepository.js';
 import { PrismaFacilitySettingsRepository } from './persistence/PrismaFacilitySettingsRepository.js';
@@ -57,6 +58,8 @@ export function buildTenantModule(deps: {
   clock: Clock;
   idGenerator: IdGenerator;
   userAccountExistenceChecker: UserAccountExistenceChecker;
+  /** Port sortant vers le module `audit`, categorie `PROVISIONING` (ADR-0009 §2.2/§4) — l'adaptateur reel est cable par composition-root.ts. */
+  provisioningAuditTrail: ProvisioningAuditTrail;
 }): TenantModule {
   const healthFacilities = new PrismaHealthFacilityRepository(deps.prisma);
   const facilitySettings = new PrismaFacilitySettingsRepository(deps.prisma);
@@ -67,12 +70,14 @@ export function buildTenantModule(deps: {
     unitOfWork,
     deps.clock,
     deps.idGenerator,
+    deps.provisioningAuditTrail,
   );
   const completeProvisioning = new CompleteProvisioningHandler(
     facilitySettings,
     unitOfWork,
     deps.clock,
     deps.idGenerator,
+    deps.provisioningAuditTrail,
   );
 
   return {
@@ -85,6 +90,7 @@ export function buildTenantModule(deps: {
         deps.clock,
         deps.idGenerator,
         deps.userAccountExistenceChecker,
+        deps.provisioningAuditTrail,
       ),
       seedFacilityConfiguration,
       completeProvisioning,

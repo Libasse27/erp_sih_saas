@@ -3,6 +3,7 @@ import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantI
 import {
   FixedClock,
   idFor,
+  InMemoryMembershipAuditTrail,
   InMemoryRoleRepository,
   InMemoryUnitOfWork,
   InMemoryUserAccountRepository,
@@ -31,6 +32,7 @@ describe('GrantMembershipHandler', () => {
   let clock: FixedClock;
   let idGenerator: SequentialIdGenerator;
   let account: UserAccount;
+  let membershipAuditTrail: InMemoryMembershipAuditTrail;
 
   beforeEach(async () => {
     accounts = new InMemoryUserAccountRepository();
@@ -38,7 +40,16 @@ describe('GrantMembershipHandler', () => {
     roles = new InMemoryRoleRepository();
     clock = new FixedClock('2026-08-23T10:00:00Z');
     idGenerator = new SequentialIdGenerator();
-    handler = new GrantMembershipHandler(accounts, memberships, roles, new InMemoryUnitOfWork(), clock, idGenerator);
+    membershipAuditTrail = new InMemoryMembershipAuditTrail();
+    handler = new GrantMembershipHandler(
+      accounts,
+      memberships,
+      roles,
+      new InMemoryUnitOfWork(),
+      clock,
+      idGenerator,
+      membershipAuditTrail,
+    );
 
     account = UserAccount.register({
       email: Email.create('infirmier@hopital.sn').getValue(),

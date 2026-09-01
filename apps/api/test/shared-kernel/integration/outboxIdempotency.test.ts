@@ -12,6 +12,7 @@ import { PlatformInvoice } from '../../../src/modules/payment/domain/PlatformInv
 import { PrismaPlatformInvoiceRepository } from '../../../src/modules/payment/infrastructure/persistence/PrismaPlatformInvoiceRepository.js';
 import { createMarkPlatformInvoicePaidOnPaymentSucceededHandler } from '../../../src/modules/payment/application/services/MarkPlatformInvoicePaidOnPaymentSucceeded.js';
 import { createRawPgClient, createTestPrismaClient, uniqueId } from './dbTestHelpers.js';
+import { InMemoryBillingAuditTrail } from '../../payment/builders/testKit.js';
 
 /**
  * Adversarial — registre GENERIQUE d'idempotence consommateur (D9, etape 6/13). Postgres reel
@@ -130,8 +131,10 @@ describe('withOutboxIdempotency — registre generique, rejeu du meme (message, 
       tenantId: tenantId.toString(),
     });
 
+    const billingAuditTrail = new InMemoryBillingAuditTrail();
     const realHandler = createMarkPlatformInvoicePaidOnPaymentSucceededHandler({
       platformInvoiceRepository: invoiceRepository,
+      billingAuditTrail,
       unitOfWork,
       clock,
     });
@@ -156,6 +159,11 @@ describe('withOutboxIdempotency — registre generique, rejeu du meme (message, 
 
     const paid = await invoiceRepository.findById(invoice.id, tenantId);
     expect(paid?.status).toBe('PAID');
+
+    // ADR-0009, "Tests attendus" : un rejeu Outbox idempotent ne produit JAMAIS d'entree d'audit
+    // dupliquee — une seule BILLING_PLATFORM_INVOICE_SETTLED, malgre les deux invocations de `wrapped`.
+    expect(billingAuditTrail.records).toHaveLength(1);
+    expect(billingAuditTrail.records[0]).toMatchObject({ eventType: 'BILLING_PLATFORM_INVOICE_SETTLED', outcome: 'SUCCESS' });
 
     await rawClient.query('DELETE FROM "platform"."PlatformInvoice" WHERE id = $1', [invoice.id.toString()]);
   });

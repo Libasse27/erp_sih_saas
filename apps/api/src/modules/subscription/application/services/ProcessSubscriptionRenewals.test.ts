@@ -5,6 +5,7 @@ import {
   FixedClock,
   InMemoryPlanPriceRepository,
   InMemoryPlanRepository,
+  InMemorySubscriptionAuditTrail,
   InMemorySubscriptionRepository,
   InMemoryUnitOfWork,
   SequentialIdGenerator,
@@ -70,7 +71,14 @@ describe('ProcessSubscriptionRenewalsHandler — scheduler autonome (O-25.6)', (
       });
       await subscriptionRepository.save(subscription, TENANT);
 
-      const handler = new ProcessSubscriptionRenewalsHandler(subscriptionRepository, planPriceRepository, unitOfWork, clock, idGenerator);
+      const handler = new ProcessSubscriptionRenewalsHandler(
+      subscriptionRepository,
+      planPriceRepository,
+      unitOfWork,
+      clock,
+      idGenerator,
+      new InMemorySubscriptionAuditTrail(),
+    );
 
       // J+0 (echeance atteinte, 2026-08-31 = trialEndsAt) : grace IMMEDIATE.
       clock.advanceTo('2026-08-31T00:00:00Z');
@@ -121,7 +129,14 @@ describe('ProcessSubscriptionRenewalsHandler — scheduler autonome (O-25.6)', (
     await subscriptionRepository.save(subscription, TENANT);
     expect(subscription.status).toBe('TRIALING');
 
-    const renewalsHandler = new ProcessSubscriptionRenewalsHandler(subscriptionRepository, planPriceRepository, unitOfWork, clock, idGenerator);
+    const renewalsHandler = new ProcessSubscriptionRenewalsHandler(
+      subscriptionRepository,
+      planPriceRepository,
+      unitOfWork,
+      clock,
+      idGenerator,
+      new InMemorySubscriptionAuditTrail(),
+    );
     clock.advanceTo('2026-08-31T00:00:00Z'); // trialEndsAt
     await renewalsHandler.execute();
     let stored = await subscriptionRepository.findByTenantId(TENANT);
@@ -131,6 +146,7 @@ describe('ProcessSubscriptionRenewalsHandler — scheduler autonome (O-25.6)', (
     // abonnement payant standard, aucune branche "conversion d_essai" separee.
     const reactivateHandler = createReactivateSubscriptionOnPaymentSucceededHandler({
       subscriptionRepository,
+      subscriptionAuditTrail: new InMemorySubscriptionAuditTrail(),
       unitOfWork,
       clock,
       idGenerator,
@@ -185,9 +201,17 @@ describe('ProcessSubscriptionRenewalsHandler — scheduler autonome (O-25.6)', (
         });
         await subscriptionRepository.save(subscription, TENANT);
 
-        const renewalsHandler = new ProcessSubscriptionRenewalsHandler(subscriptionRepository, planPriceRepository, unitOfWork, clock, idGenerator);
+        const renewalsHandler = new ProcessSubscriptionRenewalsHandler(
+      subscriptionRepository,
+      planPriceRepository,
+      unitOfWork,
+      clock,
+      idGenerator,
+      new InMemorySubscriptionAuditTrail(),
+    );
         const reactivateHandler = createReactivateSubscriptionOnPaymentSucceededHandler({
           subscriptionRepository,
+          subscriptionAuditTrail: new InMemorySubscriptionAuditTrail(),
           unitOfWork,
           clock,
           idGenerator,

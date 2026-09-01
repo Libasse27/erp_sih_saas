@@ -38,6 +38,15 @@ export const SYSTEM_ROLE_CATALOG: readonly SystemRoleDefinition[] = [
       'platform-invoice:read',
       'saas-payment:administer',
       'discount-coupon:administer',
+      // 'platform-audit:read' RESTE au catalogue A TITRE DOCUMENTAIRE (ADR-0009 §9) : elle decrit
+      // l'intention du role et alimente PERMISSION_CATALOG_CODES, mais n'est JAMAIS materialisee
+      // dans une session (`PlatformSessionContext` ne porte ni `roleCodes` ni `permissionCodes` —
+      // voir application/ports/SessionStore.ts) et ne DOIT ETRE TESTEE DANS AUCUN CODE
+      // D'AUTORISATION : une verification `permissionCodes.includes('platform-audit:read')`
+      // refuserait SYSTEMATIQUEMENT tout SUPER_ADMIN. L'autorisation du perimetre plateforme est
+      // derivee de ce qui est REELLEMENT prouve cote serveur : `principal.kind === 'PLATFORM'`
+      // (emis par `SessionContextIssuer.resolveMaterials()` uniquement si `account.isSuperAdmin()`)
+      // EST la preuve du statut SUPER_ADMIN — voir `modules/audit/application/AuthorizeAuditRead.ts`.
       'platform-audit:read',
       'user-account:administer',
     ],
@@ -50,7 +59,13 @@ export const SYSTEM_ROLE_CATALOG: readonly SystemRoleDefinition[] = [
     // recuperation MFA pour un membre de l'etablissement (O-04, residu 3 — la verification
     // d'identite elle-meme reste un processus humain, hors code). Inclus dans
     // TENANT_ADMIN_RESOURCES (voir MfaPolicy.ts) : le detenteur est lui-meme soumis au MFA.
-    permissionCodes: ['membership:administer', 'role:administer', 'tenant-config:administer', 'mfa:reset'],
+    // 'audit:read' ajoute a l'etape 11/13 (ADR-0009 §9) : lecture du journal d'audit DE SON PROPRE
+    // TENANT (`GET /api/v1/audit-entries`, perimetre TENANT). Nom retenu — la ressource `audit`
+    // (et non `platform-audit`) encode le perimetre dans le nom lui-meme : `audit:read` est
+    // tenant-scopee, `platform-audit:read` est plateforme, deux codes distincts pour deux portees
+    // distinctes. Egalement ajoutee a TENANT_ADMIN_RESOURCES (voir MfaPolicy.ts) : le detenteur
+    // est lui-meme soumis au MFA.
+    permissionCodes: ['membership:administer', 'role:administer', 'tenant-config:administer', 'mfa:reset', 'audit:read'],
   },
   {
     id: '82d35b51-5aff-4a89-9455-fc1dfb4228c0',

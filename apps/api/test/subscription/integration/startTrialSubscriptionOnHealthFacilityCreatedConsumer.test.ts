@@ -14,6 +14,8 @@ import { UserAccountId } from '../../../src/modules/identity/domain/value-object
 import { Email } from '../../../src/modules/identity/domain/value-objects/Email.js';
 import { PasswordHash } from '../../../src/modules/identity/domain/value-objects/PasswordHash.js';
 import { uniqueEmail, uniqueFacilityName } from '../../identity/integration/dbTestHelpers.js';
+import { InMemoryProvisioningAuditTrail } from '../../tenant/builders/testKit.js';
+import { InMemorySubscriptionAuditTrail } from '../builders/testKit.js';
 import { createRawPgClient, createTestPrismaClient } from './dbTestHelpers.js';
 
 /**
@@ -50,8 +52,19 @@ describe('StartTrialSubscriptionOnHealthFacilityCreated — consommateur Outbox 
         return (await userAccounts.findById(idResult.getValue())) !== null;
       },
     };
-    tenant = buildTenantModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator(), userAccountExistenceChecker });
-    subscription = buildSubscriptionModule({ prisma, clock: new SystemClock(), idGenerator: new UuidGenerator() });
+    tenant = buildTenantModule({
+      prisma,
+      clock: new SystemClock(),
+      idGenerator: new UuidGenerator(),
+      userAccountExistenceChecker,
+      provisioningAuditTrail: new InMemoryProvisioningAuditTrail(),
+    });
+    subscription = buildSubscriptionModule({
+      prisma,
+      clock: new SystemClock(),
+      idGenerator: new UuidGenerator(),
+      subscriptionAuditTrail: new InMemorySubscriptionAuditTrail(),
+    });
     await seedPlanCatalog(subscription.repositories.plans, subscription.repositories.planPrices, new SystemClock(), new UuidGenerator());
   });
 

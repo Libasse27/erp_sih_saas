@@ -17,6 +17,7 @@ import { RoleId } from '../../../src/modules/identity/domain/value-objects/RoleI
 import type { SessionContext, SessionStore } from '../../../src/modules/identity/application/ports/SessionStore.js';
 import type { TenantAccessChecker, TenantAccessStatus } from '../../../src/modules/identity/application/ports/TenantAccessChecker.js';
 import type { AuditRecordInput, AuditTrail } from '../../../src/modules/identity/application/ports/AuditTrail.js';
+import type { MembershipAuditRecordInput, MembershipAuditTrail } from '../../../src/modules/identity/application/ports/MembershipAuditTrail.js';
 import type { MfaBypassAttemptGuard } from '../../../src/modules/identity/application/ports/MfaBypassAttemptGuard.js';
 import type { MfaEnrollment } from '../../../src/modules/identity/domain/MfaEnrollment.js';
 import type { MfaEnrollmentRepository } from '../../../src/modules/identity/domain/ports/MfaEnrollmentRepository.js';
@@ -372,6 +373,15 @@ export class InMemoryAuditTrail implements AuditTrail {
   readonly records: AuditRecordInput[] = [];
 
   async record(input: AuditRecordInput): Promise<void> {
+    this.records.push(input);
+  }
+}
+
+/** Fake du port `MembershipAuditTrail` (ADR-0009 §2.2/§4, troisieme port sortant d'Identity vers `audit`). */
+export class InMemoryMembershipAuditTrail implements MembershipAuditTrail {
+  readonly records: MembershipAuditRecordInput[] = [];
+
+  async record(input: MembershipAuditRecordInput): Promise<void> {
     this.records.push(input);
   }
 }

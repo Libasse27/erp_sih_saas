@@ -7,6 +7,7 @@ import type { UserTenantMembershipRepository } from '../../domain/ports/UserTena
 import { UserTenantMembershipId } from '../../domain/value-objects/UserTenantMembershipId.js';
 import type { SessionStore } from '../ports/SessionStore.js';
 import type { RefreshTokenIssuer } from '../services/RefreshTokenIssuer.js';
+import type { MembershipAuditTrail } from '../ports/MembershipAuditTrail.js';
 
 export interface RevokeMembershipCommand {
   readonly membershipId: string;
@@ -33,6 +34,7 @@ export class RevokeMembershipHandler {
     private readonly unitOfWork: UnitOfWork,
     private readonly clock: Clock,
     private readonly idGenerator: IdGenerator,
+    private readonly membershipAuditTrail: MembershipAuditTrail,
   ) {}
 
   async execute(command: RevokeMembershipCommand): Promise<Result<void, RevokeMembershipError>> {
@@ -57,6 +59,26 @@ export class RevokeMembershipHandler {
         return Result.failure<void, RevokeMembershipError>('MEMBERSHIP_ALREADY_REVOKED');
       }
       await this.membershipRepository.save(membership, tenantId);
+
+      // ADR-0009 §2.2/§4 — meme transaction que la mutation de l'agregat. `actorKind: 'SYSTEM'` :
+      // aucun appelant de production n'invoque aujourd'hui cette commande (aucun endpoint
+      // interactif de gestion de membership n'existe encore, voir le rapport de cette etape) —
+      // contrairement a `GrantMembershipHandler` (qui recoit deja un `createdBy` reel), aucun
+      // identifiant d'acteur n'est disponible ici.
+      await this.membershipAuditTrail.record({
+        eventType: 'MEMBERSHIP_REVOKED',
+        outcome: 'SUCCESS',
+        tenantId: tenantId.toString(),
+        actorKind: 'SYSTEM',
+        actorUserId: null,
+        actorRoleCodes: [],
+        subjectUserId: membership.userId.toString(),
+        targetId: membershipId.toString(),
+        reason: null,
+        sessionId: null,
+        correlationId: null,
+      });
+
       return Result.success<void, RevokeMembershipError>(undefined);
     }, { tenantId });
 

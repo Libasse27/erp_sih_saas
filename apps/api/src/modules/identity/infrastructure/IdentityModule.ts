@@ -22,6 +22,7 @@ import { ServerContextResolver } from '../application/services/ServerContextReso
 import { RefreshTokenIssuer } from '../application/services/RefreshTokenIssuer.js';
 import type { AuditTrail } from '../application/ports/AuditTrail.js';
 import type { SessionAuditTrail } from '../application/ports/SessionAuditTrail.js';
+import type { MembershipAuditTrail } from '../application/ports/MembershipAuditTrail.js';
 import type { RoleRepository } from '../domain/ports/RoleRepository.js';
 import type { MfaEnrollmentRepository } from '../domain/ports/MfaEnrollmentRepository.js';
 import type { UserAccountRepository } from '../domain/ports/UserAccountRepository.js';
@@ -108,6 +109,8 @@ export function buildIdentityModule(deps: {
   tenantAccessChecker: TenantAccessChecker;
   auditTrail: AuditTrail;
   sessionAuditTrail: SessionAuditTrail;
+  /** Port sortant vers le module `audit`, categorie `MEMBERSHIP` (ADR-0009 §2.2/§4, troisieme port dedie d'Identity) — l'adaptateur reel est cable par composition-root.ts. */
+  membershipAuditTrail: MembershipAuditTrail;
   mfa: IdentityModuleMfaConfig;
   refreshToken: IdentityModuleRefreshTokenConfig;
 }): IdentityModule {
@@ -155,6 +158,7 @@ export function buildIdentityModule(deps: {
     unitOfWork,
     deps.clock,
     deps.idGenerator,
+    deps.membershipAuditTrail,
   );
 
   return {
@@ -176,10 +180,24 @@ export function buildIdentityModule(deps: {
         unitOfWork,
         deps.clock,
         deps.idGenerator,
+        deps.membershipAuditTrail,
       ),
-      authenticateUser: new AuthenticateUserHandler(userAccounts, memberships, passwordHasher, unitOfWork),
-      resolveTenantContext: new ResolveTenantContextHandler(sessionContextIssuer, sessionStore, refreshTokenIssuer),
-      closeSession: new CloseSessionHandler(sessionStore, refreshTokenIssuer),
+      authenticateUser: new AuthenticateUserHandler(
+        userAccounts,
+        memberships,
+        passwordHasher,
+        unitOfWork,
+        deps.sessionAuditTrail,
+        mfaBypassAttemptGuard,
+      ),
+      resolveTenantContext: new ResolveTenantContextHandler(
+        sessionContextIssuer,
+        sessionStore,
+        refreshTokenIssuer,
+        deps.sessionAuditTrail,
+        unitOfWork,
+      ),
+      closeSession: new CloseSessionHandler(sessionStore, refreshTokenIssuer, deps.sessionAuditTrail, unitOfWork),
       refreshSession: new RefreshSessionHandler(
         refreshTokenIssuer,
         refreshTokens,

@@ -7,6 +7,7 @@ import { Subscription } from '../../domain/Subscription.js';
 import type { PlanPriceRepository } from '../../domain/ports/PlanPriceRepository.js';
 import type { PlanRepository } from '../../domain/ports/PlanRepository.js';
 import type { SubscriptionRepository } from '../../domain/ports/SubscriptionRepository.js';
+import type { SubscriptionAuditTrail } from '../ports/SubscriptionAuditTrail.js';
 
 export interface StartTrialSubscriptionCommand {
   readonly tenantId: string;
@@ -52,6 +53,7 @@ export class StartTrialSubscriptionHandler {
     private readonly unitOfWork: UnitOfWork,
     private readonly clock: Clock,
     private readonly idGenerator: IdGenerator,
+    private readonly subscriptionAuditTrail: SubscriptionAuditTrail,
   ) {}
 
   async execute(
@@ -98,6 +100,21 @@ export class StartTrialSubscriptionHandler {
           // Subscription.ts. Une valeur nulle ici serait un bug, pas un echec metier attendu.
           throw new Error("Invariant viole : un abonnement demarre par startTrial() doit avoir trialEndsAt renseigne.");
         }
+
+        // ADR-0009 §2.2/§4 — meme transaction que la mutation de l'agregat. `actorKind: 'SYSTEM'` :
+        // ce handler est TOUJOURS invoque par le consommateur Outbox de la Saga de provisioning
+        // (`StartTrialSubscriptionOnHealthFacilityCreated`), jamais par une session interactive.
+        await this.subscriptionAuditTrail.record({
+          eventType: 'SUBSCRIPTION_TRIAL_STARTED',
+          outcome: 'SUCCESS',
+          tenantId: tenantId.toString(),
+          actorKind: 'SYSTEM',
+          actorUserId: null,
+          targetId: subscription.id.toString(),
+          reason: null,
+          sessionId: null,
+          correlationId: null,
+        });
 
         return Result.success({
           subscriptionId: subscription.id.toString(),

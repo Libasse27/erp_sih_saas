@@ -191,10 +191,15 @@ export class RefreshSessionHandler {
     resultingSessionId?: string,
     actorRoleCodes: readonly string[] = [],
   ): SessionAuditRecordInput {
+    const tenantId = record.tenantId?.toString() ?? null;
     return {
       eventType,
       outcome,
-      tenantId: record.tenantId?.toString() ?? null,
+      tenantId,
+      // ADR-0009 §3 : `actorKind` obligatoire. Une chaine de refresh PLATEFORME n'a
+      // structurellement pas de `tenantId` — meme discriminant que partout ailleurs dans ce
+      // module (`ResolveTenantContext`/`CloseSession`/`composition-root.ts`).
+      actorKind: tenantId === null ? 'USER_PLATFORM' : 'USER_TENANT',
       subjectUserId: record.userId.toString(),
       actorUserId: record.userId.toString(),
       actorRoleCodes,

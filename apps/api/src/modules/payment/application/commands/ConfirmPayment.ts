@@ -6,6 +6,8 @@ import type { Payment } from '../../domain/Payment.js';
 import { PaymentConcurrencyConflictError, type PaymentRepository } from '../../domain/ports/PaymentRepository.js';
 import type { PlatformInvoiceRepository } from '../../domain/ports/PlatformInvoiceRepository.js';
 import type { PaymentProvider } from '../../domain/ports/PaymentProvider.js';
+import { isTerminalSuccessStatus } from '../../domain/value-objects/PaymentStatus.js';
+import type { BillingAuditTrail } from '../ports/BillingAuditTrail.js';
 
 export type ConfirmPaymentError = 'INVALID_SIGNATURE' | 'INVALID_PAYLOAD' | 'UNKNOWN_TRANSACTION' | 'AMOUNT_MISMATCH';
 
@@ -68,6 +70,7 @@ export class ConfirmPaymentHandler {
     private readonly unitOfWork: UnitOfWork,
     private readonly clock: Clock,
     private readonly idGenerator: IdGenerator,
+    private readonly billingAuditTrail: BillingAuditTrail,
     private readonly logger?: ConfirmPaymentLogger,
   ) {}
 
@@ -110,9 +113,27 @@ export class ConfirmPaymentHandler {
       }
 
       if (webhookEvent.outcome === 'FAILED') {
+        // Idempotence PAR CONSTRUCTION (`confirmFailed()` est un no-op sur un succes/annulation
+        // terminal, voir Payment.ts) : capture AVANT mutation, comme pour le succes ci-dessous —
+        // jamais de seconde entree d'audit sur un rejeu webhook.
+        const alreadyTerminal = isTerminalSuccessStatus(payment.status) || payment.status === 'CANCELLED';
         await this.saveWithConcurrencyRetry(payment, (current) =>
           current.confirmFailed({ providerTransactionId: webhookEvent.providerTransactionId }),
         );
+        if (!alreadyTerminal) {
+          await this.billingAuditTrail.record({
+            eventType: 'BILLING_PAYMENT_CONFIRMED',
+            outcome: 'FAILURE',
+            tenantId: payment.tenantId.toString(),
+            actorKind: 'SYSTEM',
+            actorUserId: null,
+            targetType: 'PAYMENT',
+            targetId: payment.id.toString(),
+            reason: null,
+            sessionId: null,
+            correlationId: null,
+          });
+        }
         return Result.success({ status: 'PROCESSED' });
       }
 
@@ -141,6 +162,7 @@ export class ConfirmPaymentHandler {
         );
       }
 
+      const alreadySucceeded = isTerminalSuccessStatus(payment.status);
       await this.saveWithConcurrencyRetry(payment, (current) =>
         current.confirmSucceeded({
           providerTransactionId: webhookEvent.providerTransactionId,
@@ -155,6 +177,20 @@ export class ConfirmPaymentHandler {
           idGenerator: this.idGenerator,
         }),
       );
+      if (!alreadySucceeded) {
+        await this.billingAuditTrail.record({
+          eventType: 'BILLING_PAYMENT_CONFIRMED',
+          outcome: 'SUCCESS',
+          tenantId: payment.tenantId.toString(),
+          actorKind: 'SYSTEM',
+          actorUserId: null,
+          targetType: 'PAYMENT',
+          targetId: payment.id.toString(),
+          reason: null,
+          sessionId: null,
+          correlationId: null,
+        });
+      }
       return Result.success({ status: 'PROCESSED' });
     });
   }

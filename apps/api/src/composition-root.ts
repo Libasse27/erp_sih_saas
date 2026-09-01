@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { Redis } from 'ioredis';
 import { Queue } from 'bullmq';
+import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import type { Clock } from './shared-kernel/domain/ports/Clock.js';
 import type { IdGenerator } from './shared-kernel/domain/ports/IdGenerator.js';
 import { TenantId } from './shared-kernel/domain/value-objects/TenantId.js';
@@ -22,19 +23,26 @@ import type {
 } from './modules/identity/application/ports/TenantAccessChecker.js';
 import type { AuditRecordInput, AuditTrail } from './modules/identity/application/ports/AuditTrail.js';
 import type { SessionAuditRecordInput, SessionAuditTrail } from './modules/identity/application/ports/SessionAuditTrail.js';
+import type { MembershipAuditRecordInput, MembershipAuditTrail } from './modules/identity/application/ports/MembershipAuditTrail.js';
 import { PrismaUserAccountRepository } from './modules/identity/infrastructure/persistence/PrismaUserAccountRepository.js';
 import { UserAccountId } from './modules/identity/domain/value-objects/UserAccountId.js';
 import type { UserAccountRepository } from './modules/identity/domain/ports/UserAccountRepository.js';
+import { ServerContextResolver } from './modules/identity/application/services/ServerContextResolver.js';
 import { buildAuditModule, type AuditModule } from './modules/audit/infrastructure/AuditModule.js';
+import type { AuditReadPrincipal } from './modules/audit/application/AuditReadPrincipal.js';
+import { AuditEntryController, type AuditHttpLocals } from './modules/audit/presentation/http/AuditEntryController.js';
 import { buildTenantModule, type TenantModule } from './modules/tenant/infrastructure/TenantModule.js';
 import type { UserAccountExistenceChecker } from './modules/tenant/application/ports/UserAccountExistenceChecker.js';
 import type { HealthFacilityRepository } from './modules/tenant/domain/ports/HealthFacilityRepository.js';
+import type { ProvisioningAuditRecordInput, ProvisioningAuditTrail } from './modules/tenant/application/ports/ProvisioningAuditTrail.js';
 import type { SubscriptionRepository } from './modules/subscription/domain/ports/SubscriptionRepository.js';
+import type { SubscriptionAuditRecordInput, SubscriptionAuditTrail } from './modules/subscription/application/ports/SubscriptionAuditTrail.js';
 import {
   buildSubscriptionModule,
   type SubscriptionModule,
 } from './modules/subscription/infrastructure/SubscriptionModule.js';
 import { buildPaymentModule, type PaymentModule } from './modules/payment/infrastructure/PaymentModule.js';
+import type { BillingAuditRecordInput, BillingAuditTrail } from './modules/payment/application/ports/BillingAuditTrail.js';
 import { SandboxPaymentProviderAdapter } from './modules/payment/infrastructure/payment-provider/SandboxPaymentProviderAdapter.js';
 import { startSubscriptionRenewalScheduler } from './modules/subscription/infrastructure/scheduler/SubscriptionRenewalScheduler.js';
 import { startPaymentReconciliationScheduler } from './modules/payment/infrastructure/scheduler/PaymentReconciliationScheduler.js';
@@ -167,9 +175,20 @@ class AuditModuleBackedAuditTrail implements AuditTrail {
       eventType: input.eventType,
       outcome: input.outcome,
       tenantId: input.tenantId,
+      // `AuditRecordInput` (port MFA, ADR-0005, INCHANGE par ADR-0009 §2 : "MFA existante,
+      // inchangee") ne porte pas `actorKind` — ses 6 producteurs (StartMfaEnrollment,
+      // ConfirmMfaEnrollment, VerifyMfaChallenge, ForceMfaReEnrollment,
+      // RegenerateMfaRecoveryCodes, ServerContextResolver) restent hors perimetre de cette etape.
+      // Derive ICI, seul point du code qui connait les deux modules : un contexte PLATEFORME n'a
+      // structurellement pas de tenant (`tenantId === null`), exactement le meme discriminant que
+      // `ServerContextResolver`/`SessionContextIssuer` utilisent pour distinguer PLATFORM/TENANT.
+      actorKind: input.tenantId === null ? 'USER_PLATFORM' : 'USER_TENANT',
       subjectUserId: input.subjectUserId,
       actorUserId: input.actorUserId,
       actorRoleCodes: input.actorRoleCodes,
+      // MFA porte TOUJOURS sur le compte de l'acteur lui-meme (ADR-0009 §3 : `targetType` obligatoire).
+      targetType: 'USER_ACCOUNT',
+      targetId: input.subjectUserId,
       reason: input.reason,
       sessionId: input.sessionId,
       correlationId: input.correlationId,
@@ -193,14 +212,188 @@ class AuditModuleBackedSessionAuditTrail implements SessionAuditTrail {
       eventType: input.eventType,
       outcome: input.outcome,
       tenantId: input.tenantId,
+      actorKind: input.actorKind,
       subjectUserId: input.subjectUserId,
       actorUserId: input.actorUserId,
       actorRoleCodes: input.actorRoleCodes,
+      // SESSION porte TOUJOURS sur le compte de l'acteur lui-meme (connexion, ouverture/refus de
+      // contexte, fermeture) — ADR-0009 §3 : `targetType` obligatoire.
+      targetType: 'USER_ACCOUNT',
+      targetId: input.subjectUserId,
       reason: input.reason,
       sessionId: input.sessionId,
       correlationId: input.correlationId,
     });
   }
+}
+
+/**
+ * Adaptateur cross-module implementant le port `ProvisioningAuditTrail` de Tenant en s'appuyant
+ * sur le module `audit` (ADR-0009 §2.2/§4). Vit ICI et nulle part ailleurs — meme raisonnement
+ * qu'`AuditModuleBackedAuditTrail`. Categorie fixee a `'PROVISIONING'` : cet adaptateur ne sert
+ * QUE le port de Tenant, jamais etendu par un `if` sur l'appelant.
+ */
+class AuditModuleBackedProvisioningAuditTrail implements ProvisioningAuditTrail {
+  constructor(private readonly audit: AuditModule) {}
+
+  async record(input: ProvisioningAuditRecordInput): Promise<void> {
+    await this.audit.services.recordEntry({
+      category: 'PROVISIONING',
+      eventType: input.eventType,
+      outcome: input.outcome,
+      tenantId: input.tenantId,
+      actorKind: input.actorKind,
+      actorUserId: input.actorUserId,
+      actorRoleCodes: [],
+      subjectUserId: input.subjectUserId,
+      targetType: input.targetType,
+      targetId: input.targetId,
+      reason: input.reason,
+      sessionId: input.sessionId,
+      correlationId: input.correlationId,
+    });
+  }
+}
+
+/**
+ * Adaptateur cross-module implementant le TROISIEME port sortant d'Identity vers le module
+ * `audit`, categorie `MEMBERSHIP` (ADR-0009 §2.2/§4 : "jamais une extension d'AuditTrail
+ * (categorie MFA)"). `targetType` fixe a `'MEMBERSHIP'` — seule valeur pertinente pour ce port.
+ */
+class AuditModuleBackedMembershipAuditTrail implements MembershipAuditTrail {
+  constructor(private readonly audit: AuditModule) {}
+
+  async record(input: MembershipAuditRecordInput): Promise<void> {
+    await this.audit.services.recordEntry({
+      category: 'MEMBERSHIP',
+      eventType: input.eventType,
+      outcome: input.outcome,
+      tenantId: input.tenantId,
+      actorKind: input.actorKind,
+      actorUserId: input.actorUserId,
+      actorRoleCodes: input.actorRoleCodes,
+      subjectUserId: input.subjectUserId,
+      targetType: 'MEMBERSHIP',
+      targetId: input.targetId,
+      reason: input.reason,
+      sessionId: input.sessionId,
+      correlationId: input.correlationId,
+    });
+  }
+}
+
+/**
+ * Adaptateur cross-module implementant le port `SubscriptionAuditTrail` de Subscription en
+ * s'appuyant sur le module `audit` (ADR-0009 §2.2/§4). Categorie fixee a `'SUBSCRIPTION'`,
+ * `targetType` fixe a `'SUBSCRIPTION'` — seule valeur pertinente pour ce port.
+ */
+class AuditModuleBackedSubscriptionAuditTrail implements SubscriptionAuditTrail {
+  constructor(private readonly audit: AuditModule) {}
+
+  async record(input: SubscriptionAuditRecordInput): Promise<void> {
+    await this.audit.services.recordEntry({
+      category: 'SUBSCRIPTION',
+      eventType: input.eventType,
+      outcome: input.outcome,
+      tenantId: input.tenantId,
+      actorKind: input.actorKind,
+      actorUserId: input.actorUserId,
+      actorRoleCodes: [],
+      subjectUserId: null,
+      targetType: 'SUBSCRIPTION',
+      targetId: input.targetId,
+      reason: input.reason,
+      sessionId: input.sessionId,
+      correlationId: input.correlationId,
+    });
+  }
+}
+
+/**
+ * Adaptateur cross-module implementant le port `BillingAuditTrail` de Payment en s'appuyant sur
+ * le module `audit` (ADR-0009 §2.2/§4). Categorie fixee a `'BILLING'` — `targetType` reste porte
+ * par l'appelant (`PAYMENT` ou `PLATFORM_INVOICE`, les deux agregats couverts par cette categorie,
+ * §2 : "BILLING... couvre a la fois Payment... et PlatformInvoice").
+ */
+class AuditModuleBackedBillingAuditTrail implements BillingAuditTrail {
+  constructor(private readonly audit: AuditModule) {}
+
+  async record(input: BillingAuditRecordInput): Promise<void> {
+    await this.audit.services.recordEntry({
+      category: 'BILLING',
+      eventType: input.eventType,
+      outcome: input.outcome,
+      tenantId: input.tenantId,
+      actorKind: input.actorKind,
+      actorUserId: input.actorUserId,
+      actorRoleCodes: [],
+      subjectUserId: null,
+      targetType: input.targetType,
+      targetId: input.targetId,
+      reason: input.reason,
+      sessionId: input.sessionId,
+      correlationId: input.correlationId,
+    });
+  }
+}
+
+/**
+ * Middleware HTTP UNIQUE de resolution de contexte authentifie (ADR-0009 §8.2) — construit ICI,
+ * seul endroit du code autorise a connaitre `identity` ET `audit` a la fois. Lit le `sessionId`
+ * depuis `Authorization: Bearer <sessionId>` (jamais un cookie, §8.3), appelle
+ * `ServerContextResolver.resolve()` — LE point de passage obligatoire existant, jamais un second
+ * chemin de resolution — et traduit :
+ *   `SESSION_NOT_FOUND` -> 401 ; `MFA_REQUIRED` -> 403 `mfa_required` ; succes -> `AuditReadPrincipal`
+ *   attache a `res.locals` (voir `AuditHttpLocals`), jamais l'agregat `ServerContext` lui-meme
+ *   (le module `audit` ne connait que son propre type `AuditReadPrincipal`).
+ * Une session `MFA_PENDING` ne produit donc JAMAIS de principal : `ServerContextResolver.resolve()`
+ * retourne `MFA_REQUIRED` AVANT toute construction d'objet porteur de tenant/acteur, aucune
+ * transaction ne s'ouvre (meme garantie que `mfaSessionGate.test.ts`).
+ */
+function buildRequireAuthenticatedContext(serverContextResolver: ServerContextResolver): RequestHandler {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    void (async () => {
+      const authorizationHeader = req.header('authorization');
+      const bearerPrefix = 'Bearer ';
+      if (authorizationHeader === undefined || !authorizationHeader.startsWith(bearerPrefix)) {
+        res.status(401).json({ error: 'unauthenticated' });
+        return;
+      }
+      const sessionId = authorizationHeader.slice(bearerPrefix.length).trim();
+      if (sessionId.length === 0) {
+        res.status(401).json({ error: 'unauthenticated' });
+        return;
+      }
+
+      const correlationId = req.header('x-correlation-id') ?? null;
+      const result = await serverContextResolver.resolve(sessionId, correlationId);
+      if (result.isFailure()) {
+        const error = result.getError();
+        if (error === 'MFA_REQUIRED') {
+          res.status(403).json({ error: 'mfa_required' });
+          return;
+        }
+        res.status(401).json({ error: 'unauthenticated' });
+        return;
+      }
+
+      const context = result.getValue();
+      const principal: AuditReadPrincipal =
+        context.kind === 'PLATFORM'
+          ? { kind: 'PLATFORM', actorUserId: context.actorUserId }
+          : {
+              kind: 'TENANT',
+              actorUserId: context.actorUserId,
+              tenantId: context.tenantId.toString(),
+              roleCodes: context.session.roleCodes,
+              permissionCodes: context.session.permissionCodes,
+            };
+
+      const locals: AuditHttpLocals = { auditPrincipal: principal, sessionId };
+      Object.assign(res.locals, locals);
+      next();
+    })().catch(next);
+  };
 }
 
 /**
@@ -265,6 +458,14 @@ export interface CompositionRoot {
   readonly payment: PaymentModule;
   readonly notifications: NotificationModule;
   /**
+   * Presentation HTTP cross-module (ADR-0009 §8) — SEUL point du code qui expose a `server.ts` le
+   * middleware d'authentification et le controleur du PREMIER endpoint HTTP authentifie du depot.
+   */
+  readonly presentation: {
+    readonly requireAuthenticatedContext: RequestHandler;
+    readonly auditEntryController: AuditEntryController;
+  };
+  /**
    * Demarre les 4 processus de fond de cette etape (D9 + O-25.6 + O-25.5 + ADR-0007) : relais
    * Outbox, scheduler de renouvellement d'abonnement, rapprochement de paiements, pipeline de
    * livraison des notifications (relais + worker dedies, ADR-0007 §6). Idempotent a l'appel
@@ -297,6 +498,19 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
     userAccountsForExistenceCheck,
   );
 
+  // Audit cable EN PREMIER (ADR-0009) : Tenant/Subscription/Identity/Payment ont TOUS desormais
+  // besoin d'un adaptateur `*AuditTrail` backe par ce module (ProvisioningAuditTrail,
+  // SubscriptionAuditTrail, AuditTrail/SessionAuditTrail/MembershipAuditTrail,
+  // BillingAuditTrail) — `audit` lui-meme ne depend d'AUCUN autre module (seulement
+  // prisma/clock/idGenerator), sa construction peut donc etre avancee sans creer de dependance
+  // circulaire, contrairement a Tenant/Subscription/Identity qui dependent EN RETOUR les uns des
+  // autres (voir plus bas).
+  const audit = buildAuditModule({ prisma, clock, idGenerator });
+  const provisioningAuditTrail = new AuditModuleBackedProvisioningAuditTrail(audit);
+  const subscriptionAuditTrail = new AuditModuleBackedSubscriptionAuditTrail(audit);
+  const membershipAuditTrail = new AuditModuleBackedMembershipAuditTrail(audit);
+  const billingAuditTrail = new AuditModuleBackedBillingAuditTrail(audit);
+
   // Tenant, Subscription et Audit cables avant Identity : Identity depend des ports
   // `TenantAccessChecker` (ResolveTenantContextHandler, Phase 0 etape 3 ; compose Tenant ET
   // Subscription depuis ADR-0008 §3, etape 10/13) et `AuditTrail` (MFA, etape 7/13), dont les
@@ -307,13 +521,18 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
   // port `TenantAccessChecker` cote Subscription), sa construction est simplement AVANCEE ici pour
   // etre disponible au moment ou `TenantModuleBackedAccessChecker` en a besoin. Tenant, lui, recoit
   // desormais `userAccountExistenceChecker` (port cross-module, pas le module Identity lui-meme).
-  const tenant = buildTenantModule({ prisma, clock, idGenerator, userAccountExistenceChecker });
-  const subscription = buildSubscriptionModule({ prisma, clock, idGenerator, applyPlanUpgradeLogger: logger });
+  const tenant = buildTenantModule({ prisma, clock, idGenerator, userAccountExistenceChecker, provisioningAuditTrail });
+  const subscription = buildSubscriptionModule({
+    prisma,
+    clock,
+    idGenerator,
+    applyPlanUpgradeLogger: logger,
+    subscriptionAuditTrail,
+  });
   const tenantAccessChecker = new TenantModuleBackedAccessChecker(
     tenant.repositories.healthFacilities,
     subscription.repositories.subscriptions,
   );
-  const audit = buildAuditModule({ prisma, clock, idGenerator });
   const auditTrail = new AuditModuleBackedAuditTrail(audit);
   const sessionAuditTrail = new AuditModuleBackedSessionAuditTrail(audit);
   const identity = buildIdentityModule({
@@ -324,6 +543,7 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
     tenantAccessChecker,
     auditTrail,
     sessionAuditTrail,
+    membershipAuditTrail,
     mfa: {
       secretEncryptionKey: Buffer.from(env.MFA_SECRET_ENCRYPTION_KEY, 'base64'),
       secretEncryptionKeyId: env.MFA_SECRET_ENCRYPTION_KEY_ID,
@@ -348,6 +568,7 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
     paymentProvider,
     confirmPaymentLogger: logger,
     webhookControllerLogger: logger,
+    billingAuditTrail,
   });
 
   // Notifications (Phase 0, etape 9/13, ADR-0007). Fournisseurs SANDBOX pour Email ET SMS —
@@ -541,6 +762,12 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
     logger,
   });
 
+  // Presentation HTTP du module `audit` (ADR-0009 §8) — SEUL endpoint HTTP authentifie du depot
+  // a cette etape. `requireAuthenticatedContext` construit ICI (seul point du code autorise a
+  // connaitre `identity` ET `audit`) — voir `buildRequireAuthenticatedContext` plus haut.
+  const requireAuthenticatedContext = buildRequireAuthenticatedContext(identity.serverContextResolver);
+  const auditEntryController = new AuditEntryController(audit.queries.listAuditEntries, audit.commands.recordAuditAccess);
+
   let outboxRelayJob: PeriodicJobHandle | undefined;
   let subscriptionRenewalJob: PeriodicJobHandle | undefined;
   let paymentReconciliationJob: PeriodicJobHandle | undefined;
@@ -559,6 +786,10 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
     subscription,
     payment,
     notifications,
+    presentation: {
+      requireAuthenticatedContext,
+      auditEntryController,
+    },
     startBackgroundJobs(): void {
       // `autorun: false` a la construction (voir OutboxWorker.ts) : demarre explicitement ici,
       // jamais avant — meme discipline que les jobs periodiques ci-dessous (rien ne tourne avant
