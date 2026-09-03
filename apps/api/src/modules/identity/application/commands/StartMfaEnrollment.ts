@@ -3,7 +3,7 @@ import type { Clock } from '../../../../shared-kernel/domain/ports/Clock.js';
 import type { IdGenerator } from '../../../../shared-kernel/domain/ports/IdGenerator.js';
 import type { UnitOfWork } from '../../../../shared-kernel/application/UnitOfWork.js';
 import { MfaEnrollment } from '../../domain/MfaEnrollment.js';
-import type { MfaEnrollmentRepository } from '../../domain/ports/MfaEnrollmentRepository.js';
+import { MfaEnrollmentConcurrencyConflictError, type MfaEnrollmentRepository } from '../../domain/ports/MfaEnrollmentRepository.js';
 import type { TotpService } from '../../domain/ports/TotpService.js';
 import type { UserAccountRepository } from '../../domain/ports/UserAccountRepository.js';
 import { UserAccountId } from '../../domain/value-objects/UserAccountId.js';
@@ -84,7 +84,13 @@ export class StartMfaEnrollmentHandler {
         return Result.failure('ACCOUNT_NOT_FOUND');
       }
 
-      const existing = await this.mfaEnrollmentRepository.findByUserId(userId);
+      // Verrouillage pessimiste (`FOR UPDATE`, correctif F-3, meme discipline que
+      // `ConfirmMfaEnrollment`/`VerifyMfaChallenge`) : serialise les re-enrolements CONCURRENTS
+      // sur une ligne EXISTANTE. Ne protege PAS a lui seul le TOUT PREMIER enrolement d'un compte
+      // (rien a verrouiller avant que la ligne existe) — voir la capture de
+      // `MfaEnrollmentConcurrencyConflictError` autour de `save()` plus bas (revue de securite
+      // independante de l'etape 12/13, BLOQUANT-2b).
+      const existing = await this.mfaEnrollmentRepository.findByUserIdForUpdate(userId);
       if (existing !== null && existing.isActive()) {
         await this.auditTrail.record({
           eventType: 'MFA_ENROLLMENT_STARTED',
@@ -134,7 +140,32 @@ export class StartMfaEnrollmentHandler {
         }
       }
 
-      await this.mfaEnrollmentRepository.save(enrollment);
+      try {
+        await this.mfaEnrollmentRepository.save(enrollment);
+      } catch (error) {
+        if (existing === null && error instanceof MfaEnrollmentConcurrencyConflictError) {
+          // Course benigne sur le TOUT PREMIER enrolement : un AUTRE writer vient de creer
+          // l'agregat pour ce MEME utilisateur entre notre lecture et notre ecriture (aucune
+          // ligne a verrouiller par FOR UPDATE avant qu'elle existe). Le secret genere ci-dessus
+          // est jete, jamais persiste. Traduit en la MEME erreur que le cas "deja actif" : un
+          // nouvel appel a cette route relira desormais la ligne fraichement creee et suivra le
+          // chemin de re-enrolement normal, verrouille cette fois (revue de securite independante
+          // de l'etape 12/13, BLOQUANT-2b).
+          await this.auditTrail.record({
+            eventType: 'MFA_ENROLLMENT_STARTED',
+            outcome: 'FAILURE',
+            tenantId: null,
+            subjectUserId: userId.toString(),
+            actorUserId: userId.toString(),
+            actorRoleCodes: [],
+            reason: null,
+            sessionId: command.sessionId,
+            correlationId: command.correlationId ?? null,
+          });
+          return Result.failure('ENROLLMENT_ALREADY_ACTIVE_AND_NOT_REPLACEABLE');
+        }
+        throw error;
+      }
       await this.auditTrail.record({
         eventType: 'MFA_ENROLLMENT_STARTED',
         outcome: 'SUCCESS',

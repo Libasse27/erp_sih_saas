@@ -1,5 +1,5 @@
 import type { PrismaClient } from '@prisma/client';
-import type { UserAccountRepository } from '../../domain/ports/UserAccountRepository.js';
+import { UserAccountEmailAlreadyRegisteredError, type UserAccountRepository } from '../../domain/ports/UserAccountRepository.js';
 import { UserAccount } from '../../domain/UserAccount.js';
 import { Email } from '../../domain/value-objects/Email.js';
 import { PasswordHash } from '../../domain/value-objects/PasswordHash.js';
@@ -33,23 +33,42 @@ export class PrismaUserAccountRepository implements UserAccountRepository {
     return row === null ? null : this.toDomain(row);
   }
 
+  /**
+   * `createMany({ skipDuplicates: true })` (`INSERT ... ON CONFLICT DO NOTHING`) PLUTOT qu'un
+   * `upsert()`/`create()` dont on rattraperait un `P2002` — meme idiome que
+   * `PrismaSubscriptionRepository.save()` : cette methode est appelee DANS une transaction deja
+   * ouverte (`CreateUserAccountHandler`, sous `unitOfWork.withTransaction`), et en PostgreSQL une
+   * violation de contrainte AVORTE la transaction entiere (toute requete suivante echouerait avec
+   * `25P02 current transaction is aborted`). `count === 0` signifie qu'un AUTRE writer a deja
+   * insere une ligne avec ce MEME `email` (seule contrainte UNIQUE pouvant entrer en conflit ici —
+   * `id` est un UUID fraichement genere) entre notre lecture (`findByEmail` dans
+   * `CreateUserAccountHandler`) et notre ecriture : traduit en `UserAccountEmailAlreadyRegisteredError`,
+   * rattrapee par le handler et convertie en `EMAIL_ALREADY_REGISTERED` (`409`), jamais une
+   * exception non geree traversant la frontiere HTTP (revue de securite independante de l'etape
+   * 12/13, BLOQUANT-2a).
+   *
+   * Seul appelant : creation d'un compte tout neuf (`UserAccount.register()`) — aucune mise a
+   * jour d'un compte existant n'existe encore a cette etape (verifie : `save()` n'a qu'un seul
+   * appelant, `CreateUserAccountHandler`). Le jour ou une commande de mise a jour existera, elle
+   * exigera son propre chemin d'ecriture (`updateMany` conditionnel), jamais un branchement ici.
+   */
   async save(account: UserAccount): Promise<void> {
     const client = resolvePrismaClient(this.prisma);
-    await client.userAccount.upsert({
-      where: { id: account.id.toString() },
-      create: {
-        id: account.id.toString(),
-        email: account.email.value,
-        passwordHash: account.passwordHash.value,
-        platformRole: account.platformRole,
-        createdAt: account.createdAt,
-      },
-      update: {
-        email: account.email.value,
-        passwordHash: account.passwordHash.value,
-        platformRole: account.platformRole,
-      },
+    const insertResult = await client.userAccount.createMany({
+      data: [
+        {
+          id: account.id.toString(),
+          email: account.email.value,
+          passwordHash: account.passwordHash.value,
+          platformRole: account.platformRole,
+          createdAt: account.createdAt,
+        },
+      ],
+      skipDuplicates: true,
     });
+    if (insertResult.count === 0) {
+      throw new UserAccountEmailAlreadyRegisteredError(account.email.value);
+    }
 
     // Outbox (D9, etape 6/13) : ecrit DANS LA MEME TRANSACTION que la ligne ci-dessus (meme
     // `client` resolu via `resolvePrismaClient`) — voir CreateUserAccountHandler, seul appelant de

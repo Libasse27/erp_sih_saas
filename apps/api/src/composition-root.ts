@@ -31,6 +31,19 @@ import { ServerContextResolver } from './modules/identity/application/services/S
 import { buildAuditModule, type AuditModule } from './modules/audit/infrastructure/AuditModule.js';
 import type { AuditReadPrincipal } from './modules/audit/application/AuditReadPrincipal.js';
 import { AuditEntryController, type AuditHttpLocals } from './modules/audit/presentation/http/AuditEntryController.js';
+import { SessionController } from './modules/identity/presentation/http/SessionController.js';
+import { MfaEnrollmentController } from './modules/identity/presentation/http/MfaEnrollmentController.js';
+import { RegistrationController } from './presentation/http/RegistrationController.js';
+import { RedisRateLimiter } from './shared-kernel/infrastructure/RedisRateLimiter.js';
+import { createRateLimitMiddleware } from './shared-kernel/infrastructure/RateLimitMiddleware.js';
+import {
+  LOGIN_RATE_LIMIT_MAX_REQUESTS,
+  LOGIN_RATE_LIMIT_WINDOW_SECONDS,
+  MFA_ROUTES_RATE_LIMIT_MAX_REQUESTS,
+  MFA_ROUTES_RATE_LIMIT_WINDOW_SECONDS,
+  REGISTRATION_RATE_LIMIT_MAX_REQUESTS,
+  REGISTRATION_RATE_LIMIT_WINDOW_SECONDS,
+} from './shared-kernel/domain/RateLimitTuning.js';
 import { buildTenantModule, type TenantModule } from './modules/tenant/infrastructure/TenantModule.js';
 import type { UserAccountExistenceChecker } from './modules/tenant/application/ports/UserAccountExistenceChecker.js';
 import type { HealthFacilityRepository } from './modules/tenant/domain/ports/HealthFacilityRepository.js';
@@ -458,12 +471,24 @@ export interface CompositionRoot {
   readonly payment: PaymentModule;
   readonly notifications: NotificationModule;
   /**
-   * Presentation HTTP cross-module (ADR-0009 §8) — SEUL point du code qui expose a `server.ts` le
-   * middleware d'authentification et le controleur du PREMIER endpoint HTTP authentifie du depot.
+   * Presentation HTTP cross-module (ADR-0009 §8, etendue par ADR-0010 §1/§8) — SEUL point du
+   * code qui expose a `server.ts` le middleware d'authentification, le controleur d'audit, ET
+   * (depuis l'etape 12/13) les CINQ routes pre-authentification d'inscription/connexion/second
+   * facteur ainsi que le limiteur de debit PARTAGE qui les protege toutes.
    */
   readonly presentation: {
     readonly requireAuthenticatedContext: RequestHandler;
     readonly auditEntryController: AuditEntryController;
+    /** ADR-0010 §1/§2 — cross-module (identity + tenant), instancie UNIQUEMENT ici. */
+    readonly registrationController: RegistrationController;
+    /** ADR-0010 §1/§6/§7 bis C — mono-module (identity seul). */
+    readonly sessionController: SessionController;
+    /** ADR-0010 §1/§7 bis A/B — mono-module (identity seul). */
+    readonly mfaEnrollmentController: MfaEnrollmentController;
+    /** ADR-0010 §8 — un middleware par famille de limite, valeurs dans shared-kernel/domain/RateLimitTuning.ts (non definitives). */
+    readonly rateLimitRegistrations: RequestHandler;
+    readonly rateLimitLogin: RequestHandler;
+    readonly rateLimitMfa: RequestHandler;
   };
   /**
    * Demarre les 4 processus de fond de cette etape (D9 + O-25.6 + O-25.5 + ADR-0007) : relais
@@ -768,6 +793,58 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
   const requireAuthenticatedContext = buildRequireAuthenticatedContext(identity.serverContextResolver);
   const auditEntryController = new AuditEntryController(audit.queries.listAuditEntries, audit.commands.recordAuditAccess);
 
+  // ADR-0010 §1/§2/§6/§7 bis — cinq routes pre-authentification. `RegistrationController` recoit
+  // les DEUX handlers (identity + tenant), jamais les modules entiers (moindre privilege, meme
+  // discipline que `TenantModuleBackedAccessChecker`) ; vit hors de `modules/` (§1 : seul point
+  // du code, avec ce fichier, autorise a connaitre `identity` ET `tenant` pour cette route).
+  const registrationController = new RegistrationController(
+    identity.handlers.createUserAccount,
+    tenant.handlers.createHealthFacility,
+    logger,
+  );
+  // `SessionController`/`MfaEnrollmentController` sont mono-module (identity SEUL) — vivent dans
+  // modules/identity/presentation/http/, instancies ici comme tout le reste (composition-root.ts
+  // reste le seul point de cablage, meme pour un controleur mono-module, ADR-0010 §1).
+  const sessionController = new SessionController(
+    identity.handlers.authenticateUser,
+    identity.handlers.resolveTenantContext,
+    identity.handlers.verifyMfaChallenge,
+    logger,
+  );
+  const mfaEnrollmentController = new MfaEnrollmentController(
+    identity.handlers.startMfaEnrollment,
+    identity.handlers.confirmMfaEnrollment,
+  );
+
+  // Limiteur de debit PARTAGE (ADR-0010 §8/§12 point 4) — port `RateLimiter` (shared-kernel),
+  // implementation Redis REELLE (connexion `redis` deja partagee par les sessions/le cache
+  // ci-dessus, jamais une connexion dediee supplementaire). UN SEUL point de cablage : trois
+  // appels de la MEME factory, un par famille de limite (routes/valeurs dans
+  // shared-kernel/domain/RateLimitTuning.ts, explicitement non definitives). Aucun litteral
+  // numerique ici — uniquement des constantes nommees importees du fichier de reglage dedie.
+  const rateLimiter = new RedisRateLimiter(redis);
+  const rateLimitRegistrations = createRateLimitMiddleware({
+    route: 'registrations',
+    limiter: rateLimiter,
+    maxRequests: REGISTRATION_RATE_LIMIT_MAX_REQUESTS,
+    windowSeconds: REGISTRATION_RATE_LIMIT_WINDOW_SECONDS,
+  });
+  const rateLimitLogin = createRateLimitMiddleware({
+    route: 'auth-sessions',
+    limiter: rateLimiter,
+    maxRequests: LOGIN_RATE_LIMIT_MAX_REQUESTS,
+    windowSeconds: LOGIN_RATE_LIMIT_WINDOW_SECONDS,
+  });
+  // UN SEUL middleware, PARTAGE par les TROIS routes MFA (ADR-0010 §8 : "un middleware de
+  // limitation partage, applique aux cinq routes de cette ADR, jamais une politique par route") —
+  // meme instance montee trois fois dans server.ts, jamais trois middlewares distincts.
+  const rateLimitMfa = createRateLimitMiddleware({
+    route: 'mfa',
+    limiter: rateLimiter,
+    maxRequests: MFA_ROUTES_RATE_LIMIT_MAX_REQUESTS,
+    windowSeconds: MFA_ROUTES_RATE_LIMIT_WINDOW_SECONDS,
+  });
+
   let outboxRelayJob: PeriodicJobHandle | undefined;
   let subscriptionRenewalJob: PeriodicJobHandle | undefined;
   let paymentReconciliationJob: PeriodicJobHandle | undefined;
@@ -789,6 +866,12 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
     presentation: {
       requireAuthenticatedContext,
       auditEntryController,
+      registrationController,
+      sessionController,
+      mfaEnrollmentController,
+      rateLimitRegistrations,
+      rateLimitLogin,
+      rateLimitMfa,
     },
     startBackgroundJobs(): void {
       // `autorun: false` a la construction (voir OutboxWorker.ts) : demarre explicitement ici,

@@ -1,15 +1,14 @@
 import http from 'node:http';
 import express from 'express';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createErrorHandler } from '../../src/server.js';
+import { asyncRoute, createErrorHandler } from '../../src/server.js';
 
 /**
  * `createErrorHandler` (src/server.ts) exerce SANS `CompositionRoot` complet : c'est tout son
- * interet (voir le commentaire au-dessus de sa definition). Aucune route JSON reelle n'existe
- * encore dans `createApp()` a cette etape (le webhook de paiement est volontairement monte AVANT
- * `express.json()`, voir server.ts) — une route de test minimale ad hoc est donc necessaire ici
- * pour declencher une erreur de parsing `body-parser` dans les memes conditions qu'une future
- * route JSON reelle.
+ * interet (voir le commentaire au-dessus de sa definition). Une route de test minimale ad hoc est
+ * utilisee ici plutot qu'un `CompositionRoot` complet pour rester isolee des dependances
+ * applicatives — les vraies routes JSON de `createApp()` (ADR-0010) montent desormais
+ * `express.json()` PAR ROUTE, apres le limiteur de debit, jamais globalement (voir server.ts).
  *
  * `supertest` n'est PAS une dependance de ce depot (verifie dans package.json) : utilise
  * `node:http` directement plutot que d'ajouter une nouvelle dependance sans decision explicite.
@@ -23,6 +22,18 @@ describe('createErrorHandler (server.ts) — pas de fuite de detail interne', ()
   app.get('/test/boom', () => {
     throw new Error('secret-internal-detail-jamais-expose');
   });
+  // Exerce SPECIFIQUEMENT `asyncRoute` (BLOQUANT-1, revue de securite independante de l'etape
+  // 12/13) : sans elle, ce handler `async` qui rejette laisserait la requete SANS AUCUNE reponse
+  // (Express 4 ne rattrape pas les rejets de promesse) — le test ci-dessous echouerait par
+  // timeout plutot que par une assertion de statut, exactement comme reproduit en execution reelle
+  // sur le rejeu d'un code de recuperation MFA deja consomme.
+  app.get(
+    '/test/boom-async',
+    asyncRoute(async () => {
+      await Promise.resolve();
+      throw new Error('secret-async-jamais-expose');
+    }),
+  );
   app.use(createErrorHandler(fakeLogger));
 
   let server: http.Server;
@@ -77,12 +88,12 @@ describe('createErrorHandler (server.ts) — pas de fuite de detail interne', ()
     expect(JSON.parse(response.body)).toEqual({ received: { hello: 'dakar' } });
   });
 
-  it('POST JSON malforme -> 400, corps { error: "invalid_request_body" }, aucune stack trace ni message d_erreur brut', async () => {
+  it('POST JSON malforme -> 400, corps { error: "invalid_request" } (SimpleError, ADR-0010 §5/§9 — non-regression du correctif "invalid_request_body" n_existait pas dans l_enumeration), aucune stack trace ni message d_erreur brut', async () => {
     const response = await post('/test/echo', '{ceci n est pas du json valide');
 
     expect(response.status).toBe(400);
     const parsed: unknown = JSON.parse(response.body);
-    expect(parsed).toEqual({ error: 'invalid_request_body' });
+    expect(parsed).toEqual({ error: 'invalid_request' });
     expect(response.body).not.toContain('SyntaxError');
     expect(response.body).not.toContain('at ');
   });
@@ -94,5 +105,14 @@ describe('createErrorHandler (server.ts) — pas de fuite de detail interne', ()
     const parsed: unknown = JSON.parse(response.body);
     expect(parsed).toEqual({ error: 'internal_error' });
     expect(response.body).not.toContain('secret-internal-detail-jamais-expose');
+  });
+
+  it('handler async qui REJETTE (via asyncRoute) -> 500, corps { error: "internal_error" }, jamais un timeout ni un message brut (non-regression BLOQUANT-1)', async () => {
+    const response = await get('/test/boom-async');
+
+    expect(response.status).toBe(500);
+    const parsed: unknown = JSON.parse(response.body);
+    expect(parsed).toEqual({ error: 'internal_error' });
+    expect(response.body).not.toContain('secret-async-jamais-expose');
   });
 });

@@ -640,6 +640,12 @@ model MfaEnrollment {
   activeSecret              String?             @map("active_secret")
   pendingSecret             String?             @map("pending_secret")
   lastAcceptedTimeStep      Int?                @map("last_accepted_time_step")
+  /// Distinct de `lastAcceptedTimeStep` (pose UNIQUEMENT par `confirmEnrollment`, jamais lu par
+  /// `registerSuccessfulChallenge`) — decouple l'anti-rejeu du CHALLENGE de connexion de celui de
+  /// la CONFIRMATION d'enrolement (revue de securite independante de l'etape 12/13, AC-1 : sans
+  /// ce champ, confirmer l'enrolement puis se connecter dans la MEME fenetre TOTP de 30s rejetait
+  /// a tort le premier challenge comme "code deja utilise").
+  lastAcceptedChallengeTimeStep Int?             @map("last_accepted_challenge_time_step")
   consecutiveFailedAttempts Int                 @default(0) @map("consecutive_failed_attempts")
   lockedUntil               DateTime?           @map("locked_until")
   activatedAt               DateTime?           @map("activated_at")

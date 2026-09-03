@@ -110,12 +110,26 @@ describe('MfaEnrollment', () => {
     expect(mustFail(result)).toBe('ENROLLMENT_ALREADY_ACTIVE');
   });
 
-  describe('registerSuccessfulChallenge — anti-rejeu', () => {
-    it('refuse un pas de temps deja accepte ou anterieur (CODE_ALREADY_USED)', () => {
+  describe('registerSuccessfulChallenge — anti-rejeu (decouple de confirmEnrollment, AC-1)', () => {
+    it("le PREMIER challenge peut reutiliser le MEME pas de temps que celui de la confirmation d'enrolement — confirmation et challenge ne partagent plus le meme compteur", () => {
       const clock = new FixedClock('2026-08-26T10:00:00Z');
       const idGenerator = new SequentialIdGenerator();
       const enrollment = startEnrollment(clock, idGenerator);
       enrollment.confirmEnrollment({ timeStep: 10, recoveryCodes: [recoveryHash(1)], clock, idGenerator });
+      expect(enrollment.lastAcceptedTimeStep).toBe(10);
+
+      const firstChallenge = enrollment.registerSuccessfulChallenge({ timeStep: 10, clock });
+      expect(firstChallenge.isSuccess()).toBe(true);
+      expect(enrollment.lastAcceptedChallengeTimeStep).toBe(10);
+    });
+
+    it('refuse un pas de temps deja accepte ou anterieur PAR UN CHALLENGE PRECEDENT (CODE_ALREADY_USED)', () => {
+      const clock = new FixedClock('2026-08-26T10:00:00Z');
+      const idGenerator = new SequentialIdGenerator();
+      const enrollment = startEnrollment(clock, idGenerator);
+      enrollment.confirmEnrollment({ timeStep: 1, recoveryCodes: [recoveryHash(1)], clock, idGenerator });
+      const firstChallenge = enrollment.registerSuccessfulChallenge({ timeStep: 10, clock });
+      expect(firstChallenge.isSuccess()).toBe(true);
 
       const replaySame = enrollment.registerSuccessfulChallenge({ timeStep: 10, clock });
       expect(mustFail(replaySame)).toBe('CODE_ALREADY_USED');
@@ -125,7 +139,7 @@ describe('MfaEnrollment', () => {
 
       const accepted = enrollment.registerSuccessfulChallenge({ timeStep: 11, clock });
       expect(accepted.isSuccess()).toBe(true);
-      expect(enrollment.lastAcceptedTimeStep).toBe(11);
+      expect(enrollment.lastAcceptedChallengeTimeStep).toBe(11);
     });
   });
 

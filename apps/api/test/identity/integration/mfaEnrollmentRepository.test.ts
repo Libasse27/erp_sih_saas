@@ -10,10 +10,8 @@ import { Email } from '../../../src/modules/identity/domain/value-objects/Email.
 import { PasswordHash } from '../../../src/modules/identity/domain/value-objects/PasswordHash.js';
 import { EncryptedTotpSecret } from '../../../src/modules/identity/domain/value-objects/EncryptedTotpSecret.js';
 import { RecoveryCodeHash } from '../../../src/modules/identity/domain/value-objects/RecoveryCodeHash.js';
-import {
-  MfaEnrollmentConcurrencyConflictError,
-  PrismaMfaEnrollmentRepository,
-} from '../../../src/modules/identity/infrastructure/persistence/PrismaMfaEnrollmentRepository.js';
+import { MfaEnrollmentConcurrencyConflictError } from '../../../src/modules/identity/domain/ports/MfaEnrollmentRepository.js';
+import { PrismaMfaEnrollmentRepository } from '../../../src/modules/identity/infrastructure/persistence/PrismaMfaEnrollmentRepository.js';
 import { PrismaUserAccountRepository } from '../../../src/modules/identity/infrastructure/persistence/PrismaUserAccountRepository.js';
 import { createRawPgClient, createTestPrismaClient, uniqueEmail } from './dbTestHelpers.js';
 
@@ -154,5 +152,44 @@ describe('PrismaMfaEnrollmentRepository — integration Postgres reelle', () => 
 
     const finalState = await mfaEnrollments.findByUserId(account.id);
     expect(finalState?.recoveryCodes.filter((c) => c.isConsumed())).toHaveLength(1);
+  });
+
+  it('deux PREMIERS enrolements CONCURRENTS du MEME utilisateur (aucune ligne prealable, rien a verrouiller par FOR UPDATE) : un seul succes, l_autre echoue proprement (MfaEnrollmentConcurrencyConflictError), jamais une exception non geree (revue de securite independante de l_etape 12/13, BLOQUANT-2b)', async () => {
+    const account = await createAccount();
+    const clock = new SystemClock();
+    const idGenerator = new UuidGenerator();
+
+    // Deux instances DISTINCTES (id d'agregat different) pour le MEME `userId` — exactement le
+    // scenario de `StartMfaEnrollmentHandler` quand `findByUserIdForUpdate` ne trouve encore
+    // AUCUNE ligne (rien a verrouiller avant qu'elle existe) : les deux "requetes" voient toutes
+    // deux `existing === null` et construisent chacune un `MfaEnrollment.start()` frais.
+    const attempt = async (): Promise<'OK' | 'CONFLICT'> => {
+      const uow = new PgUnitOfWork(prisma);
+      const enrollment = MfaEnrollment.start({
+        userId: account.id,
+        pendingSecret: EncryptedTotpSecret.create('v1.k1.iv.tag.cipher').getValue(),
+        clock,
+        idGenerator,
+      });
+      try {
+        await uow.withTransaction(async () => {
+          await mfaEnrollments.save(enrollment);
+        });
+        return 'OK';
+      } catch (error) {
+        if (error instanceof MfaEnrollmentConcurrencyConflictError) {
+          return 'CONFLICT';
+        }
+        throw error;
+      }
+    };
+
+    const [first, second] = await Promise.all([attempt(), attempt()]);
+    const outcomes = [first, second];
+    expect(outcomes.filter((o) => o === 'OK')).toHaveLength(1);
+    expect(outcomes.filter((o) => o === 'CONFLICT')).toHaveLength(1);
+
+    const finalState = await mfaEnrollments.findByUserId(account.id);
+    expect(finalState).not.toBeNull();
   });
 });

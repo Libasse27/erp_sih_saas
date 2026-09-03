@@ -82,7 +82,10 @@ de [01](01-target-architecture.md)), pas le reste du module.
   vérification de quota
 - Module **Paiement SaaS** derrière ACL, avec états `réussi / échoué / en attente / annulé /
   expiré / renouvelé` (§5)
-- **Saga de provisioning d'établissement** avec compensations (§6.3 de [01](01-target-architecture.md))
+- **Saga de provisioning d'établissement** par chorégraphie Outbox, **retry-jusqu'à-complétion et
+  idempotente, sans compensation destructive** (§6.3 de [01](01-target-architecture.md), tel que
+  tranché par [ADR-0008](adr/0008-saga-provisioning-etablissement.md) §4/§5 : un tenant
+  partiellement provisionné reste **inaccessible mais intact**, jamais démonté ni supprimé — O-03.1)
 - Module **Audit** append-only
 - Module **Notifications**, canaux email + SMS (O-07 ; fournisseur SMS et calendrier des
   rappels d'impayé restant à fixer avant la fin de la phase)
@@ -94,8 +97,19 @@ de [01](01-target-architecture.md)), pas le reste du module.
 **Critères de sortie spécifiques**
 - Test de non-fuite inter-tenant au vert sur **tous** les agrégats du SaaS Core
 - RLS PostgreSQL actif et vérifié par un test qui contourne délibérément la couche applicative
-- E2E : inscription → paiement → provisioning → connexion → onboarding, **et** les chemins
-  d'échec de paiement avec compensation effective
+- E2E : inscription → paiement → provisioning → connexion → onboarding, **et** non-régression du
+  comportement d'impayé **post-provisioning** (période de grâce → mode dégradé), déjà couvert par
+  les tests `Subscription` existants
+
+  > **Superseded par [ADR-0008](adr/0008-saga-provisioning-etablissement.md)** (Accepté) pour cette
+  > étape : le libellé initial de ce critère exigeait « les chemins d'échec de paiement avec
+  > **compensation effective** ». ADR-0008 §1 a retenu un provisioning **trial-first** — aucun
+  > paiement n'intervient dans la Saga d'inscription — et ADR-0008 §5 a remplacé la compensation
+  > destructive par un **retry-jusqu'à-complétion non destructif**. Il n'existe donc **aucun
+  > mécanisme de compensation du provisioning** à prouver ; ce qui doit l'être est (a) qu'un
+  > provisioning interrompu laisse le tenant inaccessible et intact, puis se complète à la reprise
+  > (tests d'ADR-0008), et (b) que l'impayé **après** provisioning conduit bien à la période de
+  > grâce puis au mode dégradé.
 - Test prouvant qu'un client transmettant un `tenantId` ou un rôle forgé est ignoré et audité
 - Le frontend ne contient **aucun** forfait ni permission codé en dur
 - ADR-0001 et ADR-0002 statués « Accepté »

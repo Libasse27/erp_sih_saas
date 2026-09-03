@@ -10,10 +10,31 @@ import {
   SequentialIdGenerator,
 } from '../../../../../test/identity/builders/testKit.js';
 import { UserAccount } from '../../domain/UserAccount.js';
+import type { MfaEnrollment } from '../../domain/MfaEnrollment.js';
+import { MfaEnrollmentConcurrencyConflictError } from '../../domain/ports/MfaEnrollmentRepository.js';
 import { Email } from '../../domain/value-objects/Email.js';
 import { PasswordHash } from '../../domain/value-objects/PasswordHash.js';
 import type { MfaPendingSessionContext, TenantSessionContext } from '../ports/SessionStore.js';
 import { StartMfaEnrollmentHandler } from './StartMfaEnrollment.js';
+
+/**
+ * Double qui simule EXACTEMENT ce que `PrismaMfaEnrollmentRepository.save()` fait sur une
+ * violation de la contrainte UNIQUE `userId` lors d'un TOUT PREMIER enrolement concurrent (revue
+ * de securite independante de l'etape 12/13, BLOQUANT-2b/AC-F) : la premiere ecriture pour un
+ * `userId` donne echoue avec `MfaEnrollmentConcurrencyConflictError`, comme si un AUTRE writer
+ * venait de gagner la course. Delegue ensuite normalement (une seule injection de panne).
+ */
+class ConflictOnFirstSaveMfaEnrollmentRepository extends InMemoryMfaEnrollmentRepository {
+  private hasThrown = false;
+
+  override async save(enrollment: MfaEnrollment): Promise<void> {
+    if (!this.hasThrown) {
+      this.hasThrown = true;
+      throw new MfaEnrollmentConcurrencyConflictError('injection de test : course concurrente simulee sur le premier enrolement');
+    }
+    await super.save(enrollment);
+  }
+}
 
 describe('StartMfaEnrollmentHandler', () => {
   let accounts: InMemoryUserAccountRepository;
@@ -157,6 +178,28 @@ describe('StartMfaEnrollmentHandler', () => {
     const second = await handler.execute({ sessionId: secondSessionId });
     expect(second.isFailure()).toBe(true);
     expect(second.getError()).toBe('ENROLLMENT_ALREADY_ACTIVE_AND_NOT_REPLACEABLE');
+    expect(auditTrail.records.at(-1)).toMatchObject({ eventType: 'MFA_ENROLLMENT_STARTED', outcome: 'FAILURE' });
+  });
+
+  it('course concurrente sur le TOUT PREMIER enrolement (MfaEnrollmentConcurrencyConflictError depuis save()) -> ENROLLMENT_ALREADY_ACTIVE_AND_NOT_REPLACEABLE, audite en FAILURE, jamais une exception non geree (BLOQUANT-2b)', async () => {
+    const conflictingRepository = new ConflictOnFirstSaveMfaEnrollmentRepository();
+    const conflictHandler = new StartMfaEnrollmentHandler(
+      sessions,
+      accounts,
+      conflictingRepository,
+      totpService,
+      auditTrail,
+      new InMemoryUnitOfWork(),
+      clock,
+      idGenerator,
+    );
+    const account = await registerAccount();
+    const sessionId = await seedPendingEnrollmentSession(account.id.toString());
+
+    const result = await conflictHandler.execute({ sessionId });
+
+    expect(result.isFailure()).toBe(true);
+    expect(result.getError()).toBe('ENROLLMENT_ALREADY_ACTIVE_AND_NOT_REPLACEABLE');
     expect(auditTrail.records.at(-1)).toMatchObject({ eventType: 'MFA_ENROLLMENT_STARTED', outcome: 'FAILURE' });
   });
 

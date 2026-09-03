@@ -28,6 +28,15 @@ interface MfaEnrollmentProps {
   pendingSecret: EncryptedTotpSecret | null;
   recoveryCodes: MfaRecoveryCode[];
   lastAcceptedTimeStep: number | null;
+  /**
+   * DISTINCT de `lastAcceptedTimeStep` (pose UNIQUEMENT par `confirmEnrollment`, jamais lu par
+   * `registerSuccessfulChallenge`) — decouple l'anti-rejeu du CHALLENGE de connexion de celui de
+   * la CONFIRMATION d'enrolement. Revue de securite independante de l'etape 12/13, finding AC-1 :
+   * sans ce champ separe, confirmer l'enrolement PUIS se connecter dans la MEME fenetre TOTP de
+   * 30s rejetait a tort le premier challenge comme "code deja utilise", cassant le parcours
+   * nominal (register -> mfa_required -> enroll -> confirm -> login/challenge -> session).
+   */
+  lastAcceptedChallengeTimeStep: number | null;
   consecutiveFailedAttempts: number;
   lockedUntil: Date | null;
   activatedAt: Date | null;
@@ -85,6 +94,7 @@ export class MfaEnrollment extends AggregateRoot<MfaEnrollmentId> {
       pendingSecret: params.pendingSecret,
       recoveryCodes: [],
       lastAcceptedTimeStep: null,
+      lastAcceptedChallengeTimeStep: null,
       consecutiveFailedAttempts: 0,
       lockedUntil: null,
       activatedAt: null,
@@ -175,14 +185,19 @@ export class MfaEnrollment extends AggregateRoot<MfaEnrollmentId> {
 
   /**
    * Enregistre un code TOTP valide (deja verifie cote application). Refuse le REJEU d'un pas de
-   * temps deja accepte ou anterieur (`lastAcceptedTimeStep`) — anti-rejeu structurel, independant
-   * de la fenetre de derive appliquee par `TotpService.verify()`.
+   * temps deja accepte ou anterieur PAR UN CHALLENGE PRECEDENT (`lastAcceptedChallengeTimeStep`)
+   * — anti-rejeu structurel, independant de la fenetre de derive appliquee par
+   * `TotpService.verify()`. Compteur DISTINCT de celui pose par `confirmEnrollment`
+   * (`lastAcceptedTimeStep`) : le premier challenge qui suit une confirmation peut reutiliser le
+   * MEME code/pas de temps que celui utilise pour confirmer (AC-1 — voir le commentaire de
+   * `lastAcceptedChallengeTimeStep` sur `MfaEnrollmentProps`), seul le rejeu ENTRE DEUX CHALLENGES
+   * reste bloque.
    */
   registerSuccessfulChallenge(params: { timeStep: number; clock: Clock }): Result<void, RegisterSuccessfulChallengeError> {
-    if (this.props.lastAcceptedTimeStep !== null && params.timeStep <= this.props.lastAcceptedTimeStep) {
+    if (this.props.lastAcceptedChallengeTimeStep !== null && params.timeStep <= this.props.lastAcceptedChallengeTimeStep) {
       return Result.failure('CODE_ALREADY_USED');
     }
-    this.props.lastAcceptedTimeStep = params.timeStep;
+    this.props.lastAcceptedChallengeTimeStep = params.timeStep;
     this.props.consecutiveFailedAttempts = 0;
     this.props.lockedUntil = null;
     this.props.updatedAt = params.clock.now();
@@ -292,6 +307,7 @@ export class MfaEnrollment extends AggregateRoot<MfaEnrollmentId> {
     this.props.pendingSecret = null;
     this.props.recoveryCodes = [];
     this.props.lastAcceptedTimeStep = null;
+    this.props.lastAcceptedChallengeTimeStep = null;
     this.props.consecutiveFailedAttempts = 0;
     this.props.lockedUntil = null;
     this.props.updatedAt = now;
@@ -357,6 +373,10 @@ export class MfaEnrollment extends AggregateRoot<MfaEnrollmentId> {
 
   get lastAcceptedTimeStep(): number | null {
     return this.props.lastAcceptedTimeStep;
+  }
+
+  get lastAcceptedChallengeTimeStep(): number | null {
+    return this.props.lastAcceptedChallengeTimeStep;
   }
 
   get consecutiveFailedAttempts(): number {

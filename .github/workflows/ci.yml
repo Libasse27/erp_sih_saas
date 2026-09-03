@@ -1,0 +1,104 @@
+name: CI
+
+# CI minimale — Phase 0, etape 12/13 (lacune C de l'audit de securite, docs/architecture/
+# 02-roadmap-migration.md §"Criteres de sortie communs"). Perimetre volontairement limite a
+# typecheck + lint + build + tests : preuve de non-regression pour l'etape 12, RIEN de plus.
+# SCA (npm audit), scan de secrets, SAST, deploiement et gate de couverture relevent
+# explicitement de l'etape 13 ("CI/CD et contrôles de conformité"), pas encore demarree — ne
+# pas dupliquer ce perimetre ici.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Un seul run actif a la fois par ref : annule un run obsolete si de nouveaux commits arrivent.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    # PostgreSQL/Redis reels (pas de mocks pour la persistance — regle du mandat) : memes images
+    # que docker-compose.yml a la racine du depot, memes identifiants de developpement (jamais
+    # utilises en production, voir apps/api/.env.example).
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sih
+          POSTGRES_PASSWORD: sih_dev_only
+          POSTGRES_DB: sih_dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sih -d sih_dev"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      NODE_ENV: test
+      # Role applicatif non-superuser/non-BYPASSRLS (cree par la migration
+      # 20260823173817_identity_rbac_app_role) — jamais le role superuser "sih" a l'execution,
+      # sans quoi le RLS PostgreSQL serait silencieusement inoperant (voir apps/api/.env.example).
+      DATABASE_URL: "postgresql://sih_app:sih_app_dev_only@localhost:5432/sih_dev?schema=public"
+      REDIS_URL: "redis://localhost:6379"
+      # Valeurs D'EXEMPLE DE DEVELOPPEMENT UNIQUEMENT (identiques a apps/api/.env.example) —
+      # `NODE_ENV=test` neutralise la denylist de config/env.ts qui les refuserait en
+      # production/staging. Aucun secret reel dans ce depot (regle §7.1 du mandat).
+      PAYMENT_PROVIDER_WEBHOOK_SECRET: "ci_only_sandbox_webhook_secret_not_for_prod_32c"
+      MFA_SECRET_ENCRYPTION_KEY: "ZGV2X29ubHlfbmV2ZXJfdXNlX3Byb2RfMzJieXRlcyE="
+      MFA_SECRET_ENCRYPTION_KEY_ID: "k1"
+      MFA_RECOVERY_CODE_PEPPER: "dev_only_never_use_in_prod_recovery_code_pepper_32c"
+      MFA_RECOVERY_CODE_PEPPER_ID: "p1"
+      MFA_TOTP_ISSUER: "SIH"
+      REFRESH_TOKEN_HASH_PEPPER: "dev_only_never_use_in_prod_refresh_token_pepper_32c"
+      REFRESH_TOKEN_HASH_PEPPER_ID: "p1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Build
+        run: pnpm build
+
+      - name: Apply database migrations (role superuser, DDL uniquement)
+        working-directory: apps/api
+        env:
+          DATABASE_URL: "postgresql://sih:sih_dev_only@localhost:5432/sih_dev?schema=public"
+        run: pnpm exec prisma migrate deploy
+
+      - name: Test (unitaire + integration, PostgreSQL/Redis reels)
+        run: pnpm test

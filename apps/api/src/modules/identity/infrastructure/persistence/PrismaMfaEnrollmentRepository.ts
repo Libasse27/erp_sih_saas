@@ -4,7 +4,7 @@ import { writeDomainEventsToOutbox } from '../../../../shared-kernel/infrastruct
 import { assertValid } from '../../../../shared-kernel/infrastructure/persistence/assertValid.js';
 import { MfaEnrollment } from '../../domain/MfaEnrollment.js';
 import { MfaRecoveryCode } from '../../domain/MfaRecoveryCode.js';
-import type { MfaEnrollmentRepository } from '../../domain/ports/MfaEnrollmentRepository.js';
+import { MfaEnrollmentConcurrencyConflictError, type MfaEnrollmentRepository } from '../../domain/ports/MfaEnrollmentRepository.js';
 import { EncryptedTotpSecret } from '../../domain/value-objects/EncryptedTotpSecret.js';
 import { MfaEnrollmentId } from '../../domain/value-objects/MfaEnrollmentId.js';
 import type { MfaEnrollmentStatus } from '../../domain/value-objects/MfaEnrollmentStatus.js';
@@ -12,13 +12,6 @@ import type { MfaFactorType } from '../../domain/value-objects/MfaFactorType.js'
 import { MfaRecoveryCodeId } from '../../domain/value-objects/MfaRecoveryCodeId.js';
 import { RecoveryCodeHash } from '../../domain/value-objects/RecoveryCodeHash.js';
 import { UserAccountId } from '../../domain/value-objects/UserAccountId.js';
-
-export class MfaEnrollmentConcurrencyConflictError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'MfaEnrollmentConcurrencyConflictError';
-  }
-}
 
 interface RecoveryCodeRow {
   id: string;
@@ -35,6 +28,7 @@ interface EnrollmentRow {
   activeSecret: string | null;
   pendingSecret: string | null;
   lastAcceptedTimeStep: number | null;
+  lastAcceptedChallengeTimeStep: number | null;
   consecutiveFailedAttempts: number;
   lockedUntil: Date | null;
   activatedAt: Date | null;
@@ -53,6 +47,7 @@ interface RawEnrollmentRow {
   activeSecret: string | null;
   pendingSecret: string | null;
   lastAcceptedTimeStep: number | null;
+  lastAcceptedChallengeTimeStep: number | null;
   consecutiveFailedAttempts: number;
   lockedUntil: Date | null;
   activatedAt: Date | null;
@@ -111,6 +106,7 @@ export class PrismaMfaEnrollmentRepository implements MfaEnrollmentRepository {
         "active_secret" AS "activeSecret",
         "pending_secret" AS "pendingSecret",
         "last_accepted_time_step" AS "lastAcceptedTimeStep",
+        "last_accepted_challenge_time_step" AS "lastAcceptedChallengeTimeStep",
         "consecutive_failed_attempts" AS "consecutiveFailedAttempts",
         "locked_until" AS "lockedUntil",
         "activated_at" AS "activatedAt",
@@ -136,23 +132,41 @@ export class PrismaMfaEnrollmentRepository implements MfaEnrollmentRepository {
     const existingRow = await client.mfaEnrollment.findUnique({ where: { id: idStr }, select: { id: true } });
 
     if (existingRow === null) {
-      await client.mfaEnrollment.create({
-        data: {
-          id: idStr,
-          userId: enrollment.userId.toString(),
-          status: enrollment.status,
-          factorType: enrollment.factorType,
-          activeSecret: enrollment.activeSecret?.value ?? null,
-          pendingSecret: enrollment.pendingSecret?.value ?? null,
-          lastAcceptedTimeStep: enrollment.lastAcceptedTimeStep,
-          consecutiveFailedAttempts: enrollment.consecutiveFailedAttempts,
-          lockedUntil: enrollment.lockedUntil,
-          activatedAt: enrollment.activatedAt,
-          createdAt: enrollment.createdAt,
-          updatedAt: enrollment.updatedAt,
-          version: 0,
-        },
+      // `createMany({ skipDuplicates: true })` PLUTOT qu'un `create()` dont on rattraperait un
+      // `P2002` — meme idiome que `PrismaUserAccountRepository.save()`/`PrismaSubscriptionRepository.save()` :
+      // cette methode est appelee DANS une transaction deja ouverte, et en PostgreSQL une
+      // violation de contrainte AVORTE la transaction entiere. `count === 0` signifie qu'un AUTRE
+      // writer vient de creer un `MfaEnrollment` pour ce MEME `userId` (contrainte UNIQUE) entre
+      // notre lecture (`findByUserId`/`findByUserIdForUpdate`, qui ne verrouille RIEN tant
+      // qu'aucune ligne n'existe) et notre ecriture — le tout premier enrolement d'un compte n'a
+      // structurellement aucune ligne a verrouiller par `FOR UPDATE` avant qu'elle existe (revue
+      // de securite independante de l'etape 12/13, BLOQUANT-2b).
+      const insertResult = await client.mfaEnrollment.createMany({
+        data: [
+          {
+            id: idStr,
+            userId: enrollment.userId.toString(),
+            status: enrollment.status,
+            factorType: enrollment.factorType,
+            activeSecret: enrollment.activeSecret?.value ?? null,
+            pendingSecret: enrollment.pendingSecret?.value ?? null,
+            lastAcceptedTimeStep: enrollment.lastAcceptedTimeStep,
+            lastAcceptedChallengeTimeStep: enrollment.lastAcceptedChallengeTimeStep,
+            consecutiveFailedAttempts: enrollment.consecutiveFailedAttempts,
+            lockedUntil: enrollment.lockedUntil,
+            activatedAt: enrollment.activatedAt,
+            createdAt: enrollment.createdAt,
+            updatedAt: enrollment.updatedAt,
+            version: 0,
+          },
+        ],
+        skipDuplicates: true,
       });
+      if (insertResult.count === 0) {
+        throw new MfaEnrollmentConcurrencyConflictError(
+          `Un MfaEnrollment existe deja pour l'utilisateur ${enrollment.userId.toString()} (course concurrente sur le premier enrolement).`,
+        );
+      }
       this.versionsByInstance.set(enrollment, 0);
     } else {
       const expectedVersion = this.versionsByInstance.get(enrollment) ?? 0;
@@ -163,6 +177,7 @@ export class PrismaMfaEnrollmentRepository implements MfaEnrollmentRepository {
           activeSecret: enrollment.activeSecret?.value ?? null,
           pendingSecret: enrollment.pendingSecret?.value ?? null,
           lastAcceptedTimeStep: enrollment.lastAcceptedTimeStep,
+          lastAcceptedChallengeTimeStep: enrollment.lastAcceptedChallengeTimeStep,
           consecutiveFailedAttempts: enrollment.consecutiveFailedAttempts,
           lockedUntil: enrollment.lockedUntil,
           activatedAt: enrollment.activatedAt,
@@ -214,9 +229,27 @@ export class PrismaMfaEnrollmentRepository implements MfaEnrollmentRepository {
         continue;
       }
       // Seul `consumedAt` peut changer apres creation (usage unique) — UPDATE conditionnel
-      // indexe (ADR-0005 §3) : `count === 0` signale qu'un AUTRE writer a deja consomme ce code
-      // de recuperation entre notre lecture et notre ecriture (course concurrente).
+      // indexe (ADR-0005 §3) : `count === 0` signale SOIT un AUTRE writer qui a deja consomme ce
+      // code entre notre lecture et notre ecriture (course concurrente REELLE), SOIT — cas trouve
+      // par execution reelle lors de la revue de l'etape 12/13 — un REJEU sequentiel (pas de
+      // concurrence) d'un code DEJA consomme AVANT le debut de cette transaction : l'agregat est
+      // alors charge avec ce code deja `isConsumed() === true`, `consumeRecoveryCode()` refuse au
+      // niveau domaine (`RECOVERY_CODE_ALREADY_CONSUMED`) SANS muter `consumedAt`, mais `save()`
+      // est quand meme appele (pour persister le compteur `registerFailedChallenge`) et retente
+      // inconditionnellement cette meme ecriture, qui ne peut plus matcher `consumedAt: null`.
+      //
+      // Distinction faite via `wasConsumedInThisInstance()` (drapeau TRANSIENT sur
+      // `MfaRecoveryCode`, jamais une comparaison d'horodatage — revue de securite independante
+      // de l'etape 12/13, AC-A) : comparer `current.consumedAt === code.consumedAt` masquerait a
+      // tort une VRAIE course entre deux writers dont les horloges tomberaient sur la MEME
+      // milliseconde (resolution `timestamp(3)`). Si CETTE instance n'a jamais mute ce code
+      // (rejeu sequentiel), `count === 0` est attendu et beninProof — rien a ecrire, rien a lever.
+      // Si CETTE instance vient de le consommer et que l'ecriture echoue quand meme, c'est qu'un
+      // AUTRE writer l'a fait avant nous : conflit reel, toujours leve.
       if (code.isConsumed()) {
+        if (!code.wasConsumedInThisInstance()) {
+          continue;
+        }
         const result = await client.mfaRecoveryCode.updateMany({
           where: { id: idStr, consumedAt: null },
           data: { consumedAt: code.consumedAt },
@@ -247,6 +280,7 @@ export class PrismaMfaEnrollmentRepository implements MfaEnrollmentRepository {
         }),
       ),
       lastAcceptedTimeStep: row.lastAcceptedTimeStep,
+      lastAcceptedChallengeTimeStep: row.lastAcceptedChallengeTimeStep,
       consecutiveFailedAttempts: row.consecutiveFailedAttempts,
       lockedUntil: row.lockedUntil,
       activatedAt: row.activatedAt,

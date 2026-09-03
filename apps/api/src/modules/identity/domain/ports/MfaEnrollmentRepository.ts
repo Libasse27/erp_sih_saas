@@ -2,6 +2,23 @@ import type { MfaEnrollment } from '../MfaEnrollment.js';
 import type { UserAccountId } from '../value-objects/UserAccountId.js';
 
 /**
+ * Levee par `save()` (implementation infrastructure) sur un conflit d'ecriture concurrente —
+ * verrouillage optimiste (colonne `version`) sur mise a jour, OU violation de la contrainte
+ * UNIQUE `userId` sur le TOUT PREMIER enrolement d'un compte (`findByUserIdForUpdate` ne verrouille
+ * rien tant qu'aucune ligne n'existe : deux `POST /auth/mfa/enrollment` simultanes avec le meme
+ * `Bearer` peuvent tous deux voir `existing === null`, revue de securite independante de l'etape
+ * 12/13, BLOQUANT-2b). Declaree ICI (port, domaine) plutot que dans l'implementation
+ * infrastructure : c'est le seul moyen pour les handlers applicatifs de la rattraper sans
+ * importer `infrastructure/` (regle de dependance des couches, 01-target-architecture.md §5).
+ */
+export class MfaEnrollmentConcurrencyConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MfaEnrollmentConcurrencyConflictError';
+  }
+}
+
+/**
  * Port de persistance de `MfaEnrollment` — schema `platform`, hors RLS (voir MfaEnrollment.ts,
  * ADR-0005 §1 : meme regime que `UserAccountRepository`, aucune methode ne prend de `tenantId`).
  * Au plus une ligne par utilisateur (`findByUserId`) : jamais de liste, jamais de recherche par
