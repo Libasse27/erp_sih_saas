@@ -85,6 +85,15 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Aucun postinstall/prepare ne genere le client Prisma dans ce depot (verifie :
+      # apps/api/package.json et le package.json racine n'en declarent aucun) -- sans cette etape,
+      # `Prisma.<Model>WhereInput`/`Prisma.InputJsonValue` et les types de modele sont absents sur
+      # un checkout propre, ce qui fait echouer le typecheck (et potentiellement le build) sur des
+      # modules sans rapport avec le changement en cours.
+      - name: Generate Prisma Client
+        working-directory: apps/api
+        run: pnpm exec prisma generate
+
       - name: Typecheck
         run: pnpm typecheck
 
