@@ -13,12 +13,20 @@ import { seedPlanCatalog } from '../../../src/modules/subscription/infrastructur
 import { createRawPgClient, createTestPrismaClient, uniqueTenantId } from './dbTestHelpers.js';
 
 /**
- * Adversarial : deux `Subscription` DISTINCTS (deux `id` differents) forces sur le MEME tenant —
- * simule un double-clic sur "demarrer l'essai gratuit" ou un retry client apres timeout reseau
- * (StartTrialSubscriptionHandler.execute() tourne entierement sous
- * unitOfWork.withTransaction(...), exactement comme ici). La contrainte UNIQUE `tenant_id`
- * (invariant "un tenant a exactement un abonnement actif a un instant donne") est la SEULE
- * barriere reelle.
+ * Garde-fou d'unicite concurrente : deux `Subscription` DISTINCTS (deux `id` differents, generes
+ * aleatoirement — jamais derives du `tenantId`) construits pour le MEME tenant, sauvegardes SOUS
+ * DE VRAIES TRANSACTIONS Postgres concurrentes (PgUnitOfWork.withTransaction, exactement comme
+ * StartTrialSubscriptionHandler.execute()).
+ *
+ * `PrismaSubscriptionRepository.save()` ne recoit et ne peut recevoir aucune information sur la
+ * PROVENANCE de l'appel (retry legitime de la Saga de provisioning, un autre appelant applicatif
+ * concurrent, deux workers Outbox sur le meme evenement, etc.) — seule la couche appelante
+ * (StartTrialSubscriptionHandler, via `findByTenantId` avant ecriture) porte cette distinction.
+ * Ce que CE repository garantit, et TOUT ce qu'il peut garantir avec les seules informations
+ * disponibles a son niveau, c'est l'invariant `UNIQUE(tenant_id)` : quelle que soit la source de
+ * la concurrence, deux ecritures concurrentes pour le meme tenant ne produisent JAMAIS deux lignes
+ * — le perdant de la course se voit renvoyer un succes idempotent (`fulfilled`), jamais une
+ * exception (voir le commentaire de `PrismaSubscriptionRepository.save()`).
  *
  * Pendant DIRECT de test/payment/integration/paymentProviderTransactionIdConcurrency.test.ts,
  * mais pour la branche CREATE de PrismaSubscriptionRepository.save() : les DEUX ecritures
@@ -34,7 +42,7 @@ import { createRawPgClient, createTestPrismaClient, uniqueTenantId } from './dbT
  * catalogue doit donc etre seede avant de construire un `Subscription`, meme pour ce test qui ne
  * s'interesse qu'a la contrainte UNIQUE sur `tenant_id`.
  */
-describe('Subscription — deux agregats DISTINCTS forces sur le MEME tenant, sous transaction reelle (contrainte UNIQUE, adversarial)', () => {
+describe('Subscription — deux agregats DISTINCTS sur le MEME tenant, sous transaction reelle (garde-fou UNIQUE(tenant_id))', () => {
   let prisma: PrismaClient;
   let rawClient: Client;
   let subscriptionRepository: PrismaSubscriptionRepository;
@@ -59,7 +67,7 @@ describe('Subscription — deux agregats DISTINCTS forces sur le MEME tenant, so
   });
 
   it(
-    'un seul appel a save() (sous transaction reelle) gagne, le perdant recoit NOTRE erreur explicite (jamais un 25P02 Postgres brut)',
+    'deux appels concurrents a save() (sous transaction reelle) : les DEUX reussissent (idempotence cote appelant), une SEULE Subscription persistee pour le tenant',
     async () => {
       const clock = new SystemClock();
       const idGenerator = new UuidGenerator();
@@ -101,15 +109,15 @@ describe('Subscription — deux agregats DISTINCTS forces sur le MEME tenant, so
         uowB.withTransaction(() => subscriptionRepository.save(subscriptionB, tenant), { tenantId: tenant }),
       ]);
 
+      // 2 fulfilled ne signifie PAS 2 Subscription creees : le perdant de la course recoit un
+      // succes idempotent (voir PrismaSubscriptionRepository.save()), jamais une exception — ni la
+      // notre, ni un `25P02` Postgres brut qui signalerait une requete tentee dans une transaction
+      // deja avortee (bug reel corrige, voir docstring de describe() ci-dessus). La seule ligne
+      // persistee est verifiee juste apres : c'est ELLE, pas le statut des promesses, qui prouve
+      // l'invariant `UNIQUE(tenant_id)`.
       const outcomes = [resultA, resultB];
-      expect(outcomes.filter((o) => o.status === 'fulfilled')).toHaveLength(1);
-      const rejected = outcomes.filter((o): o is PromiseRejectedResult => o.status === 'rejected');
-      expect(rejected).toHaveLength(1);
-      // Le perdant doit recevoir NOTRE erreur explicite (anomalie reelle, deux id distincts),
-      // jamais une exception Postgres brute (`25P02`) qui signalerait que le rattrapage a tente
-      // une requete dans une transaction deja avortee.
-      expect(String(rejected[0]?.reason)).not.toMatch(/25P02|current transaction is aborted/);
-      expect(rejected[0]?.reason).toBeInstanceOf(Error);
+      expect(outcomes.filter((o) => o.status === 'fulfilled')).toHaveLength(2);
+      expect(outcomes.filter((o) => o.status === 'rejected')).toHaveLength(0);
 
       const rows = await rawClient.query('SELECT id FROM "platform"."Subscription" WHERE tenant_id = $1', [
         tenantIdValue,

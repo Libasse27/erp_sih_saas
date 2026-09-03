@@ -82,10 +82,20 @@ export class PrismaSubscriptionRepository implements SubscriptionRepository {
    * violation de contrainte AVORTE la transaction entiere — toute requete suivante, y compris la
    * relecture de la ligne en conflit, echouerait alors avec `25P02 current transaction is
    * aborted`. `count === 0` signifie qu'un AUTRE writer vient d'inserer une ligne pour ce MEME
-   * tenant (contrainte UNIQUE `tenant_id`, invariant "un tenant = un abonnement") : si c'est LA
-   * MEME ligne (meme `id`, course benigne), rien a refaire — le write etait idempotent et celui
-   * qui a gagne la course a deja ecrit ses propres evenements ; si c'est un `id` DIFFERENT, deux
-   * abonnements distincts pretendent au meme tenant — anomalie reelle, jamais masquee.
+   * tenant (contrainte UNIQUE `tenant_id`, invariant "un tenant = un abonnement").
+   *
+   * La relecture par `tenantId` NE COMPARE PLUS son `id` a celui de l'instance locale (regression
+   * corrigee, revue de securite independante de l'etape 12/13, concurrence reelle) : `id` est
+   * genere aleatoirement a CHAQUE instanciation du domaine (`Subscription.startTrial()` ->
+   * `idGenerator.generate()`, jamais derive du `tenantId`), donc deux workers concurrents qui
+   * demarrent legitimement le MEME essai pour le MEME tenant construisent chacun un `Subscription`
+   * avec un `id` DIFFERENT par construction — comparer les `id` faisait donc echouer
+   * SYSTEMATIQUEMENT la course benigne au lieu de la detecter. L'invariant reellement garanti par
+   * `UNIQUE(tenant_id)` est "un tenant = un abonnement", jamais "un tenant = un `id`
+   * d'abonnement precis" : la seule preuve requise est qu'UNE ligne existe pour ce tenant
+   * (`conflicting !== null`) — la base de donnees reste l'autorite finale sur l'invariant, ce
+   * repository ne fait plus que la consulter. `conflicting === null` (aucune ligne retrouvee alors
+   * que l'insertion a pourtant ete ignoree) reste la SEULE anomalie reelle, jamais masquee.
    *
    * Branche UPDATE : `updateMany({ where: { id, version: expectedVersion } })`, conditionnee sur la
    * version LUE par CETTE instance. `count === 0` alors que la ligne existe (verifie juste avant)
@@ -140,16 +150,17 @@ export class PrismaSubscriptionRepository implements SubscriptionRepository {
           where: { tenantId: tenantIdStr },
           select: { id: true },
         });
-        if (conflicting === null || conflicting.id !== idStr) {
-          // Soit l'insertion ignoree ne vient pas de la contrainte attendue, soit DEUX
-          // abonnements distincts pretendent au meme tenant (violation de l'invariant "un tenant
-          // = un abonnement") — dans les deux cas, incoherence reelle, jamais masquee.
+        if (conflicting === null) {
+          // L'insertion a ete ignoree (count === 0) mais aucune ligne n'existe pour ce tenant :
+          // l'insertion ignoree ne vient pas de la contrainte UNIQUE(tenant_id) attendue —
+          // incoherence reelle, jamais masquee.
           throw new Error(
-            `Subscription ${idStr} : insertion ignoree pour cause de conflit sur le tenant ${tenantIdStr}, mais aucune ligne coherente retrouvee (incoherence de contrainte ou deux abonnements distincts pour le meme tenant).`,
+            `Subscription ${idStr} : insertion ignoree pour cause de conflit sur le tenant ${tenantIdStr}, mais aucune ligne retrouvee pour ce tenant (incoherence de contrainte).`,
           );
         }
-        // Course benigne : un writer concurrent vient d'inserer EXACTEMENT cette ligne. Write
-        // idempotent, aucun evenement a rejouer ici (le gagnant a deja ecrit les siens).
+        // Course benigne : un writer concurrent a deja demarre l'abonnement de ce tenant (son
+        // `id`, forcement different du notre, n'a aucune importance — voir commentaire de methode).
+        // Write idempotent, aucun evenement a rejouer ici (le gagnant a deja ecrit les siens).
         return;
       }
       this.versionsByInstance.set(subscription, 0);
