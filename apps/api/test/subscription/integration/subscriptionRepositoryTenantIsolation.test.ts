@@ -135,6 +135,43 @@ describe('Subscription — isolation inter-tenant (schema platform, sans RLS)', 
       expect(result?.id.toString()).toBe(subscriptionBId);
       expect(result?.id.toString()).not.toBe(subscriptionAId);
     });
+
+    it(
+      "save(subscriptionA, tenantB) leve une erreur AVANT toute requete et ne modifie aucune ligne : garde applicative explicite " +
+        '(PrismaSubscriptionRepository.ts ~ligne 112), distincte du filtrage findById/findByTenantId ci-dessus',
+      async () => {
+        const tenantA = TenantId.create(tenantAId).getValue();
+        const tenantB = TenantId.create(tenantBId).getValue();
+        const subscriptionAInstance = await subscriptionRepository.findById(
+          SubscriptionId.create(subscriptionAId).getValue(),
+          tenantA,
+        );
+        if (subscriptionAInstance === null) {
+          throw new Error('subscriptionA introuvable avant la tentative (bug de test).');
+        }
+
+        // L'agregat releve reellement du tenant A (`subscriptionAInstance.tenantId`) ; seul le
+        // CONTEXTE d'appel pretend que c'est le tenant B — exactement le scenario que la garde
+        // `if (!subscription.tenantId.equals(tenantId)) throw` doit intercepter.
+        await expect(subscriptionRepository.save(subscriptionAInstance, tenantB)).rejects.toThrow(
+          "Tentative de sauvegarde d'un Subscription hors du tenant du contexte courant.",
+        );
+
+        const stillOwnedByTenantA = await subscriptionRepository.findById(
+          SubscriptionId.create(subscriptionAId).getValue(),
+          tenantA,
+        );
+        expect(stillOwnedByTenantA).not.toBeNull();
+        expect(stillOwnedByTenantA?.status).toBe(subscriptionAInstance.status);
+        expect(stillOwnedByTenantA?.planId.toString()).toBe(subscriptionAInstance.planId.toString());
+
+        const visibleFromTenantB = await subscriptionRepository.findById(
+          SubscriptionId.create(subscriptionAId).getValue(),
+          tenantB,
+        );
+        expect(visibleFromTenantB).toBeNull();
+      },
+    );
   });
 
   describe('ABSENCE DE RLS — contraste deliberement demontre (ADR-0001 §3.3)', () => {

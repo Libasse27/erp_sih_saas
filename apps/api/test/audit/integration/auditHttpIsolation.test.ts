@@ -5,6 +5,7 @@ import { buildCompositionRoot, type CompositionRoot } from '../../../src/composi
 import { createApp } from '../../../src/server.js';
 import { RedisSessionStore } from '../../../src/modules/identity/infrastructure/session/RedisSessionStore.js';
 import type { PlatformSessionContext, MfaPendingSessionContext, TenantSessionContext } from '../../../src/modules/identity/application/ports/SessionStore.js';
+import { TenantId } from '../../../src/shared-kernel/domain/value-objects/TenantId.js';
 
 /**
  * Isolation inter-tenant — niveau HTTP (ADR-0009 §10, troisieme et dernier des trois niveaux de
@@ -189,6 +190,39 @@ describe('GET /api/v1/audit-entries — isolation inter-tenant, niveau HTTP (ADR
     expect(response.body).not.toContain(tenantBId);
     expect(response.body).not.toContain(userBId);
   });
+
+  it(
+    "session A + ?tenantId=<B> (refus HTTP reel, sans court-circuiter le controleur) -> ecrit une entree " +
+      "AUDIT_TRAIL_QUERY_DENIED dans la chaine du tenant DE L'ACTEUR (A), JAMAIS dans celle du tenant VISE (B) " +
+      '(ADR-0009 §7/§10 — preuve bout-en-bout, complementaire de auditQueryIsolation.test.ts qui prouve la meme ' +
+      'garantie au niveau QUERY HANDLERS ; delta AVANT/APRES car un scenario precedent de ce meme fichier ecrit ' +
+      "deja une entree DENIED equivalente dans la chaine de A — ce test prouve que CET appel EN AJOUTE une, " +
+      'pas que la chaine est vide au depart)',
+    async () => {
+      const tenantA = TenantId.create(tenantAId).getValue();
+      const tenantB = TenantId.create(tenantBId).getValue();
+      const deniedFilter = { categories: ['AUDIT_ACCESS'] as const, eventTypes: ['AUDIT_TRAIL_QUERY_DENIED'] as const };
+
+      const beforeA = await root.audit.repositories.auditEntries.listForTenant(tenantA, deniedFilter, { cursor: null, limit: 200 });
+      const beforeB = await root.audit.repositories.auditEntries.listForTenant(tenantB, deniedFilter, { cursor: null, limit: 200 });
+
+      const response = await get(`/api/v1/audit-entries?tenantId=${tenantBId}`, bearer(sessionA));
+      expect(response.status).toBe(400);
+
+      const afterA = await root.audit.repositories.auditEntries.listForTenant(tenantA, deniedFilter, { cursor: null, limit: 200 });
+      expect(afterA.entries).toHaveLength(beforeA.entries.length + 1);
+      const beforeIds = new Set(beforeA.entries.map((entry) => entry.id.toString()));
+      const newEntry = afterA.entries.find((entry) => !beforeIds.has(entry.id.toString()));
+      expect(newEntry).toBeDefined();
+      expect(newEntry?.outcome).toBe('DENIED');
+      expect(newEntry?.actorUserId).toBe(userAId);
+      expect(newEntry?.tenantId).toBe(tenantAId);
+
+      // JAMAIS dans la chaine du tenant VISE (B) — l'incident n'a rien a voir avec B.
+      const afterB = await root.audit.repositories.auditEntries.listForTenant(tenantB, deniedFilter, { cursor: null, limit: 200 });
+      expect(afterB.entries).toHaveLength(beforeB.entries.length);
+    },
+  );
 
   it('session A + ?scope=tenant&tenantId=<B> -> 400, corps ne contenant AUCUNE donnee de B', async () => {
     const response = await get(`/api/v1/audit-entries?scope=tenant&tenantId=${tenantBId}`, bearer(sessionA));

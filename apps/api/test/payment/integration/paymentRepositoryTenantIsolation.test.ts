@@ -124,6 +124,33 @@ describe('Payment/PlatformInvoice — isolation inter-tenant (schema platform, s
       const result = await invoiceRepository.findById(PlatformInvoiceId.create(invoiceAId).getValue(), tenantA);
       expect(result?.id.toString()).toBe(invoiceAId);
     });
+
+    it(
+      "save(invoiceA, tenantB) leve une erreur AVANT toute requete et ne modifie aucune ligne : garde applicative explicite " +
+        '(PrismaPlatformInvoiceRepository.ts ~ligne 133)',
+      async () => {
+        const tenantA = TenantId.create(tenantAId).getValue();
+        const tenantB = TenantId.create(tenantBId).getValue();
+        const invoiceAInstance = await invoiceRepository.findById(PlatformInvoiceId.create(invoiceAId).getValue(), tenantA);
+        if (invoiceAInstance === null) {
+          throw new Error('invoiceA introuvable avant la tentative (bug de test).');
+        }
+
+        await expect(invoiceRepository.save(invoiceAInstance, tenantB)).rejects.toThrow(
+          "Tentative de sauvegarde d'une PlatformInvoice hors du tenant du contexte courant.",
+        );
+
+        const stillOwnedByTenantA = await invoiceRepository.findById(
+          PlatformInvoiceId.create(invoiceAId).getValue(),
+          tenantA,
+        );
+        expect(stillOwnedByTenantA).not.toBeNull();
+        expect(stillOwnedByTenantA?.status).toBe(invoiceAInstance.status);
+
+        const visibleFromTenantB = await invoiceRepository.findById(PlatformInvoiceId.create(invoiceAId).getValue(), tenantB);
+        expect(visibleFromTenantB).toBeNull();
+      },
+    );
   });
 
   describe('Payment', () => {
@@ -146,6 +173,30 @@ describe('Payment/PlatformInvoice — isolation inter-tenant (schema platform, s
         const result = await paymentRepository.findByProviderTransactionId(paymentA!.providerTransactionId);
         expect(result?.id.toString()).toBe(paymentAId);
         expect(result?.tenantId.toString()).toBe(tenantAId);
+      },
+    );
+
+    it(
+      "save(paymentA, tenantB) leve une erreur AVANT toute requete et ne modifie aucune ligne : garde applicative explicite " +
+        '(PrismaPaymentRepository.ts ~ligne 94)',
+      async () => {
+        const tenantA = TenantId.create(tenantAId).getValue();
+        const tenantB = TenantId.create(tenantBId).getValue();
+        const paymentAInstance = await paymentRepository.findById(PaymentId.create(paymentAId).getValue(), tenantA);
+        if (paymentAInstance === null) {
+          throw new Error('paymentA introuvable avant la tentative (bug de test).');
+        }
+
+        await expect(paymentRepository.save(paymentAInstance, tenantB)).rejects.toThrow(
+          "Tentative de sauvegarde d'un Payment hors du tenant du contexte courant.",
+        );
+
+        const stillOwnedByTenantA = await paymentRepository.findById(PaymentId.create(paymentAId).getValue(), tenantA);
+        expect(stillOwnedByTenantA).not.toBeNull();
+        expect(stillOwnedByTenantA?.status).toBe(paymentAInstance.status);
+
+        const visibleFromTenantB = await paymentRepository.findById(PaymentId.create(paymentAId).getValue(), tenantB);
+        expect(visibleFromTenantB).toBeNull();
       },
     );
   });

@@ -1,7 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import type { Client } from 'pg';
+import type { PrismaClient } from '@prisma/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createRawPgClient } from './dbTestHelpers.js';
+import { SystemClock } from '../../../src/shared-kernel/infrastructure/SystemClock.js';
+import { UuidGenerator } from '../../../src/shared-kernel/infrastructure/UuidGenerator.js';
+import { TenantId } from '../../../src/shared-kernel/domain/value-objects/TenantId.js';
+import { HealthFacility } from '../../../src/modules/tenant/domain/HealthFacility.js';
+import { FacilityName } from '../../../src/modules/tenant/domain/value-objects/FacilityName.js';
+import { PrismaHealthFacilityRepository } from '../../../src/modules/tenant/infrastructure/persistence/PrismaHealthFacilityRepository.js';
+import { createRawPgClient, createTestPrismaClient, uniqueFacilityName } from './dbTestHelpers.js';
 
 /**
  * Test le plus important de cette etape (Phase 0, etape 3/13, critere de reussite declare) :
@@ -145,4 +152,60 @@ describe('RLS — isolation inter-tenant sur HealthFacility (contournement appli
     await client.query('DELETE FROM "HealthFacility" WHERE id = $1', [tenantC]);
     await client.query('COMMIT');
   });
+});
+
+/**
+ * Pendant applicatif du bloc RLS ci-dessus (etape 12/13, sweep d'isolation) : prouve la garde
+ * EXPLICITE `if (!facility.id.equals(tenantId)) throw` de `PrismaHealthFacilityRepository.save()`
+ * (~ligne 46) — une barriere DISTINCTE du RLS Postgres, qui intercepte AVANT toute requete une
+ * tentative d'ecrire un agregat du tenant A sous un contexte tenant B. Passe par le VRAI
+ * repository (pas de contournement SQL brut ici), a l'inverse du bloc ci-dessus.
+ */
+describe('HealthFacility — garde applicative de save() (contexte tenant errone)', () => {
+  let prisma: PrismaClient;
+  let client: Client;
+
+  beforeAll(async () => {
+    prisma = createTestPrismaClient();
+    client = await createRawPgClient();
+  });
+
+  afterAll(async () => {
+    await client.end();
+    await prisma.$disconnect();
+  });
+
+  it(
+    "save(facility, tenantB) leve une erreur AVANT toute requete et n'ecrit AUCUNE ligne : garde applicative " +
+      "explicite (id === tenantId pour cet agregat, voir HealthFacility.ts)",
+    async () => {
+      const repository = new PrismaHealthFacilityRepository(prisma);
+      const clock = new SystemClock();
+      const idGenerator = new UuidGenerator();
+      const facility = HealthFacility.create({
+        name: FacilityName.create(uniqueFacilityName('Etablissement garde tenant')).getValue(),
+        ownerUserId: randomUUID(),
+        clock,
+        idGenerator,
+      });
+      const rogueTenantId = TenantId.create(randomUUID()).getValue();
+
+      await expect(repository.save(facility, rogueTenantId)).rejects.toThrow(
+        "Tentative de sauvegarde d'un HealthFacility hors du tenant du contexte courant.",
+      );
+
+      // Verifie l'ABSENCE de ligne sous le VRAI tenant de l'agregat (`facility.id`, qui EST son
+      // tenantId) : la garde a agi avant toute requete, aucune ecriture n'a donc pu avoir lieu,
+      // ni sous le tenant fourni au contexte (rogueTenantId, refuse par le RLS de toute facon),
+      // ni sous le tenant reel de l'agregat.
+      await client.query('BEGIN');
+      try {
+        await client.query(`SELECT set_config('app.tenant_id', $1, true)`, [facility.id.toString()]);
+        const rows = await client.query('SELECT id FROM "HealthFacility" WHERE id = $1', [facility.id.toString()]);
+        expect(rows.rows).toHaveLength(0);
+      } finally {
+        await client.query('ROLLBACK');
+      }
+    },
+  );
 });

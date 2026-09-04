@@ -12,6 +12,8 @@ import { SuperAdminBreakGlassRequestId } from '../../../src/modules/identity/dom
 import { UserAccountId } from '../../../src/modules/identity/domain/value-objects/UserAccountId.js';
 import { EncryptedTotpSecret } from '../../../src/modules/identity/domain/value-objects/EncryptedTotpSecret.js';
 import { RecoveryCodeHash } from '../../../src/modules/identity/domain/value-objects/RecoveryCodeHash.js';
+import type { TenantSessionContext } from '../../../src/modules/identity/application/ports/SessionStore.js';
+import { postJson, postEmpty, bearer, startTestServer, type TestServerHandle } from '../../server/httpTestClient.js';
 import { createRawPgClient, uniqueEmail } from './dbTestHelpers.js';
 
 /**
@@ -181,6 +183,195 @@ describe('POST /api/v1/platform/super-admin/break-glass-requests/:requestId/appr
         [subjectAId.toString()],
       );
       expect(enrollmentRow.rows[0]?.status).toBe('RESET_REQUIRED');
+    },
+  );
+});
+
+/**
+ * Refus HTTP adversariaux, niveau ROUTE REELLE (ADR-0005 Amendement 1, O-04 residu 4, etape 12/13
+ * du sweep de securite) — deja couverts au niveau HANDLER par
+ * `ApproveSuperAdminBreakGlass.test.ts`/`RequestSuperAdminBreakGlass.test.ts` (unitaires), jamais
+ * exerces jusqu'ici via `requireAuthenticatedContext`/`express.json()`/le VRAI routage `server.ts`.
+ * Meme `CompositionRoot`/`createApp()` reel que le describe ci-dessus, `httpTestClient.ts`
+ * (memes conventions que `test/identity/integration/mfaSessionGate.test.ts`).
+ *
+ * Necessite `docker compose up -d` (PostgreSQL + Redis) et les migrations appliquees.
+ */
+describe('POST /api/v1/platform/super-admin/break-glass-requests(...) — refus HTTP adversariaux (ADR-0005 Amendement 1)', () => {
+  let root: CompositionRoot;
+  let handle: TestServerHandle;
+  let sessionStore: RedisSessionStore;
+  let rawClient: Client;
+
+  const tenantId = randomUUID();
+  const sessionTenant = randomUUID();
+  const sessionPlatformNoStepUp = randomUUID();
+  const sessionRequesterX = randomUUID();
+  const requesterXId = UserAccountId.create(randomUUID()).getValue();
+  const subjectOfSelfApprovalId = UserAccountId.create(randomUUID()).getValue();
+
+  let selfApprovalRequestId: string;
+
+  const REQUEST_PATH = '/api/v1/platform/super-admin/break-glass-requests';
+
+  beforeAll(async () => {
+    root = buildCompositionRoot();
+    const app = createApp(root);
+    handle = await startTestServer(app);
+
+    sessionStore = new RedisSessionStore(root.redis);
+    rawClient = await createRawPgClient();
+
+    const now = new Date();
+    const absoluteExpiresAt = new Date(now.getTime() + 60 * 60 * 1000).toISOString();
+
+    const tenantSession: TenantSessionContext = {
+      sessionId: sessionTenant,
+      kind: 'TENANT',
+      userId: randomUUID(),
+      tenantId,
+      membershipId: randomUUID(),
+      roleCodes: ['ADMIN_ETABLISSEMENT'],
+      permissionCodes: [],
+      requiresMfa: false,
+      mfaSatisfiedAt: null,
+      issuedAt: now.toISOString(),
+      sensitivityCategory: 'TENANT_STANDARD',
+      absoluteExpiresAt,
+    };
+    await sessionStore.create(tenantSession);
+
+    const platformSessionNoStepUp: PlatformSessionContext = {
+      sessionId: sessionPlatformNoStepUp,
+      kind: 'PLATFORM',
+      userId: randomUUID(),
+      requiresMfa: true,
+      mfaSatisfiedAt: null,
+      issuedAt: now.toISOString(),
+      sensitivityCategory: 'PLATFORM_SUPER_ADMIN',
+      absoluteExpiresAt,
+    };
+    await sessionStore.create(platformSessionNoStepUp);
+
+    const platformSessionRequesterX: PlatformSessionContext = {
+      sessionId: sessionRequesterX,
+      kind: 'PLATFORM',
+      userId: requesterXId.toString(),
+      requiresMfa: true,
+      mfaSatisfiedAt: now.toISOString(),
+      issuedAt: now.toISOString(),
+      sensitivityCategory: 'PLATFORM_SUPER_ADMIN',
+      absoluteExpiresAt,
+    };
+    await sessionStore.create(platformSessionRequesterX);
+
+    // Demande PENDING plantee, demandee PAR requesterX lui-meme (equivalent d'un appel deja
+    // reussi a RequestSuperAdminBreakGlassHandler) — ce describe cible UNIQUEMENT la tentative
+    // d'auto-approbation HTTP de CETTE meme demande par requesterX.
+    const requestIdResult = SuperAdminBreakGlassRequestId.create(root.idGenerator.generate());
+    if (requestIdResult.isFailure()) {
+      throw new Error('IdGenerator a produit un identifiant invalide (bug de test).');
+    }
+    const requestResult = SuperAdminBreakGlassRequest.request({
+      id: requestIdResult.getValue(),
+      requestedByUserId: requesterXId,
+      subjectUserAccountId: subjectOfSelfApprovalId,
+      reason: 'test adversarial : tentative d_auto-approbation par le demandeur lui-meme',
+      clock: root.clock,
+      idGenerator: root.idGenerator,
+    });
+    if (requestResult.isFailure()) {
+      throw new Error('Construction de la demande PENDING invalide (bug de test).');
+    }
+    await root.identity.repositories.superAdminBreakGlassRequests.save(requestResult.getValue());
+    selfApprovalRequestId = requestIdResult.getValue().toString();
+  });
+
+  afterAll(async () => {
+    await sessionStore.delete(sessionTenant);
+    await sessionStore.delete(sessionPlatformNoStepUp);
+    await sessionStore.delete(sessionRequesterX);
+    await rawClient.query('DELETE FROM "platform"."SuperAdminBreakGlassRequest" WHERE id = $1', [selfApprovalRequestId]);
+    await rawClient.end();
+    await handle.close();
+    await root.shutdown();
+  });
+
+  function approvalPath(requestId: string): string {
+    return `${REQUEST_PATH}/${requestId}/approval`;
+  }
+
+  it('POST creation de demande SANS en-tete Authorization -> 401', async () => {
+    const response = await postJson(handle.baseUrl, REQUEST_PATH, {
+      subjectUserAccountId: randomUUID(),
+      reason: 'motif suffisamment long pour passer la validation de forme',
+    });
+    expect(response.status).toBe(401);
+    expect(JSON.parse(response.body)).toEqual({ error: 'unauthenticated' });
+  });
+
+  it('POST approbation SANS en-tete Authorization -> 401', async () => {
+    const response = await postEmpty(handle.baseUrl, approvalPath(randomUUID()));
+    expect(response.status).toBe(401);
+    expect(JSON.parse(response.body)).toEqual({ error: 'unauthenticated' });
+  });
+
+  it('POST creation de demande avec une session TENANT (pas PLATFORM) -> 403 forbidden', async () => {
+    const response = await postJson(
+      handle.baseUrl,
+      REQUEST_PATH,
+      { subjectUserAccountId: randomUUID(), reason: 'motif suffisamment long pour passer la validation de forme' },
+      { headers: bearer(sessionTenant) },
+    );
+    expect(response.status).toBe(403);
+    expect(JSON.parse(response.body)).toEqual({ error: 'forbidden' });
+  });
+
+  it('POST approbation avec une session TENANT (pas PLATFORM) -> 403 forbidden', async () => {
+    const response = await postJson(handle.baseUrl, approvalPath(randomUUID()), {}, { headers: bearer(sessionTenant) });
+    expect(response.status).toBe(403);
+    expect(JSON.parse(response.body)).toEqual({ error: 'forbidden' });
+  });
+
+  it(
+    'POST creation de demande avec une session PLATFORM authentifiee mais SANS step-up MFA recent ' +
+      '(mfaSatisfiedAt: null) -> 403 forbidden (jamais un simple 401, la session existe et est PLATFORM)',
+    async () => {
+      const response = await postJson(
+        handle.baseUrl,
+        REQUEST_PATH,
+        { subjectUserAccountId: randomUUID(), reason: 'motif suffisamment long pour passer la validation de forme' },
+        { headers: bearer(sessionPlatformNoStepUp) },
+      );
+      expect(response.status).toBe(403);
+      expect(JSON.parse(response.body)).toEqual({ error: 'forbidden' });
+    },
+  );
+
+  it(
+    'POST approbation avec une session PLATFORM authentifiee mais SANS step-up MFA recent -> 403 forbidden',
+    async () => {
+      const response = await postJson(handle.baseUrl, approvalPath(randomUUID()), {}, { headers: bearer(sessionPlatformNoStepUp) });
+      expect(response.status).toBe(403);
+      expect(JSON.parse(response.body)).toEqual({ error: 'forbidden' });
+    },
+  );
+
+  it(
+    "tentative d'AUTO-APPROBATION (l'acteur qui approuve EST le demandeur de la demande PENDING) -> " +
+      "409 conflict (CANNOT_APPROVE_OWN_REQUEST, ApproverCannotBeRequesterError), JAMAIS un succes",
+    async () => {
+      const response = await postJson(handle.baseUrl, approvalPath(selfApprovalRequestId), {}, { headers: bearer(sessionRequesterX) });
+      expect(response.status).toBe(409);
+      expect(JSON.parse(response.body)).toEqual({ error: 'conflict' });
+
+      // La demande reste PENDING : l'auto-approbation n'a produit AUCUN effet de bord.
+      const row = await rawClient.query<{ status: string; approved_by_user_id: string | null }>(
+        'SELECT status, approved_by_user_id FROM "platform"."SuperAdminBreakGlassRequest" WHERE id = $1',
+        [selfApprovalRequestId],
+      );
+      expect(row.rows[0]?.status).toBe('PENDING');
+      expect(row.rows[0]?.approved_by_user_id).toBeNull();
     },
   );
 });

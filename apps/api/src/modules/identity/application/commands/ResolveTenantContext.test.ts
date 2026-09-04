@@ -211,6 +211,52 @@ describe('ResolveTenantContextHandler', () => {
     expect(result.getError()).toBe('MEMBERSHIP_NOT_FOUND_OR_INACTIVE');
   });
 
+  it(
+    "un tenantId FORGE (existant mais dont l'acteur n'est PAS membre) -> ecrit une entree " +
+      "SESSION_CONTEXT_DENIED portant l'ACTEUR reel (celui deja authentifie par AuthenticateUser) " +
+      'ET le tenant VISE forge, via le port SessionAuditTrail (ADR-0009 §2.1)',
+    async () => {
+      const account = await registerStandardUser();
+
+      const result = await handler.execute({
+        userId: account.id.toString(),
+        intent: { kind: 'TENANT', tenantId: TENANT_A.toString() },
+      });
+      expect(result.isFailure()).toBe(true);
+      expect(result.getError()).toBe('MEMBERSHIP_NOT_FOUND_OR_INACTIVE');
+
+      expect(sessionAuditTrail.records).toHaveLength(1);
+      const entry = sessionAuditTrail.records[0];
+      expect(entry?.eventType).toBe('SESSION_CONTEXT_DENIED');
+      expect(entry?.outcome).toBe('DENIED');
+      expect(entry?.actorKind).toBe('USER_TENANT');
+      expect(entry?.actorUserId).toBe(account.id.toString());
+      expect(entry?.subjectUserId).toBe(account.id.toString());
+      expect(entry?.tenantId).toBe(TENANT_A.toString());
+      expect(entry?.sessionId).toBeNull();
+    },
+  );
+
+  it(
+    "un intent PLATFORM force par un acteur NON SUPER_ADMIN -> ecrit aussi SESSION_CONTEXT_DENIED " +
+      '(tenantId null : aucun tenant vise, refus de contexte PLATEFORME)',
+    async () => {
+      const account = await registerStandardUser();
+
+      const result = await handler.execute({ userId: account.id.toString(), intent: { kind: 'PLATFORM' } });
+      expect(result.isFailure()).toBe(true);
+      expect(result.getError()).toBe('NOT_SUPER_ADMIN');
+
+      expect(sessionAuditTrail.records).toHaveLength(1);
+      const entry = sessionAuditTrail.records[0];
+      expect(entry?.eventType).toBe('SESSION_CONTEXT_DENIED');
+      expect(entry?.outcome).toBe('DENIED');
+      expect(entry?.actorKind).toBe('USER_PLATFORM');
+      expect(entry?.actorUserId).toBe(account.id.toString());
+      expect(entry?.tenantId).toBeNull();
+    },
+  );
+
   it('refuse un contexte pour un membership revoque', async () => {
     const account = await registerStandardUser();
     const membership = UserTenantMembership.grant({ userId: account.id, tenantId: TENANT_A, createdBy: account.id, initialRoleIds: [], clock, idGenerator });

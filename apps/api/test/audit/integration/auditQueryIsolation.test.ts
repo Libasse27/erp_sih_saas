@@ -2,7 +2,6 @@ import type { PrismaClient } from '@prisma/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { FixedClock } from '../../identity/builders/testKit.js';
 import { UuidGenerator } from '../../../src/shared-kernel/infrastructure/UuidGenerator.js';
-import { TenantId } from '../../../src/shared-kernel/domain/value-objects/TenantId.js';
 import { buildAuditModule, type AuditModule } from '../../../src/modules/audit/infrastructure/AuditModule.js';
 import type { AuditReadPrincipal } from '../../../src/modules/audit/application/AuditReadPrincipal.js';
 import { createTestPrismaClient, uniqueId } from './dbTestHelpers.js';
@@ -50,7 +49,10 @@ describe('Audit — isolation inter-tenant, niveau QUERY HANDLERS (ADR-0009 §7/
 
   it(
     "un principal TENANT de A demandant EXPLICITEMENT le tenant B -> Result.failure('FORBIDDEN') " +
-      "ET une entree AUDIT_TRAIL_QUERY_DENIED ecrite dans la chaine du tenant DE L'ACTEUR (A, jamais B)",
+      '(contrat du handler ; la preuve bout-en-bout que la couche de presentation ecrit bien ' +
+      "AUDIT_TRAIL_QUERY_DENIED dans la chaine de l'ACTEUR sur ce meme refus, via le VRAI controleur HTTP, " +
+      "SANS simulation, est apportee par auditHttpIsolation.test.ts (\"session A + ?tenantId=<B> (refus HTTP " +
+      'reel...)")',
     async () => {
       const principal = tenantPrincipal();
       const requestedScope = { kind: 'TENANT' as const, tenantId: tenantBId };
@@ -63,35 +65,6 @@ describe('Audit — isolation inter-tenant, niveau QUERY HANDLERS (ADR-0009 §7/
       });
       expect(result.isFailure()).toBe(true);
       expect(result.getError()).toBe('FORBIDDEN');
-
-      // Reproduit ce que fait la couche de presentation AVANT toute lecture (§7/§10) : la trace de
-      // consultation refusee est ecrite AVANT que le refus soit renvoye au client.
-      await audit.commands.recordAuditAccess.execute({
-        principal,
-        outcome: 'DENIED',
-        sessionId: 'session-a',
-        correlationId: null,
-      });
-
-      const tenantA = TenantId.create(tenantAId).getValue();
-      const chainA = await audit.repositories.auditEntries.listForTenant(
-        tenantA,
-        { categories: ['AUDIT_ACCESS'], eventTypes: ['AUDIT_TRAIL_QUERY_DENIED'] },
-        { cursor: null, limit: 50 },
-      );
-      expect(chainA.entries).toHaveLength(1);
-      expect(chainA.entries[0]?.outcome).toBe('DENIED');
-      expect(chainA.entries[0]?.actorUserId).toBe(actorAId);
-      expect(chainA.entries[0]?.tenantId).toBe(tenantAId);
-
-      // JAMAIS dans la chaine du tenant VISE (B) — l'incident n'a rien a voir avec B.
-      const tenantB = TenantId.create(tenantBId).getValue();
-      const chainB = await audit.repositories.auditEntries.listForTenant(
-        tenantB,
-        { categories: ['AUDIT_ACCESS'], eventTypes: ['AUDIT_TRAIL_QUERY_DENIED'] },
-        { cursor: null, limit: 50 },
-      );
-      expect(chainB.entries).toHaveLength(0);
     },
   );
 
