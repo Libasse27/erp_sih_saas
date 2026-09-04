@@ -17,7 +17,9 @@ export type MfaAuditEventType =
   | 'MFA_RECOVERY_CODES_EXHAUSTED'
   | 'MFA_RECOVERY_CODES_REGENERATED'
   | 'MFA_RE_ENROLLMENT_FORCED'
-  | 'MFA_FACTOR_LOCKED_OUT';
+  | 'MFA_FACTOR_LOCKED_OUT'
+  | 'SUPER_ADMIN_BREAK_GLASS_REQUESTED'
+  | 'SUPER_ADMIN_BREAK_GLASS_APPROVED';
 
 export interface AuditRecordInput {
   readonly eventType: MfaAuditEventType;
@@ -26,7 +28,7 @@ export interface AuditRecordInput {
   readonly subjectUserId: string;
   readonly actorUserId: string;
   readonly actorRoleCodes: readonly string[];
-  /** Texte libre — UNIQUEMENT pour `MFA_RE_ENROLLMENT_FORCED` (ADR-0005 §6) ; `null` sinon. */
+  /** Texte libre — UNIQUEMENT pour `MFA_RE_ENROLLMENT_FORCED` (ADR-0005 §6) et `SUPER_ADMIN_BREAK_GLASS_REQUESTED` (ADR-0005 Amendement 1) ; `null` sinon. */
   readonly reason: string | null;
   readonly sessionId: string | null;
   readonly correlationId: string | null;

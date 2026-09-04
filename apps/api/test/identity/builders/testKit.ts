@@ -37,6 +37,9 @@ import type { RefreshTokenHasher } from '../../../src/modules/identity/domain/po
 import { RefreshTokenHash } from '../../../src/modules/identity/domain/value-objects/RefreshTokenHash.js';
 import type { SessionAuditRecordInput, SessionAuditTrail } from '../../../src/modules/identity/application/ports/SessionAuditTrail.js';
 import { RefreshTokenIssuer } from '../../../src/modules/identity/application/services/RefreshTokenIssuer.js';
+import type { SuperAdminBreakGlassRequest } from '../../../src/modules/identity/domain/SuperAdminBreakGlassRequest.js';
+import type { SuperAdminBreakGlassRequestRepository } from '../../../src/modules/identity/domain/ports/SuperAdminBreakGlassRequestRepository.js';
+import type { SuperAdminBreakGlassRequestId } from '../../../src/modules/identity/domain/value-objects/SuperAdminBreakGlassRequestId.js';
 
 export class FixedClock implements Clock {
   private current: Date;
@@ -94,6 +97,10 @@ export class InMemoryUserAccountRepository implements UserAccountRepository {
 
   async save(account: UserAccount): Promise<void> {
     this.byId.set(account.id.toString(), account);
+  }
+
+  async findAllSuperAdmins(): Promise<readonly UserAccount[]> {
+    return [...this.byId.values()].filter((account) => account.isSuperAdmin());
   }
 }
 
@@ -450,6 +457,18 @@ export class InMemoryRefreshTokenRepository implements RefreshTokenRepository {
     }
   }
 
+  async purgeDead(now: Date, retentionSeconds: number): Promise<number> {
+    const cutoff = new Date(now.getTime() - retentionSeconds * 1000);
+    let deleted = 0;
+    for (const [id, token] of this.byId.entries()) {
+      if (token.absoluteExpiresAt < cutoff) {
+        this.byId.delete(id);
+        deleted += 1;
+      }
+    }
+    return deleted;
+  }
+
   all(): readonly RefreshToken[] {
     return [...this.byId.values()];
   }
@@ -500,6 +519,45 @@ export function buildTestRefreshTokenIssuer(overrides?: {
     overrides?.clock ?? new FixedClock('2026-08-28T00:00:00.000Z'),
     overrides?.idGenerator ?? new SequentialIdGenerator(),
   );
+}
+
+/**
+ * Fake en memoire de `SuperAdminBreakGlassRequestRepository` (ADR-0005 Amendement 1, O-04
+ * residu 4) — reproduit le MEME idiome que `PrismaSuperAdminBreakGlassRequestRepository.save()` :
+ * transition `PENDING -> APPROVED` refusee (retourne `false`, JAMAIS une exception) si la ligne
+ * n'est plus PENDING au moment de l'ecriture (quorum deja gagne par un autre approbateur) —
+ * mono-thread, donc jamais une VRAIE course (voir test/identity/integration pour la variante
+ * Postgres qui EXERCE la course reelle).
+ */
+export class InMemorySuperAdminBreakGlassRequestRepository implements SuperAdminBreakGlassRequestRepository {
+  private readonly byId = new Map<string, SuperAdminBreakGlassRequest>();
+  /**
+   * `findById()` retourne la MEME reference mutable que celle stockee (pas une copie deserialisee
+   * comme le ferait Prisma) : au moment ou `save()` est rappele apres une mutation en place
+   * (`request.approve()`), `request.status` a DEJA change — comparer directement contre l'objet
+   * stocke serait donc toujours vrai et rejetterait a tort la toute PREMIERE transition legitime.
+   * Ce drapeau, distinct de l'objet lui-meme, retient si une transition hors PENDING a DEJA ete
+   * persistee, pour reproduire fidelement `count === 0` de `PrismaSuperAdminBreakGlassRequestRepository`.
+   */
+  private readonly finalized = new Set<string>();
+
+  async save(request: SuperAdminBreakGlassRequest): Promise<boolean> {
+    const idStr = request.id.toString();
+    if (this.finalized.has(idStr)) {
+      request.pullDomainEvents();
+      return false;
+    }
+    request.pullDomainEvents();
+    this.byId.set(idStr, request);
+    if (request.status !== 'PENDING') {
+      this.finalized.add(idStr);
+    }
+    return true;
+  }
+
+  async findById(id: SuperAdminBreakGlassRequestId): Promise<SuperAdminBreakGlassRequest | null> {
+    return this.byId.get(id.toString()) ?? null;
+  }
 }
 
 export class InMemoryMfaBypassAttemptGuard implements MfaBypassAttemptGuard {

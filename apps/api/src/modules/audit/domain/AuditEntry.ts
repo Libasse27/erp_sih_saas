@@ -51,8 +51,9 @@ interface AuditEntryProps {
  * ADR-0005 §5, raisons 1-3 ; ADR-0009 §4).
  *
  * Refuse (leve, PAS un `Result.failure` : c'est un bug de l'appelant, pas un echec metier
- * attendu) l'absence de motif quand `eventType === 'MFA_RE_ENROLLMENT_FORCED'` ET
- * `outcome === 'SUCCESS'` — inchange depuis ADR-0005 §6/§Contexte.
+ * attendu) l'absence de motif quand `eventType` vaut `MFA_RE_ENROLLMENT_FORCED` OU
+ * `SUPER_ADMIN_BREAK_GLASS_REQUESTED` ET `outcome === 'SUCCESS'` — le second ajoute par ADR-0005
+ * Amendement 1, meme discipline que le premier (ADR-0005 §6/§Contexte).
  *
  * ADR-0009 §3 — DEUX invariants supplementaires, VERIFIES ICI EN PLUS de la contrainte `CHECK`
  * en base (doctrine des deux defenses independantes, jamais une seule) :
@@ -99,12 +100,12 @@ export class AuditEntry extends AggregateRoot<AuditEntryId> {
     sessionReferenceDeriver: AuditSessionReferenceDeriver;
   }): AuditEntry {
     if (
-      params.eventType === 'MFA_RE_ENROLLMENT_FORCED' &&
+      (params.eventType === 'MFA_RE_ENROLLMENT_FORCED' || params.eventType === 'SUPER_ADMIN_BREAK_GLASS_REQUESTED') &&
       params.outcome === 'SUCCESS' &&
       (params.reason === null || params.reason.trim().length === 0)
     ) {
       throw new Error(
-        'AuditEntry.record : motif obligatoire pour un MFA_RE_ENROLLMENT_FORCED en SUCCESS (bug appelant, pas un echec metier attendu).',
+        `AuditEntry.record : motif obligatoire pour un ${params.eventType} en SUCCESS (bug appelant, pas un echec metier attendu).`,
       );
     }
     if (params.actorKind === 'SYSTEM' && params.actorUserId !== null) {

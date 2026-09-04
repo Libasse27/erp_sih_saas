@@ -10,4 +10,13 @@
  */
 export interface RecipientDirectory {
   findTenantAdminEmails(tenantId: string): Promise<readonly string[]>;
+
+  /**
+   * Resout les emails des `SUPER_ADMIN` ACTIFS de la plateforme, a l'exclusion de `excludeUserId`
+   * (ADR-0005 Amendement 1, O-04 residu 4 — alerte break-glass) : l'auteur d'une action
+   * (demandeur B, approbateur C) ne se notifie jamais lui-meme sa propre action. Audience
+   * structurellement designee (le role plateforme `SUPER_ADMIN` lui-meme), jamais une politique de
+   * ciblage inventee — meme discipline que `findTenantAdminEmails` (ADR-0007 §4).
+   */
+  findActiveSuperAdminEmails(excludeUserId: string): Promise<readonly string[]>;
 }

@@ -1,11 +1,12 @@
 # ADR-0006 — Sessions avancées : refresh token à rotation, détection de réutilisation, expiration différenciée
 
-- **Statut** : **Proposé** — implémentation livrée et corrigée après revue de sécurité
-  indépendante (voir §"Corrections apportées après revue de sécurité indépendante"), valeurs
-  numériques de durée en résidu explicite (héritées d'O-06.1/O-06.2, non tranchées par cette ADR)
+- **Statut** : **Accepté** — implémentation livrée et corrigée après revue de sécurité
+  indépendante (voir §"Corrections apportées après revue de sécurité indépendante"). **Amendement 1
+  (2026-09-03)** : valeurs numériques O-06.1/O-06.2 tranchées par la Direction, AC-2 (contrôle
+  applicatif d'expiration) décidé — voir §"Amendement 1" ci-dessous.
 - **Date** : 2026-08-28
-- **Décideurs** : Architecture (proposition) + responsable technique (validation attendue, mêmes
-  modalités qu'ADR-0005)
+- **Décideurs** : Architecture (proposition) + responsable technique (validation initiale) ;
+  Direction (valeurs numériques et AC-2, amendement 1 du 2026-09-03)
 - **Contexte technique** : module `identity`, Phase 0, étape 8/13 (« Sessions/refresh-token
   rotation »)
 
@@ -335,3 +336,78 @@ le porte encore ; les chemins où elle n'est plus disponible restent vides, dett
 **Limite documentée, non corrigée (comportement voulu, pas un défaut)** : la revue a également
 questionné le résultat du "double-submit concurrent du même jeton" (§5, limite déjà documentée
 avant la revue) — confirmé comme un compromis accepté du modèle OWASP standard, pas un défaut.
+
+---
+
+## Amendement 1 (2026-09-03) — clôture O-06.1/O-06.2 (valeurs numériques), décision AC-2 (contrôle applicatif d'expiration)
+
+**Contexte de cet amendement** : O-06.1/O-06.2 restaient le seul résidu bloquant la clôture
+formelle de cette ADR (§ Dette assumée). La Direction a tranché les valeurs et le mode de contrôle
+applicatif ; aucune n'était inventée par cet amendement — voir la discussion de conception qui a
+précédé l'arbitrage, résumée ci-dessous par souci de traçabilité.
+
+### O-06.1/O-06.2 — valeurs numériques, définitives
+
+Reprennent **exactement** les trois catégories déjà matérialisées par le code (§1) — aucune
+quatrième catégorie, aucune troisième taxonomie :
+
+| `SessionSensitivityCategory` | Plafond absolu (O-06.1) | Inactivité (O-06.2) |
+|---|---:|---:|
+| `PLATFORM_SUPER_ADMIN` | **4 h** | **15 min** |
+| `TENANT_MFA_REQUIRED` (admin tenant ∪ finance à fort impact) | **4 h** | **15 min** |
+| `TENANT_STANDARD` | **12 h** | **30 min** |
+
+`SessionDurationTuning.ts` cesse d'être un placeholder « À VALIDER MÉTIER — NON DÉFINITIF » : ces
+valeurs sont la politique de production opposable.
+
+**« Poste partagé / accueil » (O-06.4) reste explicitement hors catégorie serveur**, confirmé par
+la Direction : aucun signal serveur ne permet de le détecter (§1, alternative 1 déjà écartée),
+et en inventer un (drapeau « appareil partagé » transmis à la connexion) créerait un concept non
+demandé par aucune décision. Ces postes utilisent `TENANT_STANDARD` côté serveur ; le verrouillage
+manuel (« Verrouiller / Changer d'utilisateur ») reste l'unique mécanisme, purement client, déjà
+acté par O-06.4 et inchangé par cet amendement.
+
+**Ni jeton d'accès distinct, ni plafond de refresh token indépendant** : confirmé hors périmètre.
+Le bearer de session est le seul artefact ; sa TTL Redis est `min(inactivitySeconds,
+temps_restant_avant_absoluteCeiling)` (`RedisSessionStore.ts`, inchangé). Le plafond absolu par
+catégorie *est déjà*, par construction (§5), la durée de vie de la chaîne de refresh token —
+ajouter une valeur séparée aurait silencieusement réduit `TENANT_STANDARD` de 12 h à une valeur
+inférieure sans le dire explicitement ; explicitement écarté.
+
+### AC-2 — contrôle applicatif d'expiration : enforcement synchrone + purge périodique
+
+La « Dette assumée » de cette ADR écartait explicitement un contrôle redondant du plafond/de
+l'inactivité dans `ServerContextResolver`, pour ne pas alourdir ce chemin chaud (alternative 4 ;
+point 6 des corrections de sécurité de 2026-08-28), documentée comme « à reconsidérer séparément
+si le besoin se confirme ». C'est désormais le cas :
+
+- `ServerContextResolver` reçoit un `Clock` injecté et compare explicitement `now()` au plafond
+  absolu et à la dernière activité de la session, **à chaque requête authentifiée** — défense en
+  profondeur en plus de la TTL Redis, jamais à sa place. Un dépassement produit le même refus
+  qu'une clé Redis absente (session inexistante du point de vue de l'appelant), sans distinguer les
+  deux causes dans la réponse HTTP.
+- Un job planifié (même infrastructure BullMQ que l'Outbox) purge périodiquement les lignes
+  `platform.RefreshTokenChain` déjà `ROTATED`/expirées en base. **Nettoyage uniquement** — il n'est
+  jamais l'autorité de sécurité ; une session expirée à `T` n'est jamais utilisable jusqu'au
+  prochain passage du job, l'enforcement synchrone ci-dessus s'en charge immédiatement.
+
+**Comportement après expiration — contrat d'interface, pas de code `apps/api`** : distinction entre
+expiration normale (redirection vers l'écran de connexion avec message explicite, état non sensible
+du client préservable — route demandée, données de formulaire non sensibles, état d'interface) et
+expiration pour raison de sécurité (réutilisation détectée, révocation, compromission — jamais de
+tentative de reconnexion silencieuse, message générique). Ni access token, ni refresh token, ni
+secret MFA, ni code de récupération ne doivent jamais survivre côté client au-delà du mécanisme de
+session lui-même. Ce contrat s'applique au frontend (`apps/web`), non encore construit à la date de
+cet amendement — documenté ici pour que sa construction future le consomme sans le réinventer.
+
+### Conséquences de cet amendement
+
+- Résidu O-06.1/O-06.2 (§ Dette assumée original) : **fermé**.
+- Step-up (O-06.3) au niveau opération, « poste partagé » (O-06.4) côté serveur, couche HTTP de
+  l'endpoint de refresh, chaînage par empreinte des audits `SESSION` : **inchangés, toujours en
+  dette assumée**, non couverts par cet amendement.
+- `SessionDurationTuning.ts` : évolution des placeholders vers des valeurs définitives, migration
+  purement additive au niveau du code (aucun changement de schéma), comme anticipé §3.
+- `ServerContextResolver` : premier changement structurel de ce chemin chaud depuis sa
+  stabilisation à l'étape 7/13 — à couvrir par les mêmes tests de non-régression que les gardes MFA
+  existantes avant tout commit.

@@ -4,6 +4,7 @@ import type { IdGenerator } from '../../../../shared-kernel/domain/ports/IdGener
 import type { UnitOfWork } from '../../../../shared-kernel/application/UnitOfWork.js';
 import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantId.js';
 import type { MfaEnrollmentRepository } from '../../domain/ports/MfaEnrollmentRepository.js';
+import type { RoleRepository } from '../../domain/ports/RoleRepository.js';
 import type { UserAccountRepository } from '../../domain/ports/UserAccountRepository.js';
 import type { UserTenantMembershipRepository } from '../../domain/ports/UserTenantMembershipRepository.js';
 import { UserAccountId } from '../../domain/value-objects/UserAccountId.js';
@@ -52,6 +53,7 @@ export class ForceMfaReEnrollmentHandler {
     private readonly sessionStore: SessionStore,
     private readonly userAccountRepository: UserAccountRepository,
     private readonly membershipRepository: UserTenantMembershipRepository,
+    private readonly roleRepository: RoleRepository,
     private readonly mfaEnrollmentRepository: MfaEnrollmentRepository,
     private readonly refreshTokenIssuer: RefreshTokenIssuer,
     private readonly auditTrail: AuditTrail,
@@ -107,10 +109,22 @@ export class ForceMfaReEnrollmentHandler {
           // ResolveTenantContext.ts) : une valeur corrompue ici trahit Redis, pas un echec metier.
           throw new Error(`ForceMfaReEnrollment : tenantId de session acteur invalide ("${actorSession.tenantId}").`);
         }
-        const membership = await this.membershipRepository.findActiveByUserAndTenant(subjectId, tenantIdResult.getValue());
+        const tenantId = tenantIdResult.getValue();
+        const membership = await this.membershipRepository.findActiveByUserAndTenant(subjectId, tenantId);
         if (membership === null) {
           // F-1 : le sujet n'appartient pas (ou plus) au tenant de l'acteur — refus, JAMAIS un
           // acces implicite a un compte hors perimetre (tenant B, ou meme SUPER_ADMIN).
+          await this.audit(subjectId, actorSession, actorTenantId, actorRoleCodes, command, 'DENIED', null);
+          return Result.failure<void, ForceMfaReEnrollmentError>('FORBIDDEN');
+        }
+        // ADR-0005 Amendement 1 (2026-09-03, O-04 residu 3) : un ADMIN_ETABLISSEMENT garde
+        // `mfa:reset` pour le personnel non-admin de son tenant (aucun changement ci-dessus), mais
+        // ne peut plus reinitialiser le MFA d'un AUTRE ADMIN_ETABLISSEMENT du meme tenant — seule
+        // une session PLATFORM (SUPER_ADMIN) le peut desormais (branche `PLATFORM` d'`isAuthorized`,
+        // qui ne passe jamais par ce bloc `TENANT`). Roles resolus depuis le membership DEJA charge
+        // ci-dessus (meme lecture que le correctif F-1, aucune requete supplementaire de membership).
+        const subjectRoles = await this.roleRepository.findByIds(tenantId, membership.roleIds);
+        if (subjectRoles.some((role) => role.code === 'ADMIN_ETABLISSEMENT')) {
           await this.audit(subjectId, actorSession, actorTenantId, actorRoleCodes, command, 'DENIED', null);
           return Result.failure<void, ForceMfaReEnrollmentError>('FORBIDDEN');
         }

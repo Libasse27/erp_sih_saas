@@ -150,6 +150,10 @@ describe('ADR-0001 §3.3 — garde-fou generique : toute table du schema platfor
     // plateforme (Subscription), meme regime que Payment/PlatformInvoice. Filtrage tenant
     // PUREMENT APPLICATIF.
     'Notification',
+    // Etape 12/13 (ADR-0005 Amendement 1, O-04 residu 4) : recuperation break-glass d'un
+    // SUPER_ADMIN — meme regime que MfaEnrollment/RefreshToken (concept d'administration
+    // plateforme, jamais tenant-scope, aucun `tenantId` sur cet agregat).
+    'SuperAdminBreakGlassRequest',
   ]);
 
   beforeAll(async () => {

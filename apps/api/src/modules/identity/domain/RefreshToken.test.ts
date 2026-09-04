@@ -28,9 +28,9 @@ describe('RefreshToken (ADR-0006 §5)', () => {
 
     expect(token.isActive()).toBe(true);
     expect(token.chainStartedAt).toEqual(now);
-    // TENANT_STANDARD (placeholder, non definitif) : 24h absolu, 1h inactivite.
-    expect(token.absoluteExpiresAt.getTime() - now.getTime()).toBe(24 * 60 * 60 * 1000);
-    expect(token.inactivityExpiresAt.getTime() - now.getTime()).toBe(60 * 60 * 1000);
+    // TENANT_STANDARD (ADR-0006 Amendement 1, valeurs definitives) : 12h absolu, 30min inactivite.
+    expect(token.absoluteExpiresAt.getTime() - now.getTime()).toBe(12 * 60 * 60 * 1000);
+    expect(token.inactivityExpiresAt.getTime() - now.getTime()).toBe(30 * 60 * 1000);
   });
 
   it("issueRotated COPIE le plafond absolu de la chaine tel quel — ne l_etend JAMAIS depuis 'now' de la rotation (invariant central de la fenetre glissante)", () => {
@@ -48,7 +48,7 @@ describe('RefreshToken (ADR-0006 §5)', () => {
     });
     first.markRotated();
 
-    const muchLater = new Date(chainStart.getTime() + 23 * 60 * 60 * 1000); // 23h plus tard, toujours < plafond 24h
+    const muchLater = new Date(chainStart.getTime() + 11 * 60 * 60 * 1000); // 11h plus tard, toujours < plafond 12h
     const second = RefreshToken.issueRotated({
       id: mustSucceed(RefreshTokenId.create(uuidAt(6))),
       previous: first,
@@ -78,8 +78,8 @@ describe('RefreshToken (ADR-0006 §5)', () => {
     });
     first.markRotated();
 
-    // A 30 minutes du plafond absolu (24h) : la fenetre d'inactivite standard (1h) le depasserait.
-    const nearCeiling = new Date(first.absoluteExpiresAt.getTime() - 30 * 60 * 1000);
+    // A 10 minutes du plafond absolu (12h) : la fenetre d'inactivite standard (30min) le depasserait.
+    const nearCeiling = new Date(first.absoluteExpiresAt.getTime() - 10 * 60 * 1000);
     const second = RefreshToken.issueRotated({
       id: mustSucceed(RefreshTokenId.create(uuidAt(9))),
       previous: first,
@@ -143,9 +143,9 @@ describe('RefreshToken (ADR-0006 §5)', () => {
       now: chainStart,
     });
 
-    expect(token.isWithinAbsoluteCeiling(new Date(chainStart.getTime() + 23 * 60 * 60 * 1000))).toBe(true);
-    expect(token.isWithinAbsoluteCeiling(new Date(chainStart.getTime() + 25 * 60 * 60 * 1000))).toBe(false);
-    expect(token.isWithinInactivityWindow(new Date(chainStart.getTime() + 30 * 60 * 1000))).toBe(true);
-    expect(token.isWithinInactivityWindow(new Date(chainStart.getTime() + 90 * 60 * 1000))).toBe(false);
+    expect(token.isWithinAbsoluteCeiling(new Date(chainStart.getTime() + 11 * 60 * 60 * 1000))).toBe(true);
+    expect(token.isWithinAbsoluteCeiling(new Date(chainStart.getTime() + 13 * 60 * 60 * 1000))).toBe(false);
+    expect(token.isWithinInactivityWindow(new Date(chainStart.getTime() + 20 * 60 * 1000))).toBe(true);
+    expect(token.isWithinInactivityWindow(new Date(chainStart.getTime() + 40 * 60 * 1000))).toBe(false);
   });
 });

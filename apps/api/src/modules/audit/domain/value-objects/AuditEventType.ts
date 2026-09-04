@@ -22,6 +22,9 @@ export type AuditEventType =
   | 'MFA_RECOVERY_CODES_REGENERATED'
   | 'MFA_RE_ENROLLMENT_FORCED'
   | 'MFA_FACTOR_LOCKED_OUT'
+  // ===== MFA — break-glass SUPER_ADMIN (ADR-0005 Amendement 1, O-04 residu 4) =====
+  | 'SUPER_ADMIN_BREAK_GLASS_REQUESTED'
+  | 'SUPER_ADMIN_BREAK_GLASS_APPROVED'
   // ===== SESSION — cycle de vie du refresh token (ADR-0006 §8, etape 8/13) =====
   | 'SESSION_REFRESH_ROTATED'
   | 'SESSION_REFRESH_REUSE_DETECTED'

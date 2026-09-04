@@ -1,5 +1,6 @@
 import { Result } from '../../../../shared-kernel/domain/Result.js';
 import type { UnitOfWorkContext } from '../../../../shared-kernel/application/UnitOfWork.js';
+import type { Clock } from '../../../../shared-kernel/domain/ports/Clock.js';
 import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantId.js';
 import { MFA_PENDING_SESSION_WINDOW_SECONDS } from '../../domain/MfaTuning.js';
 import type { AuditTrail } from '../ports/AuditTrail.js';
@@ -49,12 +50,23 @@ export type ResolveServerContextError = 'SESSION_NOT_FOUND' | 'MFA_REQUIRED';
  * (`MFA_BYPASS_ATTEMPTED`/`DENIED`), dedupliquee par session via `MfaBypassAttemptGuard` (Redis
  * `SET NX EX`, meme fenetre que la session `MFA_PENDING`) pour borner le volume d'entrees d'audit
  * en cas de scan automatise repete sur le meme `sessionId`.
+ *
+ * AC-2 (ADR-0006 Amendement 1, 2026-09-03) : le plafond absolu (`session.absoluteExpiresAt`) est
+ * revérifié explicitement ICI, à CHAQUE appel, en plus de la TTL Redis qui borne déjà la duree de
+ * vie de la cle — defense en profondeur, jamais a la place. La TTL Redis reste l'unique mecanisme
+ * qui ferme reellement la fenetre d'inactivite (O-06.2) : une cle encore presente signifie qu'une
+ * activite recente l'a renouvelee, ServerContextResolver n'a donc rien de plus a verifier sur ce
+ * point. Un depassement du plafond absolu produit EXACTEMENT le meme refus qu'une session absente
+ * (`SESSION_NOT_FOUND`), sans jamais distinguer les deux causes dans la reponse — la clef Redis
+ * elle-meme n'est PAS supprimee ici (nettoyage laisse a sa propre expiration ou au job de purge,
+ * jamais a ce chemin de lecture).
  */
 export class ServerContextResolver {
   constructor(
     private readonly sessionStore: SessionStore,
     private readonly bypassAttemptGuard: MfaBypassAttemptGuard,
     private readonly auditTrail: AuditTrail,
+    private readonly clock: Clock,
   ) {}
 
   async resolve(
@@ -93,9 +105,15 @@ export class ServerContextResolver {
       }
 
       case 'PLATFORM':
+        if (this.isPastAbsoluteCeiling(session.absoluteExpiresAt)) {
+          return Result.failure('SESSION_NOT_FOUND');
+        }
         return Result.success({ kind: 'PLATFORM', actorUserId: session.userId, session });
 
       case 'TENANT': {
+        if (this.isPastAbsoluteCeiling(session.absoluteExpiresAt)) {
+          return Result.failure('SESSION_NOT_FOUND');
+        }
         const tenantIdResult = TenantId.create(session.tenantId);
         if (tenantIdResult.isFailure()) {
           // Un SessionContext TENANT est toujours cree par ResolveTenantContextHandler a partir
@@ -117,6 +135,11 @@ export class ServerContextResolver {
         throw new Error(`SessionContext.kind non gere par ServerContextResolver : ${JSON.stringify(exhaustiveCheck)}`);
       }
     }
+  }
+
+  /** AC-2 : `>=` (pas `>`) — l'instant du plafond lui-meme est deja hors fenetre valide, coherent avec `RedisSessionStore.ts` (`Math.max(1, ...)`, qui ne laisse jamais une TTL nulle ou negative subsister). */
+  private isPastAbsoluteCeiling(absoluteExpiresAt: string): boolean {
+    return this.clock.now().getTime() >= new Date(absoluteExpiresAt).getTime();
   }
 
   /**

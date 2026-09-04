@@ -37,4 +37,17 @@ export interface RefreshTokenRepository {
   revokeAllForUser(userId: string, reason: RefreshTokenRevocationReason, now: Date): Promise<void>;
 
   revokeAllForMembership(membershipId: string, reason: RefreshTokenRevocationReason, now: Date): Promise<void>;
+
+  /**
+   * AC-2 (ADR-0006 Amendement 1) — NETTOYAGE uniquement, jamais l'autorite de securite (celle-ci
+   * reste `ServerContextResolver.isPastAbsoluteCeiling`/le statut verifie a la presentation, voir
+   * `RefreshTokenIssuer`). Supprime toute ligne dont le plafond absolu de sa CHAINE
+   * (`absoluteExpiresAt`, identique sur toutes les generations d'une meme chaine, ADR-0006 §5) est
+   * depasse depuis plus de `retentionSeconds` — quel que soit son statut (`ACTIVE` jamais
+   * represente avec succes au-dela de son plafond ; `ROTATED`/`REVOKED` deja terminaux). Le delai
+   * de retention laisse une fenetre pour investiguer une reutilisation tardive (ADR-0006 §6) avant
+   * suppression definitive — jamais une suppression immediate a la transition. Retourne le nombre
+   * de lignes supprimees.
+   */
+  purgeDead(now: Date, retentionSeconds: number): Promise<number>;
 }

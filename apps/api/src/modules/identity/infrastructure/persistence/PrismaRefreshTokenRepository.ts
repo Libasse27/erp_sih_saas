@@ -136,6 +136,13 @@ export class PrismaRefreshTokenRepository implements RefreshTokenRepository {
     });
   }
 
+  async purgeDead(now: Date, retentionSeconds: number): Promise<number> {
+    const client = resolvePrismaClient(this.prisma);
+    const cutoff = new Date(now.getTime() - retentionSeconds * 1000);
+    const result = await client.refreshToken.deleteMany({ where: { absoluteExpiresAt: { lt: cutoff } } });
+    return result.count;
+  }
+
   private toDomain(row: RefreshTokenRow): RefreshToken {
     const id = assertValid(RefreshTokenId.create(row.id));
     const userId = assertValid(UserAccountId.create(row.userId));

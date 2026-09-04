@@ -27,4 +27,12 @@ export interface UserAccountRepository {
   findById(id: UserAccountId): Promise<UserAccount | null>;
   findByEmail(email: Email): Promise<UserAccount | null>;
   save(account: UserAccount): Promise<void>;
+
+  /**
+   * Tous les comptes `SUPER_ADMIN` (ADR-0005 Amendement 1, O-04 residu 4 — quorum de break-glass).
+   * Aucune notion de compte "suspendu"/"desactive" n'existe encore dans ce module (voir
+   * `UserAccount.ts`) : "actif" designe ici simplement "existe avec `platformRole ===
+   * 'SUPER_ADMIN'`", jamais un filtre supplementaire invente par anticipation.
+   */
+  findAllSuperAdmins(): Promise<readonly UserAccount[]>;
 }

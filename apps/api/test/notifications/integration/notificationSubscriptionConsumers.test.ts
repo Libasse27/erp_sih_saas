@@ -149,6 +149,10 @@ describe('Notifications — consommateurs Outbox Subscription contre Identity/Te
         }
         return emails;
       },
+      findActiveSuperAdminEmails: async (excludeUserId: string): Promise<readonly string[]> => {
+        const superAdmins = await identity.repositories.userAccounts.findAllSuperAdmins();
+        return superAdmins.filter((account) => account.id.toString() !== excludeUserId).map((account) => account.email.value);
+      },
     };
   });
 

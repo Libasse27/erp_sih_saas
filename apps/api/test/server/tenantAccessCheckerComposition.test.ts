@@ -202,6 +202,10 @@ class FakeUserAccountRepository implements UserAccountRepository {
   async save(): Promise<void> {
     throw new Error('Non utilise par ce test.');
   }
+
+  async findAllSuperAdmins(): Promise<readonly UserAccount[]> {
+    throw new Error('Non utilise par ce test.');
+  }
 }
 
 describe('IdentityModuleBackedUserAccountExistenceChecker (classe REELLE de composition-root.ts) — ADR-0008 §9', () => {

@@ -4,6 +4,8 @@ import type { IdGenerator } from '../../../shared-kernel/domain/ports/IdGenerato
 import { PgUnitOfWork } from '../../../shared-kernel/infrastructure/persistence/PgUnitOfWork.js';
 import { createSendWelcomeEmailOnSubscriptionStartedHandler } from '../application/services/SendWelcomeEmailOnSubscriptionStarted.js';
 import { createSendPlanChangeConfirmationOnPlanChangedHandler } from '../application/services/SendPlanChangeConfirmationOnPlanChanged.js';
+import { createSendSuperAdminBreakGlassRequestedAlertHandler } from '../application/services/SendSuperAdminBreakGlassRequestedAlert.js';
+import { createSendSuperAdminBreakGlassApprovedAlertHandler } from '../application/services/SendSuperAdminBreakGlassApprovedAlert.js';
 import type { RecipientDirectory } from '../application/ports/RecipientDirectory.js';
 import type { NotificationRepository } from '../domain/ports/NotificationRepository.js';
 import { PrismaNotificationRepository } from './persistence/PrismaNotificationRepository.js';
@@ -20,6 +22,8 @@ export interface NotificationModule {
   readonly outboxHandlers: {
     readonly sendWelcomeEmailOnSubscriptionStarted: ReturnType<typeof createSendWelcomeEmailOnSubscriptionStartedHandler>;
     readonly sendPlanChangeConfirmationOnPlanChanged: ReturnType<typeof createSendPlanChangeConfirmationOnPlanChangedHandler>;
+    readonly sendSuperAdminBreakGlassRequestedAlert: ReturnType<typeof createSendSuperAdminBreakGlassRequestedAlertHandler>;
+    readonly sendSuperAdminBreakGlassApprovedAlert: ReturnType<typeof createSendSuperAdminBreakGlassApprovedAlertHandler>;
   };
 }
 
@@ -52,9 +56,28 @@ export function buildNotificationModule(deps: {
     idGenerator: deps.idGenerator,
     clock: deps.clock,
   });
+  const sendSuperAdminBreakGlassRequestedAlert = createSendSuperAdminBreakGlassRequestedAlertHandler({
+    notificationRepository: notifications,
+    recipientDirectory: deps.recipientDirectory,
+    unitOfWork,
+    idGenerator: deps.idGenerator,
+    clock: deps.clock,
+  });
+  const sendSuperAdminBreakGlassApprovedAlert = createSendSuperAdminBreakGlassApprovedAlertHandler({
+    notificationRepository: notifications,
+    recipientDirectory: deps.recipientDirectory,
+    unitOfWork,
+    idGenerator: deps.idGenerator,
+    clock: deps.clock,
+  });
 
   return {
     repositories: { notifications },
-    outboxHandlers: { sendWelcomeEmailOnSubscriptionStarted, sendPlanChangeConfirmationOnPlanChanged },
+    outboxHandlers: {
+      sendWelcomeEmailOnSubscriptionStarted,
+      sendPlanChangeConfirmationOnPlanChanged,
+      sendSuperAdminBreakGlassRequestedAlert,
+      sendSuperAdminBreakGlassApprovedAlert,
+    },
   };
 }

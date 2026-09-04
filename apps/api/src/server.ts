@@ -154,6 +154,23 @@ export function createApp(root: CompositionRoot): Express {
     asyncRoute(root.presentation.auditEntryController.list),
   );
 
+  // Recuperation break-glass SUPER_ADMIN (ADR-0005 Amendement 1, O-04 residu 4, etape 12/13) —
+  // DEUX routes authentifiees (jamais publiques), l'autorisation fine (session PLATFORM +
+  // step-up MFA, quorum de deux SUPER_ADMIN distincts) restant entierement du ressort des
+  // handlers applicatifs (voir SuperAdminBreakGlassController.ts).
+  app.post(
+    '/api/v1/platform/super-admin/break-glass-requests',
+    root.presentation.requireAuthenticatedContext,
+    parseJsonBody,
+    asyncRoute(root.presentation.superAdminBreakGlassController.request),
+  );
+  app.post(
+    '/api/v1/platform/super-admin/break-glass-requests/:requestId/approval',
+    root.presentation.requireAuthenticatedContext,
+    parseJsonBody,
+    asyncRoute(root.presentation.superAdminBreakGlassController.approve),
+  );
+
   // Monte APRES toutes les routes (contrat Express des middlewares d'erreur) — voir
   // `createErrorHandler` ci-dessus pour le detail de ce qu'il couvre et pourquoi.
   app.use(createErrorHandler(root.logger));

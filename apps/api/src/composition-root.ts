@@ -33,6 +33,7 @@ import type { AuditReadPrincipal } from './modules/audit/application/AuditReadPr
 import { AuditEntryController, type AuditHttpLocals } from './modules/audit/presentation/http/AuditEntryController.js';
 import { SessionController } from './modules/identity/presentation/http/SessionController.js';
 import { MfaEnrollmentController } from './modules/identity/presentation/http/MfaEnrollmentController.js';
+import { SuperAdminBreakGlassController } from './modules/identity/presentation/http/SuperAdminBreakGlassController.js';
 import { RegistrationController } from './presentation/http/RegistrationController.js';
 import { RedisRateLimiter } from './shared-kernel/infrastructure/RedisRateLimiter.js';
 import { createRateLimitMiddleware } from './shared-kernel/infrastructure/RateLimitMiddleware.js';
@@ -448,6 +449,11 @@ class IdentityModuleBackedRecipientDirectory implements RecipientDirectory {
     }
     return emails;
   }
+
+  async findActiveSuperAdminEmails(excludeUserId: string): Promise<readonly string[]> {
+    const superAdmins = await this.identity.repositories.userAccounts.findAllSuperAdmins();
+    return superAdmins.filter((account) => account.id.toString() !== excludeUserId).map((account) => account.email.value);
+  }
 }
 
 /**
@@ -485,6 +491,8 @@ export interface CompositionRoot {
     readonly sessionController: SessionController;
     /** ADR-0010 §1/§7 bis A/B — mono-module (identity seul). */
     readonly mfaEnrollmentController: MfaEnrollmentController;
+    /** ADR-0005 Amendement 1 (O-04 residu 4), etape 12/13 — mono-module (identity seul), derriere `requireAuthenticatedContext`. */
+    readonly superAdminBreakGlassController: SuperAdminBreakGlassController;
     /** ADR-0010 §8 — un middleware par famille de limite, valeurs dans shared-kernel/domain/RateLimitTuning.ts (non definitives). */
     readonly rateLimitRegistrations: RequestHandler;
     readonly rateLimitLogin: RequestHandler;
@@ -751,6 +759,30 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
         ),
       ],
     ],
+    // Break-glass SUPER_ADMIN (ADR-0005 Amendement 1, O-04 residu 4, etape 12/13) — alerte
+    // IMMEDIATE des autres SUPER_ADMIN actifs a l'ouverture ET a l'approbation d'une demande
+    // (deux evenements distincts, un seul consommateur Notifications chacun ; voir
+    // SendSuperAdminBreakGlassRequestedAlert.ts/SendSuperAdminBreakGlassApprovedAlert.ts).
+    [
+      'identity.super-admin-break-glass.requested',
+      [
+        withOutboxIdempotency(
+          prisma,
+          'notifications.sendSuperAdminBreakGlassRequestedAlert',
+          notifications.outboxHandlers.sendSuperAdminBreakGlassRequestedAlert,
+        ),
+      ],
+    ],
+    [
+      'identity.super-admin-break-glass.approved',
+      [
+        withOutboxIdempotency(
+          prisma,
+          'notifications.sendSuperAdminBreakGlassApprovedAlert',
+          notifications.outboxHandlers.sendSuperAdminBreakGlassApprovedAlert,
+        ),
+      ],
+    ],
   ]);
 
   // Connexion Redis DEDIEE a BullMQ (voir OutboxQueueConnection.ts — `maxRetriesPerRequest: null`
@@ -815,6 +847,10 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
     identity.handlers.startMfaEnrollment,
     identity.handlers.confirmMfaEnrollment,
   );
+  const superAdminBreakGlassController = new SuperAdminBreakGlassController(
+    identity.handlers.requestSuperAdminBreakGlass,
+    identity.handlers.approveSuperAdminBreakGlass,
+  );
 
   // Limiteur de debit PARTAGE (ADR-0010 §8/§12 point 4) — port `RateLimiter` (shared-kernel),
   // implementation Redis REELLE (connexion `redis` deja partagee par les sessions/le cache
@@ -849,6 +885,7 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
   let subscriptionRenewalJob: PeriodicJobHandle | undefined;
   let paymentReconciliationJob: PeriodicJobHandle | undefined;
   let notificationRelayJob: PeriodicJobHandle | undefined;
+  let refreshTokenPurgeJob: PeriodicJobHandle | undefined;
 
   return {
     env,
@@ -869,6 +906,7 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
       registrationController,
       sessionController,
       mfaEnrollmentController,
+      superAdminBreakGlassController,
       rateLimitRegistrations,
       rateLimitLogin,
       rateLimitMfa,
@@ -915,6 +953,20 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
         },
         logger,
       });
+      // AC-2 (ADR-0006 Amendement 1) : NETTOYAGE uniquement (RefreshTokenRepository.purgeDead) —
+      // frequence basse (1h), aucune urgence de securite ici, la fenetre de retention de 7 jours
+      // (meme ordre de grandeur que INDEX_KEY_HYGIENE_TTL_SECONDS, RedisSessionStore.ts) laisse le
+      // temps d'investiguer une reutilisation tardive avant suppression definitive. Un seul DELETE
+      // atomique (`resolvePrismaClient` retombe sur le client de base hors transaction, voir
+      // PrismaTransactionContext.ts) : aucun `UnitOfWork` necessaire, table hors RLS (ADR-0006 §4).
+      refreshTokenPurgeJob = startPeriodicJob({
+        name: 'refresh-token-purge',
+        intervalMs: 60 * 60 * 1000,
+        run: async () => {
+          await identity.repositories.refreshTokens.purgeDead(new Date(), 7 * 24 * 60 * 60);
+        },
+        logger,
+      });
     },
     async stopBackgroundJobs(): Promise<void> {
       // Ordre : stopper la DECOUVERTE (plus aucun nouveau job enfile) avant de fermer le WORKER
@@ -925,6 +977,7 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
         subscriptionRenewalJob?.stop(),
         paymentReconciliationJob?.stop(),
         notificationRelayJob?.stop(),
+        refreshTokenPurgeJob?.stop(),
       ]);
       await Promise.all([outboxWorker.close(), notificationWorker.close()]);
     },

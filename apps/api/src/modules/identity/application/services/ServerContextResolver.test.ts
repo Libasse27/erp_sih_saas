@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  FixedClock,
   InMemoryAuditTrail,
   InMemoryMfaBypassAttemptGuard,
   InMemorySessionStore,
@@ -7,6 +8,9 @@ import {
 } from '../../../../../test/identity/builders/testKit.js';
 import type { MfaPendingSessionContext, PlatformSessionContext, TenantSessionContext } from '../ports/SessionStore.js';
 import { ServerContextResolver } from './ServerContextResolver.js';
+
+/** Coherent avec `issuedAt`/`absoluteExpiresAt` des fixtures ci-dessous : strictement APRES l'emission, strictement AVANT le plafond. */
+const NOW_WITHIN_WINDOW = '2026-08-24T10:30:00Z';
 
 const TENANT_A = uuidAt(9001);
 
@@ -56,10 +60,12 @@ function mfaPendingSession(overrides: Partial<MfaPendingSessionContext> = {}): M
   };
 }
 
-function buildResolver(): { resolver: ServerContextResolver; sessions: InMemorySessionStore; auditTrail: InMemoryAuditTrail } {
+function buildResolver(
+  now: string = NOW_WITHIN_WINDOW,
+): { resolver: ServerContextResolver; sessions: InMemorySessionStore; auditTrail: InMemoryAuditTrail } {
   const sessions = new InMemorySessionStore();
   const auditTrail = new InMemoryAuditTrail();
-  const resolver = new ServerContextResolver(sessions, new InMemoryMfaBypassAttemptGuard(), auditTrail);
+  const resolver = new ServerContextResolver(sessions, new InMemoryMfaBypassAttemptGuard(), auditTrail, new FixedClock(now));
   return { resolver, sessions, auditTrail };
 }
 
@@ -177,6 +183,40 @@ describe('ServerContextResolver', () => {
       await resolver.resolve(session.sessionId);
 
       expect(auditTrail.records).toHaveLength(1);
+    });
+  });
+
+  describe('AC-2 (ADR-0006 Amendement 1) — enforcement synchrone du plafond absolu', () => {
+    it('refuse (SESSION_NOT_FOUND) une session TENANT dont le plafond absolu est deja atteint, meme si la cle store existe encore', async () => {
+      const { resolver, sessions } = buildResolver(NOW_WITHIN_WINDOW);
+      const session = tenantSession({ absoluteExpiresAt: NOW_WITHIN_WINDOW });
+      await sessions.create(session);
+
+      const result = await resolver.resolve(session.sessionId);
+
+      expect(result.isFailure()).toBe(true);
+      expect(result.getError()).toBe('SESSION_NOT_FOUND');
+    });
+
+    it('refuse (SESSION_NOT_FOUND) une session PLATFORM dont le plafond absolu est depasse', async () => {
+      const { resolver, sessions } = buildResolver('2026-08-25T10:00:01Z');
+      const session = platformSession({ absoluteExpiresAt: '2026-08-25T10:00:00Z' });
+      await sessions.create(session);
+
+      const result = await resolver.resolve(session.sessionId);
+
+      expect(result.isFailure()).toBe(true);
+      expect(result.getError()).toBe('SESSION_NOT_FOUND');
+    });
+
+    it('resout normalement une session TENANT strictement AVANT son plafond absolu', async () => {
+      const { resolver, sessions } = buildResolver('2026-08-25T09:59:59Z');
+      const session = tenantSession({ absoluteExpiresAt: '2026-08-25T10:00:00Z' });
+      await sessions.create(session);
+
+      const result = await resolver.resolve(session.sessionId);
+
+      expect(result.isSuccess()).toBe(true);
     });
   });
 });

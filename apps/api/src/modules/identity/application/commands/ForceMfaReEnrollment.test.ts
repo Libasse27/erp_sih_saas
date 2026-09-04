@@ -6,6 +6,7 @@ import {
   idFor,
   InMemoryAuditTrail,
   InMemoryMfaEnrollmentRepository,
+  InMemoryRoleRepository,
   InMemorySessionStore,
   InMemoryUnitOfWork,
   InMemoryUserAccountRepository,
@@ -15,8 +16,12 @@ import {
   uuidAt,
 } from '../../../../../test/identity/builders/testKit.js';
 import { MfaEnrollment } from '../../domain/MfaEnrollment.js';
+import { Role } from '../../domain/Role.js';
+import { SYSTEM_ROLE_CATALOG } from '../../domain/SystemRoleCatalog.js';
 import { UserAccount } from '../../domain/UserAccount.js';
 import { UserTenantMembership } from '../../domain/UserTenantMembership.js';
+import { Permission } from '../../domain/value-objects/Permission.js';
+import { RoleId } from '../../domain/value-objects/RoleId.js';
 import { Email } from '../../domain/value-objects/Email.js';
 import { PasswordHash } from '../../domain/value-objects/PasswordHash.js';
 import { EncryptedTotpSecret } from '../../domain/value-objects/EncryptedTotpSecret.js';
@@ -27,9 +32,16 @@ import { ForceMfaReEnrollmentHandler } from './ForceMfaReEnrollment.js';
 const TENANT_A = uuidAt(9101);
 const TENANT_B = uuidAt(9102);
 
+const ADMIN_ETABLISSEMENT_DEFINITION = SYSTEM_ROLE_CATALOG.find((role) => role.code === 'ADMIN_ETABLISSEMENT');
+if (ADMIN_ETABLISSEMENT_DEFINITION === undefined) {
+  throw new Error('ADMIN_ETABLISSEMENT absent de SYSTEM_ROLE_CATALOG (bug de test).');
+}
+const ADMIN_ETABLISSEMENT_ROLE_ID = RoleId.create(ADMIN_ETABLISSEMENT_DEFINITION.id).getValue();
+
 describe('ForceMfaReEnrollmentHandler', () => {
   let accounts: InMemoryUserAccountRepository;
   let memberships: InMemoryUserTenantMembershipRepository;
+  let roles: InMemoryRoleRepository;
   let mfaEnrollments: InMemoryMfaEnrollmentRepository;
   let sessions: InMemorySessionStore;
   let auditTrail: InMemoryAuditTrail;
@@ -40,6 +52,15 @@ describe('ForceMfaReEnrollmentHandler', () => {
   beforeEach(() => {
     accounts = new InMemoryUserAccountRepository();
     memberships = new InMemoryUserTenantMembershipRepository();
+    roles = new InMemoryRoleRepository();
+    roles.seed(
+      Role.system({
+        id: ADMIN_ETABLISSEMENT_ROLE_ID,
+        code: ADMIN_ETABLISSEMENT_DEFINITION.code,
+        name: ADMIN_ETABLISSEMENT_DEFINITION.name,
+        permissions: ADMIN_ETABLISSEMENT_DEFINITION.permissionCodes.map((code) => Permission.create(code).getValue()),
+      }),
+    );
     mfaEnrollments = new InMemoryMfaEnrollmentRepository();
     sessions = new InMemorySessionStore();
     auditTrail = new InMemoryAuditTrail();
@@ -49,6 +70,7 @@ describe('ForceMfaReEnrollmentHandler', () => {
       sessions,
       accounts,
       memberships,
+      roles,
       mfaEnrollments,
       buildTestRefreshTokenIssuer({ clock, idGenerator }),
       auditTrail,
@@ -58,13 +80,13 @@ describe('ForceMfaReEnrollmentHandler', () => {
     );
   });
 
-  async function seedMembership(userId: UserAccount['id'], tenantId: string): Promise<void> {
+  async function seedMembership(userId: UserAccount['id'], tenantId: string, roleIds: readonly RoleId[] = []): Promise<void> {
     const tenant = TenantId.create(tenantId).getValue();
     const membership = UserTenantMembership.grant({
       userId,
       tenantId: tenant,
       createdBy: userId,
-      initialRoleIds: [],
+      initialRoleIds: [...roleIds],
       clock,
       idGenerator,
     });
@@ -276,5 +298,51 @@ describe('ForceMfaReEnrollmentHandler', () => {
 
     const result = await handler.execute({ subjectUserAccountId: subject.id.toString(), actorSessionId, reason: 'procedure super admin' });
     expect(result.isSuccess()).toBe(true);
+  });
+
+  describe('ADR-0005 Amendement 1 (2026-09-03, O-04 residu 3) — admin-sur-admin', () => {
+    it('FORBIDDEN : un acteur TENANT avec mfa:reset ne peut PAS reinitialiser le MFA d_un AUTRE ADMIN_ETABLISSEMENT du meme tenant', async () => {
+      const actorSessionId = await seedTenantActorSession({ permissionCodes: ['mfa:reset'], mfaSatisfiedAt: clock.now().toISOString() });
+      const subject = await registerAccount();
+      seedActiveEnrollment(subject.id);
+      await seedMembership(subject.id, TENANT_A, [ADMIN_ETABLISSEMENT_ROLE_ID]);
+
+      const result = await handler.execute({
+        subjectUserAccountId: subject.id.toString(),
+        actorSessionId,
+        reason: 'tentative admin-sur-admin',
+      });
+
+      expect(mustFail(result)).toBe('FORBIDDEN');
+      expect(auditTrail.records[0]).toMatchObject({ eventType: 'MFA_RE_ENROLLMENT_FORCED', outcome: 'DENIED' });
+      const enrollment = await mfaEnrollments.findByUserId(subject.id);
+      expect(enrollment?.status).toBe('ACTIVE');
+    });
+
+    it('succes : un acteur TENANT avec mfa:reset garde la capacite de reinitialiser le MFA d_un membre NON-admin de son tenant (capacite preexistante, non retiree)', async () => {
+      const actorSessionId = await seedTenantActorSession({ permissionCodes: ['mfa:reset'], mfaSatisfiedAt: clock.now().toISOString() });
+      const subject = await registerAccount();
+      seedActiveEnrollment(subject.id);
+      await seedMembership(subject.id, TENANT_A); // aucun role ADMIN_ETABLISSEMENT
+
+      const result = await handler.execute({
+        subjectUserAccountId: subject.id.toString(),
+        actorSessionId,
+        reason: 'perte du telephone, personnel non-admin',
+      });
+
+      expect(result.isSuccess()).toBe(true);
+    });
+
+    it('succes : une session PLATFORM (SUPER_ADMIN) peut reinitialiser le MFA d_un ADMIN_ETABLISSEMENT — seule autorite conservee pour ce cas', async () => {
+      const actorSessionId = await seedPlatformActorSession(clock.now().toISOString());
+      const subject = await registerAccount();
+      seedActiveEnrollment(subject.id);
+      await seedMembership(subject.id, TENANT_A, [ADMIN_ETABLISSEMENT_ROLE_ID]);
+
+      const result = await handler.execute({ subjectUserAccountId: subject.id.toString(), actorSessionId, reason: 'break-glass/recuperation administree' });
+
+      expect(result.isSuccess()).toBe(true);
+    });
   });
 });

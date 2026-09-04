@@ -2,9 +2,13 @@
 
 - **Statut** : **Accepté** (2026-08-26) — validé par le responsable technique, y compris le
   risque de verrouillage définitif d'un `SUPER_ADMIN` (§ Résidus 4) et les valeurs numériques
-  proposées (§ Résidus 1-2), retenues comme défauts d'implémentation à confirmer ultérieurement
+  proposées (§ Résidus 1-2), retenues comme défauts d'implémentation à confirmer ultérieurement.
+  **Amendement 1 (2026-09-03)** : résidus 3 (récupération `ADMIN_ETABLISSEMENT`) et 4 (break-glass
+  `SUPER_ADMIN`) fermés par la Direction — voir §"Amendement 1" ci-dessous. Résidus 1, 2 et 5
+  (valeurs de verrouillage, nombre de codes de récupération, WebAuthn) inchangés, toujours ouverts.
 - **Date** : 2026-08-26
-- **Décideurs** : Architecture (proposition) + responsable technique (validation attendue)
+- **Décideurs** : Architecture (proposition) + responsable technique (validation initiale) ;
+  Direction (résidus 3/4, amendement 1 du 2026-09-03)
 - **Contexte technique** : module `identity` (MFA) + amorce du module `audit`, Phase 0, étape 7/13
   (« MFA »)
 
@@ -327,3 +331,122 @@ inventée en silence)
    WebAuthn n'est conçu ici ; l'énumération `MfaFactorType` ne déclare **que** `TOTP` — aucune
    valeur non émise n'est introduite, conformément à la discipline déjà appliquée à
    `SubscriptionPlanChangeType` et `PlatformInvoicePurpose`.
+
+---
+
+## Amendement 1 (2026-09-03) — clôture résidus 3/4 : récupération `ADMIN_ETABLISSEMENT`, break-glass `SUPER_ADMIN`
+
+**Contexte de cet amendement** : `ForceMfaReEnrollmentHandler` (étape 7/13, inchangé jusqu'ici)
+autorise aujourd'hui toute session `TENANT` porteuse de `mfa:reset` — permission détenue
+exclusivement par `ADMIN_ETABLISSEMENT` (`SystemRoleCatalog.ts`) — à réinitialiser le MFA de
+**n'importe quel** membre actif du même tenant, **sans distinction du rôle du sujet visé**. Deux
+comptes `ADMIN_ETABLISSEMENT` du même tenant peuvent donc aujourd'hui réinitialiser le MFA l'un de
+l'autre. La Direction a tranché que ce n'est plus acceptable pour un sujet lui-même
+`ADMIN_ETABLISSEMENT` (résidu 3), et a fermé le verrouillage définitif d'un `SUPER_ADMIN` par un
+mécanisme de secours à quorum (résidu 4).
+
+### Résidu 3 — `ADMIN_ETABLISSEMENT` : autorité de récupération restreinte au `SUPER_ADMIN`
+
+**Décision** : `ForceMfaReEnrollmentHandler.isAuthorized` (ou son équivalent après refactor) gagne
+une condition supplémentaire, évaluée **uniquement** quand l'acteur est une session `TENANT` (une
+session `PLATFORM` reste administrateur inconditionnel de l'identité, §"Execution TECHNIQUE...",
+point 2 — inchangé) :
+
+```text
+acteur PLATFORM (SUPER_ADMIN)                        → autorisé, quel que soit le sujet (inchangé)
+acteur TENANT + mfa:reset, sujet SANS ADMIN_ETABLISSEMENT dans ce tenant → autorisé (inchangé)
+acteur TENANT + mfa:reset, sujet AVEC ADMIN_ETABLISSEMENT dans ce tenant → FORBIDDEN (nouveau)
+```
+
+Le rôle du sujet s'évalue sur le **même membership** déjà chargé par le correctif F-1 (vérification
+« sujet actif dans ce même tenant ») — aucune requête supplémentaire n'est nécessaire, seule une
+lecture de `roleCodes` sur un objet déjà en mémoire. **`mfa:reset` n'est PAS retiré de
+`SystemRoleCatalog.ts`** : un `ADMIN_ETABLISSEMENT` garde la capacité de dépanner le personnel
+non-admin de son établissement, capacité déjà en production et non remise en cause.
+
+**Procédure hors-bande** (processus humain, inchangé — la commande `ForceMfaReEnrollment` reste
+l'exécution technique, pas la vérification d'identité elle-même), désormais réservée à un opérateur
+`SUPER_ADMIN` lorsque le sujet est lui-même `ADMIN_ETABLISSEMENT` :
+1. vérification de l'identité professionnelle du demandeur ;
+2. vérification des informations de l'établissement ;
+3. vérification d'un élément indépendant déjà enregistré ;
+4. validation manuelle par l'opérateur `SUPER_ADMIN` ;
+5. traçabilité complète dans l'audit (déjà garanti, voir ci-dessous).
+
+**Invalidation des anciens secrets et révocation des sessions : déjà garanties, aucun changement**
+— vérifié dans le code existant : `MfaEnrollment.forceReEnrollment()` vide `recoveryCodes`,
+`activeSecret` et `pendingSecret` ; `ForceMfaReEnrollmentHandler` appelle `deleteAllForUser` après
+commit. Ce comportement préexistant satisfait déjà l'exigence de la Direction sur ce point.
+
+### Résidu 4 — break-glass `SUPER_ADMIN` : quorum de deux approbateurs indépendants
+
+**Décision** : deux nouvelles commandes, dans le même module `identity`, suivant le pattern déjà en
+production (Command/Handler → domaine → transaction → audit dans la même transaction, comme
+`ForceMfaReEnrollment`) :
+
+```text
+SUPER_ADMIN B (jamais A) → RequestSuperAdminBreakGlass(subjectUserAccountId: A, reason)
+        │
+        ├─ audit immédiat (nouvelle catégorie d'événement MFA, voir ci-dessous)
+        ├─ alerte email immédiate (canal Notifications déjà câblé, étape 9/13)
+        ▼
+   requête à l'état PENDING (identifiant, demandeur B, sujet A, horodatage)
+        │
+SUPER_ADMIN C → ApproveSuperAdminBreakGlass(requestId)
+        │
+        ├─ garde : C ≠ A, C ≠ B, session de C avec mfaSatisfiedAt non nul
+        │           (même garde de step-up que ForceMfaReEnrollment)
+        ├─ audit immédiat
+        ├─ alerte email immédiate
+        ▼
+   MfaEnrollment.forceReEnrollment(A) + révocation de TOUTES les sessions de A
+   (réutilise exactement le mécanisme déjà en production, aucune divergence)
+        │
+        ▼
+   audit final + alerte de résultat
+```
+
+**Interdictions, vérifiées par les handlers, jamais laissées à la discipline opérationnelle seule** :
+- `A` ne peut jamais soumettre `RequestSuperAdminBreakGlass` le visant lui-même.
+- `A` ne peut jamais soumettre `ApproveSuperAdminBreakGlass` sur une requête le visant.
+- `B` ne peut jamais approuver sa propre requête (`C ≠ B`).
+- L'approbateur doit détenir une session `PLATFORM` avec `mfaSatisfiedAt` non nul — pas de
+  contournement du step-up déjà exigé ailleurs (O-06.3).
+- **Aucun chemin à approbateur unique n'est codé**, y compris quand seuls deux `SUPER_ADMIN`
+  existent sur la plateforme : ce cas reste un **runbook opérationnel hors bande, niveau direction
+  technique, exceptionnel et audité séparément** — jamais une bascule applicative. Coder une
+  exception « si personne d'autre n'est disponible, B peut approuver » détruirait précisément la
+  séparation des rôles recherchée par ce mécanisme.
+- Aucun bypass RBAC ni HTTP : les deux commandes suivent exactement le même chemin d'autorisation
+  que le reste du module `identity`.
+
+**Notifications** : réutilise le port/canal email déjà câblé par le module `notifications` (étape
+9/13) — **aucune dépendance à O-07** (SMS/WhatsApp restent hors périmètre de ce mécanisme).
+Destinataires : tous les `SUPER_ADMIN` actifs de la plateforme, à l'exclusion de l'auteur de
+l'action en cours (B ne se notifie pas lui-même sa propre requête ; C ne se notifie pas lui-même sa
+propre approbation) — ni A, dont le compte est par hypothèse inaccessible.
+
+**Audit** : nouveaux types d'événement dans l'union `MfaAuditEventType` existante (même port, même
+adaptateur que le reste du module MFA — pas une nouvelle catégorie d'audit, cohérent avec le
+raisonnement §5 alternative 7 : ceci reste strictement interne au module `identity`, pas un
+nouveau module appelant) : `SUPER_ADMIN_BREAK_GLASS_REQUESTED`,
+`SUPER_ADMIN_BREAK_GLASS_APPROVED`, `SUPER_ADMIN_BREAK_GLASS_COMPLETED`. Écriture dans la
+transaction courante, jamais via l'Outbox — même raisonnement que le reste de cette ADR (§5).
+
+**Résidu explicitement laissé ouvert par cet amendement, à ne pas inventer** : durée de validité
+d'une requête `PENDING` non approuvée. Aucune valeur numérique n'est fixée ici — à traiter comme un
+résidu numérique séparé, au même régime qu'O-06.1/O-06.2 avant cet amendement (*« aucune valeur par
+défaut n'a été inventée »*), ou comme une décision distincte si elle est jugée nécessaire avant
+implémentation.
+
+### Conséquences de cet amendement
+
+- Résidus 3 et 4 (§ Résidus original) : **fermés** — un `SUPER_ADMIN` qui perd son facteur TOTP et
+  épuise ses codes de récupération n'est plus définitivement verrouillé, sous réserve qu'au moins
+  deux autres `SUPER_ADMIN` existent et suivent le protocole à quorum.
+- Résidus 1, 2 et 5 (§ Résidus original) : **inchangés**, toujours ouverts, non couverts par cet
+  amendement.
+- `ForceMfaReEnrollmentHandler` : premier changement de son autorisation depuis sa revue de
+  sécurité initiale (correctif F-1) — à retester intégralement, pas seulement le cas ajouté.
+- Nouveau résidu ouvert par cet amendement : durée de validité d'une requête break-glass `PENDING`
+  (voir ci-dessus).

@@ -77,6 +77,10 @@ class OnceFailingRotationRepository implements RefreshTokenRepository {
   revokeAllForMembership(membershipId: string, reason: Parameters<RefreshTokenRepository['revokeAllForMembership']>[1], now: Date) {
     return this.delegate.revokeAllForMembership(membershipId, reason, now);
   }
+
+  purgeDead(now: Date, retentionSeconds: number) {
+    return this.delegate.purgeDead(now, retentionSeconds);
+  }
 }
 
 describe('RefreshSessionHandler (O-06.5, ADR-0006)', () => {

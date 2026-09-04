@@ -133,12 +133,17 @@ Sept sous-décisions :
 | O-04.6 | Sessions / réauthentification | **Résolu via O-06** (clos le 2026-08-23) : catégories alignées sur O-04.1, step-up hérite du socle O-04.1, réauthentification MFA au changement de contexte cohérente avec O-05.1 |
 | O-04.7 | Audit et preuves | Tout événement MFA auditable dans `AuditEntry` (distinct du journal d'audit médical) ; append-only, immuable y compris pour SUPER_ADMIN ; jamais de secret en clair ; rétention rattachée à O-15 |
 
-**Résidus explicitement conservés, à fermer avant la fin de Phase 0** :
-1. Procédure opérationnelle de récupération pour `ADMIN_ETABLISSEMENT` (support plateforme,
-   vérification d'identité — processus, pas seulement du code).
-2. Procédure *break-glass* de récupération pour `SUPER_ADMIN` — le modèle standard « admin
-   supérieur vérifie l'identité » ne s'applique pas à ce rôle, qui est au sommet de la
-   hiérarchie applicative.
+**Résidus, statut au 2026-09-03** :
+1. ~~Procédure opérationnelle de récupération pour `ADMIN_ETABLISSEMENT`~~ — **CLOS le
+   2026-09-03**, [ADR-0005 Amendement 1](adr/0005-mfa-totp-et-audit-plateforme-minimal.md#amendement-1-2026-09-03--clôture-résidus-34--récupération-adminetablissement-break-glass-superadmin) :
+   autorité de récupération restreinte au `SUPER_ADMIN` quand le sujet est lui-même
+   `ADMIN_ETABLISSEMENT` ; un `ADMIN_ETABLISSEMENT` garde `mfa:reset` pour le personnel non-admin
+   de son tenant.
+2. ~~Procédure *break-glass* de récupération pour `SUPER_ADMIN`~~ — **CLOS le 2026-09-03**, même
+   amendement : quorum de deux `SUPER_ADMIN` indépendants (demandeur ≠ approbateur ≠ sujet), aucun
+   approbateur unique codé, cas « deux `SUPER_ADMIN` seulement » traité en runbook opérationnel hors
+   bande. Nouveau résidu ouvert par cette clôture : durée de validité d'une requête `PENDING` non
+   approuvée — aucune valeur inventée, à trancher séparément.
 
 ---
 
@@ -169,15 +174,23 @@ Aucun résidu bloquant identifié pour Phase 0.
 
 | # | Sujet | Décision |
 |---|---|---|
-| O-06.1 | Plafond absolu | Existe, différencié par catégorie de sensibilité, **catégories alignées sur O-04.1** (pas de troisième taxonomie de risque). **Valeurs numériques : résidu** |
-| O-06.2 | Expiration d'inactivité | Différenciée par les mêmes catégories qu'O-04.1 (poste partagé/accueil, standard, risque élevé). Une valeur globale unique est techniquement rejetée. **Valeurs numériques : résidu** |
+| O-06.1 | Plafond absolu | Existe, différencié par catégorie de sensibilité, **catégories alignées sur O-04.1** (pas de troisième taxonomie de risque). **Valeurs : CLOSES le 2026-09-03** — voir résidu ci-dessous |
+| O-06.2 | Expiration d'inactivité | Différenciée par les mêmes catégories qu'O-04.1. **Valeurs : CLOSES le 2026-09-03** — voir résidu ci-dessous |
 | O-06.3 | Step-up | Validé — obligatoire pour les opérations sensibles (socle hérité d'O-04.1 : administration tenant, financier à fort impact), indépendamment de la fraîcheur de session |
-| O-06.4 | Poste partagé | Validé — expiration automatique courte + verrouillage manuel (« Verrouiller / Changer d'utilisateur »), sans détruire le contexte de travail non validé |
+| O-06.4 | Poste partagé | Validé — expiration automatique courte + verrouillage manuel (« Verrouiller / Changer d'utilisateur »), sans détruire le contexte de travail non validé. **Précision du 2026-09-03** (ADR-0006 Amendement 1) : ce n'est **pas** une catégorie de durée de session serveur — aucun signal serveur ne permet de détecter un poste partagé ; ces postes utilisent la catégorie standard côté serveur, le verrouillage reste un mécanisme purement client |
 | O-06.5 | Renouvellement | Validé — fenêtre glissante + plafond absolu + refresh token à rotation + détection de réutilisation + révocation de chaîne ; compatible avec le changement de contexte d'O-05 |
 
-**Résidu explicite, à fermer avant la fin de Phase 0** : valeurs numériques exactes des
-plafonds absolus (O-06.1) et des paliers d'inactivité (O-06.2) par catégorie. Aucune valeur
-par défaut n'a été inventée.
+**Résidu — CLOS le 2026-09-03**, [ADR-0006 Amendement 1](adr/0006-refresh-token-rotation.md#amendement-1-2026-09-03--clôture-o-061o-062-valeurs-numériques-décision-ac-2-contrôle-applicatif-dexpiration) :
+
+| Catégorie (O-04.1) | Plafond absolu (O-06.1) | Inactivité (O-06.2) |
+|---|---:|---:|
+| SUPER_ADMIN (plancher technique) | 4 h | 15 min |
+| Admin tenant + finance à fort impact | 4 h | 15 min |
+| Standard | 12 h | 30 min |
+
+AC-2 (contrôle applicatif d'expiration) tranché dans le même amendement : enforcement synchrone à
+chaque requête authentifiée + purge périodique pour le nettoyage — la purge n'est jamais l'autorité
+de sécurité.
 
 ---
 
@@ -419,9 +432,9 @@ une conception dédiée.
 | O-01 | Base de données | TECHNIQUE | P0 | **Clos (2026-08-23) — Option B** | Resp. technique |
 | O-02 | Tarification forfaits (7 sous-points) | MÉTIER | P0 | **Clos (2026-08-23), reliquat technique clos (2026-08-24)** | Direction |
 | O-03 | Impayé / suspension | MÉTIER | P0 | **Clos sous réserve juridique (2026-08-23)** | Direction + juridique |
-| O-04 | Périmètre MFA (7 sous-points) | MIXTE | P0 | **Clos structurellement (2026-08-23)** — 3 résidus tracés | Direction + technique |
+| O-04 | Périmètre MFA (7 sous-points) | MIXTE | P0 | **Clos (2026-09-03)** — récupération ADMIN_ETABLISSEMENT + break-glass SUPER_ADMIN fermés (amendement ADR-0005) ; WebAuthn/Passkey (O-04.3) toujours différé, hors périmètre de cette clôture | Direction + technique |
 | O-05 | Multi-établissement / utilisateur | MÉTIER | P0 | **Clos (2026-08-23)** | Direction |
-| O-06 | Durée de session (5 sous-points) | MIXTE | P0 | **Clos structurellement (2026-08-23)** — valeurs numériques en résidu | Direction médicale |
+| O-06 | Durée de session (5 sous-points) | MIXTE | P0 | **Clos (2026-09-03)** — valeurs numériques et AC-2 tranchés (amendement ADR-0006) | Direction |
 | O-07 | Canaux de notification (5 sous-points) | MIXTE | P0 | **Clos (2026-08-23)** — 3 résidus (fournisseur SMS, calendrier rappels, WhatsApp) | Direction |
 | O-08 | Contexte clinique d'accès | MÉTIER | P3 | Ouvert | Direction médicale |
 | O-09 | Échelle de triage | MÉTIER | P4 | Ouvert | Direction médicale |

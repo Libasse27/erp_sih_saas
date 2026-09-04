@@ -34,12 +34,22 @@ export class InMemoryNotificationRepository implements NotificationRepository {
 /** Fake en memoire de `RecipientDirectory` — un tenant seed() vers une liste d'emails, comportement restrictif par defaut (aucun destinataire) a l'image du reste du testKit du depot. */
 export class InMemoryRecipientDirectory implements RecipientDirectory {
   private readonly byTenant = new Map<string, string[]>();
+  private readonly superAdmins: { userId: string; email: string }[] = [];
 
   seed(tenantId: string, emails: readonly string[]): void {
     this.byTenant.set(tenantId, [...emails]);
   }
 
+  /** Seed d'un `SUPER_ADMIN` actif (ADR-0005 Amendement 1, O-04 residu 4 — alerte break-glass). */
+  seedSuperAdmin(userId: string, email: string): void {
+    this.superAdmins.push({ userId, email });
+  }
+
   async findTenantAdminEmails(tenantId: string): Promise<readonly string[]> {
     return this.byTenant.get(tenantId) ?? [];
+  }
+
+  async findActiveSuperAdminEmails(excludeUserId: string): Promise<readonly string[]> {
+    return this.superAdmins.filter((entry) => entry.userId !== excludeUserId).map((entry) => entry.email);
   }
 }

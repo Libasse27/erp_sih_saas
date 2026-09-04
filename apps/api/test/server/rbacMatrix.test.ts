@@ -19,6 +19,7 @@ import {
   idFor,
   InMemoryAuditTrail,
   InMemoryMfaEnrollmentRepository,
+  InMemoryRoleRepository,
   InMemorySessionStore,
   InMemoryUnitOfWork,
   InMemoryUserAccountRepository,
@@ -120,6 +121,10 @@ describe('Matrice RBAC — ForceMfaReEnrollment (permission mfa:reset, module id
     const idGenerator = new SequentialIdGenerator();
     const accounts = new InMemoryUserAccountRepository();
     const memberships = new InMemoryUserTenantMembershipRepository();
+    // Vide (aucun seed) : le sujet de ce test n'a JAMAIS de role assigne (`initialRoleIds: []`
+    // ci-dessous) — la nouvelle verification admin-sur-admin (ADR-0005 Amendement 1) ne peut donc
+    // jamais se declencher ici, cette matrice reste isolee sur la seule permission `mfa:reset`.
+    const roles = new InMemoryRoleRepository();
     const mfaEnrollments = new InMemoryMfaEnrollmentRepository();
     const sessions = new InMemorySessionStore();
     const auditTrail = new InMemoryAuditTrail();
@@ -127,6 +132,7 @@ describe('Matrice RBAC — ForceMfaReEnrollment (permission mfa:reset, module id
       sessions,
       accounts,
       memberships,
+      roles,
       mfaEnrollments,
       buildTestRefreshTokenIssuer({ clock, idGenerator }),
       auditTrail,
