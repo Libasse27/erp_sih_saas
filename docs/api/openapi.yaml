@@ -223,6 +223,26 @@ paths:
                   value: { error: forbidden }
                 mfaRequired:
                   value: { error: mfa_required }
+        '429':
+          description: >
+            Limitation de debit depassee (ADR-0011 §2/§4) — CLE par sujet authentifie
+            (`actorUserId`), jamais par adresse IP : deux administrateurs derriere le meme reseau
+            ne se genent jamais l'un l'autre, mais un meme compte est limite quel que soit le
+            reseau utilise. Ecrit AU PREALABLE (avant cette reponse) une entree d'audit
+            `AUDIT_TRAIL_QUERY_DENIED` (`reason: RATE_LIMIT_EXCEEDED`), une seule fois par fenetre
+            — jamais une par requete rejetee.
+          headers:
+            Retry-After:
+              description: Duree NOMINALE de la fenetre, en secondes entieres (jamais le temps residuel).
+              schema:
+                type: integer
+              example: 60
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: too_many_requests
         '500':
           description: Defaillance technique — jamais de detail interne expose.
           content:
@@ -276,7 +296,7 @@ components:
       properties:
         error:
           type: string
-          enum: [invalid_request, unauthenticated, forbidden, mfa_required, internal_error]
+          enum: [invalid_request, unauthenticated, forbidden, mfa_required, too_many_requests, internal_error]
 
     AuditEntryDto:
       type: object

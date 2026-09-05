@@ -37,6 +37,8 @@ import { SuperAdminBreakGlassController } from './modules/identity/presentation/
 import { RegistrationController } from './presentation/http/RegistrationController.js';
 import { RedisRateLimiter } from './shared-kernel/infrastructure/RedisRateLimiter.js';
 import { createRateLimitMiddleware } from './shared-kernel/infrastructure/RateLimitMiddleware.js';
+import { createAuditEntriesRateLimitMiddleware } from './shared-kernel/infrastructure/AuditEntriesRateLimitMiddleware.js';
+import { createSilentRateLimitGuard } from './shared-kernel/infrastructure/SilentRateLimitGuard.js';
 import {
   LOGIN_RATE_LIMIT_MAX_REQUESTS,
   LOGIN_RATE_LIMIT_WINDOW_SECONDS,
@@ -44,7 +46,12 @@ import {
   MFA_ROUTES_RATE_LIMIT_WINDOW_SECONDS,
   REGISTRATION_RATE_LIMIT_MAX_REQUESTS,
   REGISTRATION_RATE_LIMIT_WINDOW_SECONDS,
+  AUDIT_ENTRIES_RATE_LIMIT_MAX_REQUESTS,
+  AUDIT_ENTRIES_RATE_LIMIT_WINDOW_SECONDS,
+  PAYMENT_WEBHOOK_RATE_LIMIT_MAX_REQUESTS,
+  PAYMENT_WEBHOOK_RATE_LIMIT_WINDOW_SECONDS,
 } from './shared-kernel/domain/RateLimitTuning.js';
+import { AUDIT_TRAIL_QUERY_RATE_LIMIT_REASON } from './modules/audit/application/commands/RecordAuditAccess.js';
 import { buildTenantModule, type TenantModule } from './modules/tenant/infrastructure/TenantModule.js';
 import type { UserAccountExistenceChecker } from './modules/tenant/application/ports/UserAccountExistenceChecker.js';
 import type { HealthFacilityRepository } from './modules/tenant/domain/ports/HealthFacilityRepository.js';
@@ -497,6 +504,13 @@ export interface CompositionRoot {
     readonly rateLimitRegistrations: RequestHandler;
     readonly rateLimitLogin: RequestHandler;
     readonly rateLimitMfa: RequestHandler;
+    /**
+     * ADR-0011 §2/§4 — DISTINCT des trois ci-dessus (`createAuditEntriesRateLimitMiddleware`,
+     * jamais `createRateLimitMiddleware`) : cle par sujet authentifie, jamais par IP ; ecrit une
+     * entree d'audit sur le premier rejet d'une fenetre. Monte APRES
+     * `requireAuthenticatedContext` dans `server.ts`.
+     */
+    readonly rateLimitAuditEntries: RequestHandler;
   };
   /**
    * Demarre les 4 processus de fond de cette etape (D9 + O-25.6 + O-25.5 + ADR-0007) : relais
@@ -518,6 +532,44 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
   const prisma = new PrismaClient({ datasourceUrl: env.DATABASE_URL });
   const redis = new Redis(env.REDIS_URL, { maxRetriesPerRequest: 3, lazyConnect: false });
   const logger = new ConsoleStructuredLogger();
+
+  // Limiteur de debit PARTAGE (ADR-0010 §8/§12 point 4, etendu ADR-0011) — port `RateLimiter`
+  // (shared-kernel), implementation Redis REELLE (connexion `redis` deja partagee par les
+  // sessions/le cache, jamais une connexion dediee supplementaire). Construit ICI, avant TOUT
+  // module, car le webhook paiement (ADR-0011 §3/§5) en a besoin AVANT que le module `payment`
+  // lui-meme soit construit plus bas — UN SEUL point de construction pour TOUTE la limitation de
+  // debit du depot, jamais une seconde instance.
+  const rateLimiter = new RedisRateLimiter(redis);
+
+  // ADR-0011 §3/§5/§7, decision D4 — webhook paiement : compteur GLOBAL (jamais par IP ni par
+  // tenant, le tenant n'etant connu qu'APRES verification HMAC, voir ConfirmPayment.ts), reponse
+  // SILENCIEUSE (`200`, jamais `429` — invariant preexistant ferme et teste, commit `649a7b6`).
+  // Factory SEPAREE de `createRateLimitMiddleware` (aucun drapeau `silent` ajoute a cette
+  // derniere, alternative ecartee #6 d'ADR-0011). Construit ICI (composition-root.ts, seul point
+  // de cablage), puis simplement TRANSMIS en dependance a `buildPaymentModule` ci-dessous —
+  // `PaymentModule.ts` ne construit rien lui-meme, il ne fait qu'exposer ce qu'on lui donne.
+  const rateLimitWebhook = createSilentRateLimitGuard({
+    route: 'payment-webhook',
+    limiter: rateLimiter,
+    maxRequests: PAYMENT_WEBHOOK_RATE_LIMIT_MAX_REQUESTS,
+    windowSeconds: PAYMENT_WEBHOOK_RATE_LIMIT_WINDOW_SECONDS,
+    onRejected: (reason) => {
+      // Log structure, JAMAIS une `AuditEntry` (ADR-0011 §5.3 : aucun acteur imputable, aucun
+      // sujet, aucun tenant connu a ce stade). Convention DEJA en place dans le module `payment`
+      // (ConfirmPayment.ts : `invalid_signature`, `invalid_payload`, ...) — reprise ICI plutot que
+      // dans `SilentRateLimitGuard.ts`, qui n'importe jamais le vocabulaire du module `payment`.
+      //
+      // ADR-0011 Amendement 1, BLOQUANT-1 : le motif transmis par le guard distingue un vrai
+      // depassement de seuil (`'threshold_exceeded'`) d'une panne du limiteur lui-meme
+      // (`'limiter_unavailable'`) — traduit ICI en deux motifs de LOG distincts, jamais confondus :
+      // journaliser une panne du limiteur sous `rate_limited` mentirait sur la cause reelle.
+      const logReason = reason === 'limiter_unavailable' ? 'rate_limiter_unavailable' : 'rate_limited';
+      logger.warn(
+        { event: 'payment.webhook.rejected', reason: logReason },
+        'Webhook paiement ignore (limitation de debit)',
+      );
+    },
+  });
 
   // `userAccountsForExistenceCheck` : instance DEDIEE de `PrismaUserAccountRepository` (ADR-0008
   // §9, amendement 1, etape 10/13), construite AVANT le module Tenant lui-meme — Tenant a
@@ -602,6 +654,7 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
     confirmPaymentLogger: logger,
     webhookControllerLogger: logger,
     billingAuditTrail,
+    rateLimitWebhook,
   });
 
   // Notifications (Phase 0, etape 9/13, ADR-0007). Fournisseurs SANDBOX pour Email ET SMS —
@@ -853,12 +906,11 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
   );
 
   // Limiteur de debit PARTAGE (ADR-0010 §8/§12 point 4) — port `RateLimiter` (shared-kernel),
-  // implementation Redis REELLE (connexion `redis` deja partagee par les sessions/le cache
-  // ci-dessus, jamais une connexion dediee supplementaire). UN SEUL point de cablage : trois
-  // appels de la MEME factory, un par famille de limite (routes/valeurs dans
-  // shared-kernel/domain/RateLimitTuning.ts, explicitement non definitives). Aucun litteral
-  // numerique ici — uniquement des constantes nommees importees du fichier de reglage dedie.
-  const rateLimiter = new RedisRateLimiter(redis);
+  // implementation Redis REELLE construite plus haut (`rateLimiter`, avant meme le module
+  // `payment`, ADR-0011). UN SEUL point de cablage : trois appels de la MEME factory, un par
+  // famille de limite (routes/valeurs dans shared-kernel/domain/RateLimitTuning.ts, explicitement
+  // non definitives). Aucun litteral numerique ici — uniquement des constantes nommees importees
+  // du fichier de reglage dedie.
   const rateLimitRegistrations = createRateLimitMiddleware({
     route: 'registrations',
     limiter: rateLimiter,
@@ -879,6 +931,35 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
     limiter: rateLimiter,
     maxRequests: MFA_ROUTES_RATE_LIMIT_MAX_REQUESTS,
     windowSeconds: MFA_ROUTES_RATE_LIMIT_WINDOW_SECONDS,
+  });
+
+  // ADR-0011 §2/§4 — `GET /api/v1/audit-entries` : limiteur DEDIE (`createAuditEntriesRateLimitMiddleware`,
+  // DISTINCT de `createRateLimitMiddleware` ci-dessus), cle EXCLUSIVEMENT sur le sujet authentifie
+  // (`res.locals.auditPrincipal.actorUserId`, depose par `requireAuthenticatedContext` — jamais
+  // `req.ip`). Sur le PREMIER franchissement du seuil dans la fenetre, ecrit une entree d'audit
+  // `AUDIT_TRAIL_QUERY_DENIED`/`DENIED`/`reason: AUDIT_TRAIL_QUERY_RATE_LIMIT_REASON` via
+  // `RecordAuditAccessHandler` (module `audit`, deja construit ci-dessus) AVANT le `429` — jamais
+  // une entree par requete rejetee (borne d'amplification, ADR-0009 §2.1). La factory partagee
+  // (shared-kernel) ne connait, elle, ni `audit` ni `identity` : elle recoit deux fonctions
+  // simples (lecture du sujet depuis `res.locals`, ecriture sur premier rejet uniquement).
+  const rateLimitAuditEntries = createAuditEntriesRateLimitMiddleware<AuditReadPrincipal>({
+    limiter: rateLimiter,
+    maxRequests: AUDIT_ENTRIES_RATE_LIMIT_MAX_REQUESTS,
+    windowSeconds: AUDIT_ENTRIES_RATE_LIMIT_WINDOW_SECONDS,
+    getSubject: (res) => {
+      const locals = res.locals as Partial<AuditHttpLocals>;
+      return locals.auditPrincipal ?? null;
+    },
+    onFirstRejectionInWindow: async (req, res, principal) => {
+      const locals = res.locals as Partial<AuditHttpLocals>;
+      await audit.commands.recordAuditAccess.execute({
+        principal,
+        outcome: 'DENIED',
+        sessionId: locals.sessionId ?? null,
+        correlationId: req.header('x-correlation-id') ?? null,
+        reason: AUDIT_TRAIL_QUERY_RATE_LIMIT_REASON,
+      });
+    },
   });
 
   let outboxRelayJob: PeriodicJobHandle | undefined;
@@ -910,6 +991,7 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
       rateLimitRegistrations,
       rateLimitLogin,
       rateLimitMfa,
+      rateLimitAuditEntries,
     },
     startBackgroundJobs(): void {
       // `autorun: false` a la construction (voir OutboxWorker.ts) : demarre explicitement ici,

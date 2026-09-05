@@ -6,11 +6,26 @@ import type { AuditReadPrincipal } from '../AuditReadPrincipal.js';
 
 export type RecordAuditAccessOutcome = 'GRANTED' | 'DENIED';
 
+/**
+ * Discriminant MACHINE (ADR-0011 §4.2) d'un refus de consultation du journal du a la limitation de
+ * debit — jamais un litteral disperse. Porte par `reason` sur une entree `AUDIT_TRAIL_QUERY_DENIED`
+ * / `outcome: DENIED` ; les refus d'AUTORISATION (permission absente, perimetre invalide)
+ * continuent de porter `reason: null` — c'est ce qui les distingue en base, sans nouvel
+ * `AuditEventType` ni migration.
+ */
+export const AUDIT_TRAIL_QUERY_RATE_LIMIT_REASON = 'RATE_LIMIT_EXCEEDED';
+
 export interface RecordAuditAccessCommand {
   readonly principal: AuditReadPrincipal;
   readonly outcome: RecordAuditAccessOutcome;
   readonly sessionId: string | null;
   readonly correlationId: string | null;
+  /**
+   * `null` pour tout refus d'AUTORISATION (non-regression exacte, ADR-0011 §4.2) ou pour un acces
+   * `GRANTED` ; `AUDIT_TRAIL_QUERY_RATE_LIMIT_REASON` pour un refus de RYTHME (limitation de debit,
+   * ADR-0011 §4). Champ ADDITIF : tous les appelants existants passent `null`.
+   */
+  readonly reason: string | null;
 }
 
 export interface AuditEntryRecorder {
@@ -51,7 +66,7 @@ export class RecordAuditAccessHandler {
           subjectUserId: null,
           targetType: 'AUDIT_TRAIL',
           targetId: null,
-          reason: null,
+          reason: command.reason,
           sessionId: command.sessionId,
           correlationId: command.correlationId,
         });

@@ -33,12 +33,19 @@ return current
  * jamais le TTL residuel lu depuis Redis (`PTTL`/`TTL`) : c'est precisement ce qui garantit la
  * propriete testable d'ADR-0010 §8 ("deux rejets `429` survenant a des instants differents d'une
  * MEME fenetre portent une valeur de `Retry-After` STRICTEMENT identique").
+ *
+ * `firstRejectionInWindow` (champ ADDITIF, ADR-0011 §4.3/§7) se deduit du MEME compteur `current`
+ * deja retourne par le script Lua — aucun appel Redis supplementaire, aucune commande ajoutee.
  */
 export class RedisRateLimiter implements RateLimiter {
   constructor(private readonly redis: Redis) {}
 
   async consume(key: string, limit: number, windowSeconds: number): Promise<RateLimitDecision> {
-    const count = await this.redis.eval(CONSUME_SCRIPT, 1, key, windowSeconds.toString());
-    return { allowed: Number(count) <= limit, retryAfterSeconds: windowSeconds };
+    const current = Number(await this.redis.eval(CONSUME_SCRIPT, 1, key, windowSeconds.toString()));
+    return {
+      allowed: current <= limit,
+      retryAfterSeconds: windowSeconds,
+      firstRejectionInWindow: current === limit + 1,
+    };
   }
 }

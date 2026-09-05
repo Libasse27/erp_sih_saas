@@ -32,3 +32,17 @@ export const LOGIN_RATE_LIMIT_WINDOW_SECONDS = 60;
 /** Les TROIS routes MFA (§7 bis) — surfaces pre-authentification portant un `Bearer` `MFA_PENDING`, jamais un contexte complet (ADR-0010 §8). */
 export const MFA_ROUTES_RATE_LIMIT_MAX_REQUESTS = 10;
 export const MFA_ROUTES_RATE_LIMIT_WINDOW_SECONDS = 60;
+
+/**
+ * Quatre constantes ADR-0011 §6/§9 point C (validees telles quelles par le responsable technique
+ * le 2026-09-05) — MEME regime NON DEFINITIF que les six constantes ci-dessus. `GET
+ * /api/v1/audit-entries` est une route AUTHENTIFIEE, cle = sujet (`actorUserId`), ADR-0011 §2 :
+ * elle n'a donc RIEN a voir avec les cinq routes anonymes ci-dessus, mais partage le MEME
+ * mecanisme (port `RateLimiter`, `RedisRateLimiter`) et le MEME regime de reglage.
+ */
+export const AUDIT_ENTRIES_RATE_LIMIT_MAX_REQUESTS = 30;
+export const AUDIT_ENTRIES_RATE_LIMIT_WINDOW_SECONDS = 60;
+
+/** `POST /api/v1/payments/webhook` — compteur GLOBAL unique, jamais par IP ni par tenant, ADR-0011 §3. */
+export const PAYMENT_WEBHOOK_RATE_LIMIT_MAX_REQUESTS = 120;
+export const PAYMENT_WEBHOOK_RATE_LIMIT_WINDOW_SECONDS = 60;

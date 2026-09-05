@@ -95,6 +95,11 @@ export function createApp(root: CompositionRoot): Express {
 
   app.post(
     '/api/v1/payments/webhook',
+    // ADR-0011 §3/§5/§7 — PREMIER middleware, AVANT `express.raw()` : sous flood, le corps (jusqu'a
+    // 256 Ko) ne doit JAMAIS etre lu/bufferise avant que la decision de limitation soit prise
+    // (meme invariant que le correctif BLOQUANT-3 d'ADR-0010 §9). Compteur GLOBAL, reponse
+    // TOUJOURS `200` en cas de rejet (jamais `429` — voir SilentRateLimitGuard.ts).
+    root.payment.presentation.rateLimitWebhook,
     express.raw({ type: '*/*', limit: '256kb' }),
     root.payment.presentation.webhookController.handle,
   );
@@ -151,6 +156,11 @@ export function createApp(root: CompositionRoot): Express {
   app.get(
     '/api/v1/audit-entries',
     root.presentation.requireAuthenticatedContext,
+    // ADR-0011 §2/§4/§7 — APRES `requireAuthenticatedContext` (sa cle, le sujet authentifie,
+    // n'existe pas avant) et AVANT le controleur (aucun acces PostgreSQL du journal sur une
+    // requete rejetee). Sur `429`, ecrit prealablement une entree d'audit dediee (voir
+    // composition-root.ts) — jamais un rejet muet sur cette route.
+    root.presentation.rateLimitAuditEntries,
     asyncRoute(root.presentation.auditEntryController.list),
   );
 

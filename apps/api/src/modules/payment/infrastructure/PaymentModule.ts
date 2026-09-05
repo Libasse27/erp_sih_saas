@@ -1,4 +1,5 @@
 import type { PrismaClient } from '@prisma/client';
+import type { RequestHandler } from 'express';
 import type { Clock } from '../../../shared-kernel/domain/ports/Clock.js';
 import type { IdGenerator } from '../../../shared-kernel/domain/ports/IdGenerator.js';
 import type { UnitOfWork } from '../../../shared-kernel/application/UnitOfWork.js';
@@ -47,6 +48,14 @@ export interface PaymentModule {
   };
   readonly presentation: {
     readonly webhookController: PaymentWebhookController;
+    /**
+     * ADR-0011 §3/§5/§7 — guard `createSilentRateLimitGuard` (shared-kernel), CONSTRUIT
+     * exclusivement dans `composition-root.ts` (jamais ici : cette factory partagee ne connait ni
+     * `payment` ni `audit`) et simplement RECU en dependance, comme `webhookControllerLogger`
+     * ci-dessous. Monte en PREMIER middleware de la route dans `server.ts`, AVANT
+     * `express.raw()`.
+     */
+    readonly rateLimitWebhook: RequestHandler;
   };
 }
 
@@ -64,6 +73,8 @@ export function buildPaymentModule(deps: {
   webhookControllerLogger?: PaymentWebhookControllerLogger;
   /** Port sortant vers le module `audit`, categorie `BILLING` (ADR-0009 §2.2/§4) — l'adaptateur reel est cable par composition-root.ts. */
   billingAuditTrail: BillingAuditTrail;
+  /** ADR-0011 §3/§5/§7 — deja CONSTRUIT par `composition-root.ts` (`createSilentRateLimitGuard`), simplement transmis a la presentation de ce module. */
+  rateLimitWebhook: RequestHandler;
 }): PaymentModule {
   const payments = new PrismaPaymentRepository(deps.prisma);
   const platformInvoices = new PrismaPlatformInvoiceRepository(deps.prisma);
@@ -133,6 +144,7 @@ export function buildPaymentModule(deps: {
     },
     presentation: {
       webhookController: new PaymentWebhookController(confirmPayment, deps.webhookControllerLogger),
+      rateLimitWebhook: deps.rateLimitWebhook,
     },
   };
 }

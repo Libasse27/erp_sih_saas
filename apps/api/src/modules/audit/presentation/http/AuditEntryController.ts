@@ -63,6 +63,11 @@ export class AuditEntryController {
       outcome: authorization.isSuccess() ? 'GRANTED' : 'DENIED',
       sessionId,
       correlationId,
+      // Refus d'AUTORISATION (jamais de rythme) : `reason: null`, non-regression exacte ADR-0011
+      // §4.2 — distingue ce refus du rejet de limitation de debit, ecrit par
+      // `AuditEntriesRateLimitMiddleware.ts`/`composition-root.ts` avec `reason:
+      // AUDIT_TRAIL_QUERY_RATE_LIMIT_REASON`.
+      reason: null,
     });
 
     if (authorization.isFailure()) {

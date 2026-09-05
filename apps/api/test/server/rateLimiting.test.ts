@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildCompositionRoot, type CompositionRoot } from '../../src/composition-root.js';
 import { createApp } from '../../src/server.js';
@@ -8,7 +9,7 @@ import {
   MFA_ROUTES_RATE_LIMIT_MAX_REQUESTS,
 } from '../../src/shared-kernel/domain/RateLimitTuning.js';
 import { Email } from '../../src/modules/identity/domain/value-objects/Email.js';
-import { bearer, nextLoopbackIp, postJson, postRaw, startTestServer, type TestServerHandle } from './httpTestClient.js';
+import { bearer, correlationId, nextLoopbackIp, postJson, postRaw, startTestServer, type TestServerHandle } from './httpTestClient.js';
 import { uniqueEmail, uniqueFacilityName } from '../identity/integration/dbTestHelpers.js';
 
 function registrationBody(prefix: string): { email: string; password: string; facilityName: string } {
@@ -162,10 +163,23 @@ describe('Limitation de debit partagee (ADR-0010 §8)', () => {
     for (let i = 0; i < REGISTRATION_RATE_LIMIT_MAX_REQUESTS; i += 1) {
       await postJson(handle.baseUrl, '/api/v1/registrations', registrationBody('rate-limit-no-audit'), { localAddress: ip });
     }
-    const countBefore = await root.prisma.auditEntry.count();
-    const rejected = await postJson(handle.baseUrl, '/api/v1/registrations', registrationBody('rate-limit-no-audit'), { localAddress: ip });
+    // `X-Correlation-Id` UNIQUE a la SEULE requete rejetee de ce scenario (jamais reutilise
+    // ailleurs) : le delta est ainsi borne au PERIMETRE EXACT de ce scenario, jamais un `count()`
+    // GLOBAL sur toute la table `AuditEntry` — celui-ci collisionne avec
+    // `auditEntriesRateLimiting.test.ts`, qui ecrit plusieurs centaines d'entrees `AUDIT_TRAIL_QUERIED`
+    // en parallele sur la meme base de test partagee (ADR-0011 Amendement 1, BLOQUANT-2). La
+    // requete rejetee ne peut de toute facon jamais atteindre le controleur (le limiteur est monte
+    // en PREMIER middleware, avant `express.json()`), donc aucune entree ne peut porter ce
+    // correlationId : le compte doit rester `0` avant ET apres, quel que soit ce qui se passe en
+    // parallele dans d'autres fichiers de test.
+    const scenarioCorrelationId = `rate-limit-no-audit-${randomUUID()}`;
+    const countBefore = await root.prisma.auditEntry.count({ where: { correlationId: scenarioCorrelationId } });
+    const rejected = await postJson(handle.baseUrl, '/api/v1/registrations', registrationBody('rate-limit-no-audit'), {
+      localAddress: ip,
+      headers: correlationId(scenarioCorrelationId),
+    });
     expect(rejected.status).toBe(429);
-    const countAfter = await root.prisma.auditEntry.count();
+    const countAfter = await root.prisma.auditEntry.count({ where: { correlationId: scenarioCorrelationId } });
     expect(countAfter).toBe(countBefore);
   });
 

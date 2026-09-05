@@ -21,6 +21,18 @@ export interface RateLimitDecision {
    * cas (c'est une CONSTANTE de la politique de la route, pas un etat du compteur).
    */
   readonly retryAfterSeconds: number;
+  /**
+   * Champ ADDITIF (ADR-0011 §4.3/§7) — SANS EFFET sur les cinq routes d'ADR-0010, qui l'ignorent
+   * purement et simplement. `true` si et seulement si le compteur, APRES incrementation, vaut
+   * EXACTEMENT `limit + 1` : c'est-a-dire la premiere requete qui FAIT franchir le seuil dans la
+   * fenetre courante — jamais `true` pour les rejets suivants de la MEME fenetre (qui valent
+   * `limit + 2`, `limit + 3`, ...), jamais `true` pour une requete acceptee (`allowed === true`).
+   * Permet a `AuditEntriesRateLimitMiddleware.ts` d'ecrire AU PLUS une entree d'audit par sujet et
+   * par fenetre (ADR-0009 §2.1 : jamais un debit d'ecriture non borne dans une table non
+   * purgeable), meme regime que `SESSION_LOGIN_FAILED`/`MFA_FACTOR_LOCKED_OUT` deja dedupliques
+   * par fenetre ailleurs dans ce depot.
+   */
+  readonly firstRejectionInWindow: boolean;
 }
 
 export interface RateLimiter {
