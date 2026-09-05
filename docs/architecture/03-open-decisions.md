@@ -447,6 +447,29 @@ une conception dédiée.
 - **Ne pas traiter en passant** pendant une autre étape sans mandat explicite. Ne rouvre pas
   l'étape 12 (`649a7b6`, CLOSE, 784/784 tests, CI verte, revue sécurité indépendante GO).
 
+### CI-02 — Timeout intermittent `outboxRelay.test.ts` (verrou périmé) sous charge de test parallèle
+**TECHNIQUE · Ouvert · Non bloquant**
+
+- **Découvert** : étape 12, item 9 (2026-09-05), en fermant le rate limiting audit-entries/webhook
+  (commit `fa015d1`, ADR-0011).
+- **Symptôme** : `test/shared-kernel/integration/outboxRelay.test.ts` (scénario « verrou périmé »)
+  échoue par `Error: Test timed out in 20000ms` uniquement en suite complète (`pnpm -r run test`),
+  jamais en isolation (vert, ~2,9 s).
+- **Cause suspectée** : le mécanisme *stalled* BullMQ du test (configuré à ~300 ms) et la
+  réclamation de verrou sont sensibles à la charge CPU/IO globale de la suite ; le volume de test
+  ajouté par l'item 9 (un seul fichier, `auditEntriesRateLimiting.test.ts`, dure ~93 s à lui seul)
+  a rendu ce timeout plus probable, sans lien de code : `outboxRelay.test.ts` n'importe ni
+  `composition-root.ts`, ni `server.ts`, ni aucun fichier de rate-limiting — sa propre connexion
+  Redis/Postgres est indépendante.
+- **Impact** : échec CI/local intermittent sous charge parallèle réelle, sans défaut applicatif
+  démontré — même famille que `CI-01` (temporisation fragile sous concurrence de test, pas une
+  régression du code testé).
+- **Action future** : desserrer la marge du scénario « verrou périmé » (délai de test très proche
+  du seuil de détection *stalled*), ou isoler ce fichier du parallélisme Vitest.
+- **Ne pas traiter en passant** pendant une autre étape sans mandat explicite. Ne rouvre pas
+  l'étape 12/item 9 (`fa015d1`, CLOSE, 817/817 tests verts sur l'exécution de clôture, gates vertes,
+  deux revues de sécurité indépendantes, GO final).
+
 ---
 
 ## Suivi
