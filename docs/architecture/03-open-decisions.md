@@ -425,6 +425,30 @@ une conception dédiée.
 
 ---
 
+## Résidus techniques CI (hors décisions O-*)
+
+> Cette section ne fait pas partie des décisions métier/technique O-01…O-25 ci-dessus : ce sont
+> des résidus de fiabilité d'infrastructure de test, sans impact sur le comportement applicatif
+> ni sur les preuves de sécurité déjà établies. Ils ne bloquent aucune phase et ne doivent
+> **jamais** être corrigés en passant, hors mandat explicite.
+
+### CI-01 — Race de seeding global `Permission.code` entre workers de test
+**TECHNIQUE · Ouvert · Non bloquant**
+
+- **Découvert** : étape 12 (2026-09-04), lors de la revue du run CI du commit `95c4b02`
+  (référence break-glass SUPER_ADMIN), qui avait en réalité échoué.
+- **Symptôme** : `refreshTokenRotation.test.ts` échoue avec `P2002` sur `Permission.code`.
+- **Cause suspectée** : `seedPermissionCatalog()` exécuté concurremment par plusieurs workers de
+  test sur une base PostgreSQL partagée en CI (concurrence plus élevée qu'en local).
+- **Impact** : échec CI intermittent, sans défaut applicatif démontré — confirmé comme flake
+  d'infrastructure (le commit suivant, même code de seed, est passé sans problème).
+- **Action future** : isoler le seed par worker/fichier, ou rendre son exécution concurrente
+  sûre (upsert idempotent, verrou, ou fixture partagée en lecture seule).
+- **Ne pas traiter en passant** pendant une autre étape sans mandat explicite. Ne rouvre pas
+  l'étape 12 (`649a7b6`, CLOSE, 784/784 tests, CI verte, revue sécurité indépendante GO).
+
+---
+
 ## Suivi
 
 | ID | Sujet | Type | Bloque | Statut | Décideur |
