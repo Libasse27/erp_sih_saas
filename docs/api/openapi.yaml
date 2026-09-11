@@ -1,13 +1,20 @@
 openapi: 3.1.0
 info:
-  title: SIH SaaS API — Paiement d'abonnement (O-25) et audit plateforme (ADR-0009)
-  version: 0.2.0
+  title: SIH SaaS API — Contrat HTTP complet de la Phase 0 (SaaS Core)
+  version: 0.3.0
   description: >
     Premier fichier OpenAPI de ce depot (Phase 0, etape 5/13 : confirmation de paiement
     d'abonnement SaaS serveur-a-serveur, O-25.5). Etendu a l'etape 11/13 (ADR-0009) avec le
     PREMIER endpoint HTTP AUTHENTIFIE du depot : consultation du journal d'audit plateforme
-    (`GET /api/v1/audit-entries`). Aucune autre route CRUD Payment/PlatformInvoice/Audit n'est
-    exposee (aucun besoin identifie a ce stade, B2 ADR-0009 : aucune interface graphique).
+    (`GET /api/v1/audit-entries`). Etendu a l'etape 12/13 item 11 (gap transverse, pas specifique
+    a l'isolation/securite) pour couvrir les 10 routes reellement montees dans `createApp()`
+    (`apps/api/src/server.ts`) : inscription/connexion/MFA (ADR-0010), recuperation break-glass
+    `SUPER_ADMIN` (ADR-0005 Amendement 1) et `/health`. Document PUREMENT DESCRIPTIF : aucune
+    route ici n'introduit un comportement nouveau — chaque section reference l'ADR qui a
+    reellement tranche le comportement documente, verifie par relecture du controleur et des
+    tests d'integration existants (jamais suppose). Aucune route CRUD Payment/PlatformInvoice/
+    Audit au-dela de celles deja exposees (aucun besoin identifie a ce stade, B2 ADR-0009 :
+    aucune interface graphique).
 
 servers:
   - url: https://api.exemple.sn
@@ -68,6 +75,764 @@ paths:
             inconnue) — reponse volontairement identique dans tous les cas (O-25.5, "rejet
             silencieux, pas d'erreur qui fuite d'info"). Corps toujours vide.
 
+  /health:
+    get:
+      operationId: healthCheck
+      tags: [System]
+      summary: Verification de disponibilite du serveur
+      description: >
+        Aucune authentification, aucune logique metier — verifie uniquement que le processus
+        Express repond (`server.ts`). N'accede a aucune dependance (PostgreSQL/Redis) : un
+        `200` ici ne garantit pas que ces dependances sont elles-memes disponibles.
+      security: []
+      responses:
+        '200':
+          description: Toujours renvoye tant que le processus repond.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, now]
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+                  now:
+                    type: string
+                    format: date-time
+                    description: Horloge serveur (`root.clock.now()`), ISO 8601 UTC.
+              example:
+                status: ok
+                now: '2026-09-11T10:00:00.000Z'
+
+  /api/v1/registrations:
+    post:
+      operationId: registerHealthFacility
+      tags: [Registration]
+      summary: Inscription — creation d'un compte utilisateur ET d'un etablissement (ADR-0010 §2/§3)
+      description: >
+        Route NON authentifiee, CREATRICE D'ETAT DURABLE (ADR-0010 §Contexte 5) : le tenant cree
+        n'est supprimable par AUCUN mecanisme du depot (O-03.1). Enchaine EXACTEMENT deux
+        commandes dans la MEME requete serveur — `CreateUserAccount` PUIS
+        `CreateHealthFacility(ownerUserId)`, `ownerUserId` etant TOUJOURS l'identifiant retourne
+        par la premiere commande, jamais un champ du corps HTTP (anti mass-assignment, ADR-0008
+        §9). `platformRole` est fixe a `NONE` cote serveur, jamais accepte du client. Si la
+        seconde commande echoue apres la premiere (pathologique), le compte reste ORPHELIN,
+        assume (aucune compensation, ADR-0008 §5) — le client recoit `500 internal_error`, sans
+        distinction du cas nominal.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, facilityName]
+              description: Schema `.strict()` (zod) — tout champ inconnu (`platformRole`, `tenantId`, `roleCodes`...) est rejete en `400`, jamais ignore silencieusement.
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 254
+                password:
+                  type: string
+                  minLength: 8
+                  maxLength: 512
+                facilityName:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+              example:
+                email: admin@clinique-exemple.sn
+                password: un-mot-de-passe-suffisamment-long
+                facilityName: Clinique de l'Exemple
+      responses:
+        '202':
+          description: >
+            JAMAIS `201` : le tenant existe (`HealthFacility` `ACTIVE`) mais n'est pas encore
+            ACCESSIBLE tant que la Saga de provisioning (Outbox) n'a pas complete
+            `StartTrialSubscription` de maniere asynchrone (ADR-0008 §3). `status` est une
+            constante litterale, jamais une lecture d'etat de Saga.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [userAccountId, tenantId, status]
+                properties:
+                  userAccountId:
+                    type: string
+                    format: uuid
+                  tenantId:
+                    type: string
+                    format: uuid
+                  status:
+                    type: string
+                    enum: [provisioning]
+        '400':
+          description: Corps malforme, champ inconnu (mass-assignment), ou JSON illisible.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: invalid_request
+        '409':
+          description: L'email est deja associe a un `UserAccount` existant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: email_already_registered
+        '429':
+          description: >
+            Limitation de debit (ADR-0010 §8) — cle par adresse IP (route anonyme, aucun sujet
+            authentifie a ce stade). Valeurs NON DEFINITIVES (`RateLimitTuning.ts`).
+          headers:
+            Retry-After:
+              description: Duree NOMINALE de la fenetre, en secondes entieres.
+              schema:
+                type: integer
+              example: 60
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: too_many_requests
+        '500':
+          description: Erreur pathologique (compte cree, etablissement non cree — compte orphelin assume, ADR-0008 §5), ou toute autre defaillance technique.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: internal_error
+
+  /api/v1/auth/sessions:
+    post:
+      operationId: createSession
+      tags: [Sessions]
+      summary: Connexion — authentification puis resolution de contexte (ADR-0010 §6)
+      description: >
+        Route NON authentifiee. Enchaine `AuthenticateUser` PUIS, seulement si l'identite est
+        verifiee, `ResolveTenantContext` — jamais l'inverse. `context` est une SELECTION du
+        client (jamais une preuve, revalidee integralement cote serveur contre les memberships
+        reels). Derivation de l'intention en l'absence de `context` (ADR-0010 §6) : `SUPER_ADMIN`
+        -> contexte `PLATFORM` ; exactement un tenant actif -> ce tenant ; zero ou plusieurs ->
+        `200 { status: "context_selection_required" }`, aucune session ouverte. AUCUNE distinction
+        email inconnu / mot de passe faux (anti-enumeration, un seul `401 invalid_credentials`).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              description: Schema `.strict()`. DELIBEREMENT aucune contrainte de format sur `email`/`password` au-dela de la non-vacuite (ADR-0010 §6) — un format invalide produit `401`, jamais `400`, pour ne pas ouvrir un canal distinct exploitable par un attaquant.
+              properties:
+                email:
+                  type: string
+                password:
+                  type: string
+                context:
+                  description: Selection EXPLICITE de contexte, optionnelle. Omise = derivation automatique (voir description).
+                  oneOf:
+                    - type: object
+                      required: [kind, tenantId]
+                      properties:
+                        kind:
+                          type: string
+                          enum: [TENANT]
+                        tenantId:
+                          type: string
+                          format: uuid
+                    - type: object
+                      required: [kind]
+                      properties:
+                        kind:
+                          type: string
+                          enum: [PLATFORM]
+              example:
+                email: admin@clinique-exemple.sn
+                password: un-mot-de-passe-suffisamment-long
+      responses:
+        '200':
+          description: >
+            Trois formes mutuellement exclusives, discriminees par `status`. Sur `authenticated`,
+            `Cache-Control: no-store` obligatoire (le corps porte `sessionId`/`refreshToken`
+            en clair, ADR-0010 §10 regle 5).
+          headers:
+            Cache-Control:
+              description: '`no-store` — present UNIQUEMENT sur la forme `authenticated` (secret en clair dans le corps).'
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/AuthenticatedSessionResponse'
+                  - $ref: '#/components/schemas/MfaRequiredResponse'
+                  - $ref: '#/components/schemas/ContextSelectionRequiredResponse'
+              examples:
+                authenticated:
+                  value:
+                    status: authenticated
+                    session:
+                      sessionId: 01J4Z6X9K3Q7R8S9T0U1V2W3X4
+                      kind: TENANT
+                      tenantId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                      roleCodes: [ADMIN_ETABLISSEMENT]
+                      permissionCodes: [audit:read]
+                      absoluteExpiresAt: '2026-09-12T10:00:00.000Z'
+                    refreshToken: 01J4Z6X9K3Q7R8S9T0U1V2W3X5.opaque
+                mfaRequired:
+                  value:
+                    status: mfa_required
+                    mfa:
+                      pendingSessionId: 01J4Z6X9K3Q7R8S9T0U1V2W3X6
+                      reason: CHALLENGE_REQUIRED
+                      expiresAt: '2026-09-11T10:05:00.000Z'
+                contextSelectionRequired:
+                  value:
+                    status: context_selection_required
+                    availableTenantIds:
+                      - 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                      - 9c858901-8a57-4791-81fe-4c455b099bc9
+        '400':
+          description: Corps malforme ou champ inconnu (mass-assignment).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: invalid_request
+        '401':
+          description: Identifiants invalides — indistinct entre email inconnu et mot de passe faux (anti-enumeration).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: invalid_credentials
+        '429':
+          description: Limitation de debit (ADR-0010 §8) — cle par adresse IP. Valeurs NON DEFINITIVES.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              example: 60
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: too_many_requests
+        '500':
+          description: Defaillance technique — jamais de detail interne expose.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: internal_error
+
+  /api/v1/auth/sessions/mfa-challenge:
+    post:
+      operationId: verifyMfaChallenge
+      tags: [Sessions, MFA]
+      summary: Second facteur — verification du code MFA d'une session en attente (ADR-0010 §7 bis C)
+      description: >
+        `pendingSessionId` transporte EXCLUSIVEMENT en `Authorization: Bearer` (jamais le corps).
+        NON montee derriere une authentification de contexte complet : une session `MFA_PENDING`
+        serait structurellement refusee par ce middleware. Partage le meme presentateur de reponse
+        que `POST /api/v1/auth/sessions` (branche `authenticated`) — jamais les trois autres
+        formes possibles de cette derniere.
+      security:
+        - bearerSessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [factor]
+              description: Schema `.strict()`, union discriminee sur `factor.kind`.
+              properties:
+                factor:
+                  oneOf:
+                    - type: object
+                      required: [kind, code]
+                      properties:
+                        kind:
+                          type: string
+                          enum: [TOTP]
+                        code:
+                          type: string
+                          maxLength: 64
+                    - type: object
+                      required: [kind, code]
+                      properties:
+                        kind:
+                          type: string
+                          enum: [RECOVERY_CODE]
+                        code:
+                          type: string
+                          maxLength: 64
+              example:
+                factor:
+                  kind: TOTP
+                  code: '123456'
+      responses:
+        '200':
+          description: 'Session complete emise. `Cache-Control: no-store` obligatoire.'
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthenticatedSessionResponse'
+        '400':
+          description: Corps malforme ou champ inconnu.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: invalid_request
+        '401':
+          description: >
+            `Authorization` absent/malforme, `pendingSessionId` inconnu ou n'etant plus en
+            attente de second facteur (reponse IDENTIQUE aux deux cas, anti-oracle d'etat de
+            jeton), OU code TOTP/recuperation invalide.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              examples:
+                unauthenticated:
+                  value: { error: unauthenticated }
+                invalidCredentials:
+                  value: { error: invalid_credentials }
+        '403':
+          description: Le contexte selectionne au moment de l'inscription n'est plus disponible (tenant suspendu/membership revoque entre-temps).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: forbidden
+        '409':
+          description: Aucun facteur MFA actif pour ce compte — l'enrolement doit etre complete d'abord.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: mfa_enrollment_required
+        '429':
+          description: >
+            DEUX origines distinctes possibles, memes corps et code HTTP, `Retry-After`
+            potentiellement different (assume par ADR-0010) : limitation de debit transport (cle
+            IP, ADR-0010 §8) OU verrou anti-brute-force DE COMPTE (§7 bis D, duree NOMINALE du
+            verrou).
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              example: 60
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: too_many_requests
+        '500':
+          description: Defaillance technique, ou garde defensive interne (jamais atteinte en usage normal).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: internal_error
+
+  /api/v1/auth/mfa/enrollment:
+    post:
+      operationId: startMfaEnrollment
+      tags: [MFA]
+      summary: Demarrer l'enrolement TOTP (ADR-0010 §7 bis A)
+      description: >
+        `pendingSessionId` EXCLUSIVEMENT en `Authorization: Bearer`. AUCUN corps de requete
+        accepte (tout corps non vide est un rejet `400` explicite — F-2, ADR-0005 : empeche
+        `{"userAccountId":"<autre compte>"}` d'etre accepte). `provisioningUri` porte le secret
+        TOTP EN CLAIR : `Cache-Control: no-store` obligatoire, jamais journalise.
+      security:
+        - bearerSessionAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              description: Doit etre absent OU un objet vide — tout champ produit `400`.
+      responses:
+        '200':
+          description: Secret TOTP provisionne, en attente de confirmation.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enrollmentId, provisioningUri]
+                properties:
+                  enrollmentId:
+                    type: string
+                    format: uuid
+                  provisioningUri:
+                    type: string
+                    description: URI `otpauth://` a scanner — secret TOTP en clair.
+              example:
+                enrollmentId: 7c8f0a2e-4b1d-4e9a-9f3e-1a2b3c4d5e6f
+                provisioningUri: otpauth://totp/SIH:admin@clinique-exemple.sn?secret=EXEMPLE&issuer=SIH
+        '400':
+          description: Corps non vide.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: invalid_request
+        '401':
+          description: >
+            `Authorization` absent/malforme, session inconnue, non en attente d'enrolement, ou
+            compte reference introuvable — reponse IDENTIQUE pour les trois causes (anti-oracle
+            d'etat de jeton).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: unauthenticated
+        '409':
+          description: Un facteur MFA actif existe deja et n'est pas remplacable dans cet etat.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: mfa_enrollment_already_active
+        '429':
+          description: Limitation de debit transport (cle IP, ADR-0010 §8). Valeurs NON DEFINITIVES.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              example: 60
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: too_many_requests
+        '500':
+          description: Defaillance technique.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: internal_error
+
+  /api/v1/auth/mfa/enrollment/confirmation:
+    post:
+      operationId: confirmMfaEnrollment
+      tags: [MFA]
+      summary: Confirmer l'enrolement TOTP par un code valide (ADR-0010 §7 bis B)
+      description: >
+        `pendingSessionId` EXCLUSIVEMENT en `Authorization: Bearer`. `recoveryCodes` n'est expose
+        qu'UNE SEULE FOIS dans cette reponse (ADR-0005 §3, jamais relisible ensuite) —
+        `Cache-Control: no-store` obligatoire, jamais journalise.
+      security:
+        - bearerSessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [totpCode]
+              properties:
+                totpCode:
+                  type: string
+                  maxLength: 32
+              example:
+                totpCode: '123456'
+      responses:
+        '200':
+          description: Enrolement confirme, codes de recuperation generes.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [recoveryCodes]
+                properties:
+                  recoveryCodes:
+                    type: array
+                    items:
+                      type: string
+              example:
+                recoveryCodes: [ab12-cd34-ef56, gh78-ij90-kl12]
+        '400':
+          description: Corps malforme.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: invalid_request
+        '401':
+          description: >
+            `Authorization` absent/malforme, session inconnue/non en attente d'enrolement
+            (`unauthenticated`), OU code TOTP invalide (`invalid_credentials`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              examples:
+                unauthenticated:
+                  value: { error: unauthenticated }
+                invalidCredentials:
+                  value: { error: invalid_credentials }
+        '409':
+          description: Aucun enrolement en attente pour cette session (introuvable ou aucun facteur en attente).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: mfa_enrollment_required
+        '429':
+          description: Verrou anti-brute-force DE COMPTE (§7 bis D), duree NOMINALE.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              example: 60
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: too_many_requests
+        '500':
+          description: Defaillance technique.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: internal_error
+
+  /api/v1/platform/super-admin/break-glass-requests:
+    post:
+      operationId: requestSuperAdminBreakGlass
+      tags: [PlatformBreakGlass]
+      summary: Demander la recuperation break-glass d'un compte SUPER_ADMIN (ADR-0005 Amendement 1)
+      description: >
+        Route AUTHENTIFIEE (jamais publique) — montee derriere le middleware commun qui resout un
+        contexte complet a partir d'`Authorization: Bearer`. L'autorisation FINE (session
+        `PLATFORM` + step-up MFA) reste entierement du ressort du handler applicatif, jamais de ce
+        contrat. Quorum de deux `SUPER_ADMIN` distincts : cette requete cree la demande, ne
+        l'approuve pas (voir la route d'approbation).
+      security:
+        - bearerSessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subjectUserAccountId, reason]
+              properties:
+                subjectUserAccountId:
+                  type: string
+                  format: uuid
+                reason:
+                  type: string
+                  minLength: 1
+                  maxLength: 500
+              example:
+                subjectUserAccountId: 7c8f0a2e-4b1d-4e9a-9f3e-1a2b3c4d5e6f
+                reason: Perte du facteur TOTP suite a changement de telephone.
+      responses:
+        '201':
+          description: Demande creee, en attente d'approbation par un second `SUPER_ADMIN`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [requestId]
+                properties:
+                  requestId:
+                    type: string
+                    format: uuid
+        '400':
+          description: Corps malforme, champ inconnu, ou `reason` vide apres normalisation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: invalid_request
+        '401':
+          description: Aucune session valide.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: unauthenticated
+        '403':
+          description: Session valide mais non habilitee (pas `PLATFORM`+`SUPER_ADMIN`, step-up MFA manquant, ou session `MFA_PENDING`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              examples:
+                forbidden:
+                  value: { error: forbidden }
+                mfaRequired:
+                  value: { error: mfa_required }
+        '404':
+          description: '`subjectUserAccountId` ne reference aucun compte existant.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: not_found
+        '409':
+          description: Refus metier — le sujet cible n'est pas `SUPER_ADMIN`, ou l'acteur cible sa propre demande de recuperation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: conflict
+        '500':
+          description: Defaillance technique.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: internal_error
+
+  /api/v1/platform/super-admin/break-glass-requests/{requestId}/approval:
+    post:
+      operationId: approveSuperAdminBreakGlass
+      tags: [PlatformBreakGlass]
+      summary: Approuver une demande break-glass — quorum de deux SUPER_ADMIN distincts (ADR-0005 Amendement 1)
+      description: >
+        Route AUTHENTIFIEE. AUCUN corps de requete accepte (`requestId` est le SEUL parametre,
+        porte par l'URL — meme discipline que l'enrolement MFA). L'acteur qui approuve doit etre
+        un `SUPER_ADMIN` DISTINCT de celui qui a cree la demande, et distinct du sujet cible.
+      security:
+        - bearerSessionAuth: []
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              description: Doit etre absent OU un objet vide.
+      responses:
+        '200':
+          description: Demande approuvee, recuperation effective.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [approved]
+        '400':
+          description: '`requestId` syntaxiquement invalide, ou corps non vide.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: invalid_request
+        '401':
+          description: Aucune session valide.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: unauthenticated
+        '403':
+          description: Session valide mais non habilitee (memes causes que la route de demande).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              examples:
+                forbidden:
+                  value: { error: forbidden }
+                mfaRequired:
+                  value: { error: mfa_required }
+        '404':
+          description: '`requestId` introuvable, ou enrolement associe introuvable.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: not_found
+        '409':
+          description: Refus metier — demande deja traitee, l'acteur cible sa propre demande, ou l'acteur est celui qui a cree la demande (quorum de deux distincts).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: conflict
+        '500':
+          description: Defaillance technique.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: internal_error
+
   /api/v1/audit-entries:
     get:
       operationId: listAuditEntries
@@ -124,7 +889,17 @@ paths:
           in: query
           schema:
             type: string
-            enum: [USER_ACCOUNT, MEMBERSHIP, HEALTH_FACILITY, SUBSCRIPTION, PAYMENT, PLATFORM_INVOICE, FACILITY_SETTINGS, AUDIT_TRAIL]
+            enum:
+              [
+                USER_ACCOUNT,
+                MEMBERSHIP,
+                HEALTH_FACILITY,
+                SUBSCRIPTION,
+                PAYMENT,
+                PLATFORM_INVOICE,
+                FACILITY_SETTINGS,
+                AUDIT_TRAIL,
+              ]
         - name: targetId
           in: query
           schema:
@@ -287,16 +1062,29 @@ components:
     SimpleError:
       type: object
       description: >
-        Format d'erreur REELLEMENT produit par `GET /api/v1/audit-entries` (ADR-0009 §8.5) — PAS
-        `ProblemDetails` (RFC 9457) : ce premier endpoint authentifie suit le meme regime minimal
-        que `PaymentWebhookController`/`createErrorHandler` (src/server.ts), jamais de detail
-        interne expose. Ne pas confondre avec `ProblemDetails` ci-dessus, reserve aux futurs
-        endpoints CRUD.
+        Format d'erreur produit par TOUTES les routes de ce contrat (`createErrorHandler`,
+        `src/server.ts`, et chaque controleur individuellement) — PAS `ProblemDetails`
+        (RFC 9457), jamais de detail interne expose. Ne pas confondre avec `ProblemDetails`
+        ci-dessus, reserve aux futurs endpoints CRUD. L'enumeration ci-dessous est l'UNION de
+        tous les codes reellement retournes par une route de ce fichier — une route donnee n'en
+        retourne jamais qu'un sous-ensemble (voir ses reponses documentees).
       required: [error]
       properties:
         error:
           type: string
-          enum: [invalid_request, unauthenticated, forbidden, mfa_required, too_many_requests, internal_error]
+          enum:
+            - invalid_request
+            - unauthenticated
+            - invalid_credentials
+            - forbidden
+            - mfa_required
+            - mfa_enrollment_required
+            - mfa_enrollment_already_active
+            - email_already_registered
+            - not_found
+            - conflict
+            - too_many_requests
+            - internal_error
 
     AuditEntryDto:
       type: object
@@ -354,7 +1142,17 @@ components:
           format: uuid
         targetType:
           type: string
-          enum: [USER_ACCOUNT, MEMBERSHIP, HEALTH_FACILITY, SUBSCRIPTION, PAYMENT, PLATFORM_INVOICE, FACILITY_SETTINGS, AUDIT_TRAIL]
+          enum:
+            [
+              USER_ACCOUNT,
+              MEMBERSHIP,
+              HEALTH_FACILITY,
+              SUBSCRIPTION,
+              PAYMENT,
+              PLATFORM_INVOICE,
+              FACILITY_SETTINGS,
+              AUDIT_TRAIL,
+            ]
         targetId:
           type: [string, 'null']
         reason:
@@ -385,3 +1183,88 @@ components:
         nextCursor:
           type: [string, 'null']
           description: Curseur opaque (base64url) de la page suivante — `null` si la page courante est la derniere.
+
+    AuthenticatedSessionResponse:
+      type: object
+      description: >
+        Presentateur PARTAGE (ADR-0010 §7 bis C) entre `POST /api/v1/auth/sessions` (branche
+        `authenticated`) et `POST /api/v1/auth/sessions/mfa-challenge` (seule reponse possible en
+        succes) — `SessionResponseDto.ts`. `permissionCodes`/`roleCodes` exposes
+        DELIBEREMENT (critere de sortie Phase 0 : "le frontend ne contient aucune permission
+        codee en dur") ; `membershipId`/`userId`/`requiresMfa`/`mfaSatisfiedAt`/
+        `sensitivityCategory`/`issuedAt` ne sont JAMAIS exposes.
+      required: [status, session, refreshToken]
+      properties:
+        status:
+          type: string
+          enum: [authenticated]
+        session:
+          type: object
+          required: [sessionId, kind, tenantId, roleCodes, permissionCodes, absoluteExpiresAt]
+          properties:
+            sessionId:
+              type: string
+            kind:
+              type: string
+              enum: [TENANT, PLATFORM]
+            tenantId:
+              type: [string, 'null']
+              format: uuid
+              description: '`null` pour un contexte `PLATFORM`.'
+            roleCodes:
+              type: array
+              items:
+                type: string
+            permissionCodes:
+              type: array
+              items:
+                type: string
+            absoluteExpiresAt:
+              type: string
+              format: date-time
+        refreshToken:
+          type: [string, 'null']
+          description: >
+            Retourne UNE SEULE FOIS, jamais relisible (ADR-0006 §4) — `null` uniquement pour la
+            reponse de `verifyMfaChallenge` dans le cas ou le contrat du handler le produit ainsi,
+            jamais remplace par une chaine vide.
+
+    MfaRequiredResponse:
+      type: object
+      description: Emis par `POST /api/v1/auth/sessions` quand un second facteur est necessaire avant qu'une session complete puisse etre emise.
+      required: [status, mfa]
+      properties:
+        status:
+          type: string
+          enum: [mfa_required]
+        mfa:
+          type: object
+          required: [pendingSessionId, reason, expiresAt]
+          properties:
+            pendingSessionId:
+              type: string
+              description: 'A transmettre en `Authorization: Bearer` sur les routes MFA (jamais dans un corps de requete).'
+            reason:
+              type: string
+              enum: [CHALLENGE_REQUIRED, ENROLLMENT_REQUIRED]
+            expiresAt:
+              type: string
+              format: date-time
+
+    ContextSelectionRequiredResponse:
+      type: object
+      description: >
+        Emis par `POST /api/v1/auth/sessions` quand l'intention de contexte ne peut pas etre
+        derivee automatiquement (zero ou plusieurs tenants actifs, aucun `context` fourni,
+        ADR-0010 §6 cas 4) — AUCUNE session n'est ouverte dans ce cas ; le client doit resoumettre
+        avec un `context` explicite.
+      required: [status, availableTenantIds]
+      properties:
+        status:
+          type: string
+          enum: [context_selection_required]
+        availableTenantIds:
+          type: array
+          items:
+            type: string
+            format: uuid
