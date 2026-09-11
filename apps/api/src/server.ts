@@ -1,4 +1,11 @@
-import express, { type ErrorRequestHandler, type Express, type Request, type RequestHandler, type Response } from 'express';
+import express, {
+  type ErrorRequestHandler,
+  type Express,
+  type Request,
+  type RequestHandler,
+  type Response,
+} from 'express';
+import helmet from 'helmet';
 import { buildCompositionRoot, type CompositionRoot } from './composition-root.js';
 
 export interface ErrorHandlerLogger {
@@ -66,7 +73,9 @@ export function createErrorHandler(logger: ErrorHandlerLogger): ErrorRequestHand
  * (rejeu d'un code de recuperation MFA deja consomme). Point de cablage UNIQUE : jamais un
  * `try/catch` duplique dans chaque controleur.
  */
-export function asyncRoute(handler: (req: Request, res: Response) => Promise<void>): RequestHandler {
+export function asyncRoute(
+  handler: (req: Request, res: Response) => Promise<void>,
+): RequestHandler {
   return (req, res, next) => {
     handler(req, res).catch(next);
   };
@@ -92,6 +101,16 @@ export function asyncRoute(handler: (req: Request, res: Response) => Promise<voi
 export function createApp(root: CompositionRoot): Express {
   const app = express();
   app.disable('x-powered-by');
+  // ADR-0013 — premier middleware de l'application, avant toute route : les headers de
+  // durcissement doivent s'appliquer a TOUTE reponse, y compris une erreur precoce. CSP
+  // desactivee EXPLICITEMENT (pas simplement absente) : ce depot ne sert que du JSON, aucune
+  // page HTML n'existe a proteger, et `apps/web` n'a encore aucun contrat reel a partir duquel
+  // deriver une politique — l'activer par defaut figerait silencieusement une decision jamais
+  // prise (ADR-0013 §3). Le reste des valeurs par defaut de `helmet` est conserve sans
+  // modification (HSTS, X-Content-Type-Options, X-Frame-Options, etc.) : aucune ne depend d'une
+  // origine frontend ou d'un choix de deploiement encore ouvert. Aucun middleware CORS (ADR-0013
+  // §2) : aucune origine frontend reelle n'existe a whitelister aujourd'hui.
+  app.use(helmet({ contentSecurityPolicy: false }));
 
   app.post(
     '/api/v1/payments/webhook',
@@ -206,7 +225,8 @@ function main(): void {
   });
 }
 
-const isEntryPoint = process.argv[1]?.endsWith('server.ts') || process.argv[1]?.endsWith('server.js');
+const isEntryPoint =
+  process.argv[1]?.endsWith('server.ts') || process.argv[1]?.endsWith('server.js');
 if (isEntryPoint) {
   main();
 }
