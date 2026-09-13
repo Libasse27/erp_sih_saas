@@ -19,6 +19,18 @@ import { defineConfig } from 'vitest/config';
  * un plancher global de 70% pour le reste (infrastructure/presentation, couvert par les tests
  * d'integration, jamais un objectif de 90% — §9.2 du system prompt : "Couverture : >= 90% sur
  * domain/+application/, >= 70% global. Plancher, pas objectif").
+ *
+ * `test:coverage` (package.json) passe `--fileParallelism=false`, jamais active ici : constate a
+ * l'etape 13 que l'instrumentation v8 (`--coverage`) ralentit assez l'execution pour que des tests
+ * d'integration Redis dependants d'une fenetre temporelle REELLE (`AUDIT_ENTRIES_RATE_LIMIT_*`,
+ * `PAYMENT_WEBHOOK_RATE_LIMIT_*`, RateLimitTuning.ts) deviennent flaky quand plusieurs fichiers de
+ * test tournent en parallele sur les memes coeurs CPU (contention averee : tests stables en
+ * sequentiel avec couverture activee sur plusieurs executions completes, jamais moins de 1 echec
+ * en parallele sur 3 executions completes avant ce correctif) — le limiteur lui-meme
+ * (RedisRateLimiter.ts, script Lua unique atomique) n'est PAS en cause. Cible deliberement le
+ * script `test:coverage` SEUL (jamais `pnpm test`/`pnpm -r run test`,
+ * sans instrumentation, jamais observes flaky) pour ne pas ralentir la boucle de developpement ni
+ * le job CI de test existant.
  */
 export default defineConfig({
   test: {

@@ -74,4 +74,10 @@ describe('SeedFacilityConfigurationOnMembershipGranted (ADR-0008 §10, amendemen
     const settings = await repository.findByTenantId(TenantId.create(TENANT_A).getValue());
     expect(settings).not.toBeNull();
   });
+
+  it('tenantId present mais invalide (INVALID_TENANT_ID) : anomalie reelle, jamais avalee', async () => {
+    const { handler } = build();
+
+    await expect(handler(envelope({ tenantId: 'pas-un-uuid' }))).rejects.toThrow(/SeedFacilityConfiguration a echoue/);
+  });
 });

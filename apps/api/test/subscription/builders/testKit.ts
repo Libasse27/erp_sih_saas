@@ -146,9 +146,15 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
    * test/subscription/integration/subscriptionOptimisticLock.test.ts, sur PostgreSQL).
    */
   private failNextSave = false;
+  /** Nombre de fois SUPPLEMENTAIRE (au-dela du tout premier, deja couvert par `failNextSave`) ou `save()` doit encore echouer — permet de simuler un conflit PERSISTANT (epuisement de `MAX_SAVE_ATTEMPTS` cote appelant), pas seulement transitoire. */
+  private failSaveCount = 0;
 
-  failNextSaveWithConflict(): void {
+  failNextSaveWithConflict(times = 1): void {
+    if (times < 1) {
+      throw new Error('failNextSaveWithConflict(times) attend times >= 1.');
+    }
     this.failNextSave = true;
+    this.failSaveCount = times - 1;
   }
 
   async findByTenantId(tenantId: TenantId): Promise<Subscription | null> {
@@ -173,7 +179,11 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
       throw new Error("Tentative de sauvegarde d'un Subscription hors du tenant du contexte courant.");
     }
     if (this.failNextSave) {
-      this.failNextSave = false;
+      if (this.failSaveCount > 0) {
+        this.failSaveCount -= 1;
+      } else {
+        this.failNextSave = false;
+      }
       throw new SubscriptionConcurrencyConflictError(
         `Conflit de verrouillage optimiste simule sur Subscription ${subscription.id.toString()}.`,
       );

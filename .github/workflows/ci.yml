@@ -1,11 +1,11 @@
 name: CI
 
-# CI minimale — Phase 0, etape 12/13 (lacune C de l'audit de securite, docs/architecture/
-# 02-roadmap-migration.md §"Criteres de sortie communs"). Perimetre volontairement limite a
-# typecheck + lint + build + tests : preuve de non-regression pour l'etape 12, RIEN de plus.
-# SCA (npm audit), scan de secrets, SAST, deploiement et gate de couverture relevent
-# explicitement de l'etape 13 ("CI/CD et contrôles de conformité"), pas encore demarree — ne
-# pas dupliquer ce perimetre ici.
+# CI — Phase 0, etape 13/13 (lacune C de l'audit de securite, docs/architecture/
+# 02-roadmap-migration.md §"Criteres de sortie communs", item 10 "Coverage CI"). Perimetre :
+# typecheck + lint + build + tests + gate de couverture (seuils geles dans
+# apps/api/vitest.config.ts : >=90% domain/+application/ par module, >=70% plancher global).
+# SCA (npm audit), scan de secrets, SAST et deploiement restent HORS perimetre de ce fichier
+# (residus CI-01/CI-02/DETTE-* suivis separement) — ne pas dupliquer ce perimetre ici.
 on:
   push:
     branches: [main]
@@ -16,6 +16,11 @@ on:
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
+
+# Jamais le defaut du depot/organisation (parfois read & write all scopes) : ce workflow ne push,
+# ne commente ni ne publie rien — lecture seule suffit (revue de securite independante, etape 13).
+permissions:
+  contents: read
 
 jobs:
   build-and-test:
@@ -111,3 +116,14 @@ jobs:
 
       - name: Test (unitaire + integration, PostgreSQL/Redis reels)
         run: pnpm test
+
+      # Reexecute la suite apps/api avec instrumentation v8 (`--coverage`) pour appliquer les
+      # seuils geles de vitest.config.ts (etape 13, item 10) — jamais fusionne avec l'etape
+      # "Test" ci-dessus : `test:coverage` force `--fileParallelism=false` (voir commentaire dans
+      # vitest.config.ts) car l'instrumentation ralentit assez l'execution pour rendre flaky des
+      # tests d'integration Redis dependants d'une fenetre temporelle reelle quand les fichiers
+      # tournent en parallele — un cout CI d'environ 6 minutes supplementaires, accepte pour ne
+      # jamais fusionner un gate de couverture avec une suite instable.
+      - name: Coverage gate (apps/api, seuils vitest.config.ts — etape 13, item 10)
+        working-directory: apps/api
+        run: pnpm run test:coverage

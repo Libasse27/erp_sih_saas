@@ -18,6 +18,29 @@ import { PlanPriceId } from '../../domain/value-objects/PlanPriceId.js';
 import { SubscriptionId } from '../../domain/value-objects/SubscriptionId.js';
 import { createApplyPlanUpgradeOnPaymentSucceededHandler } from './ApplyPlanUpgradeOnPaymentSucceeded.js';
 
+/**
+ * Specialise `InMemorySubscriptionRepository` pour simuler, de maniere DETERMINISTE, la relecture
+ * introuvable apres un conflit de verrouillage optimiste (`saveWithConcurrencyRetry`, branche
+ * `reloaded === null`) — aucun fake existant du testKit partage ne permet de cibler un appel
+ * PRECIS de `findById` par son rang, ajoute donc localement a ce seul fichier de test.
+ */
+class ReloadNullSubscriptionRepository extends InMemorySubscriptionRepository {
+  private findByIdCallCount = 0;
+  private nullOnCall: number | null = null;
+
+  returnNullOnFindByIdCall(callIndex: number): void {
+    this.nullOnCall = callIndex;
+  }
+
+  override async findById(id: SubscriptionId, tenantId: TenantId): Promise<Subscription | null> {
+    this.findByIdCallCount += 1;
+    if (this.nullOnCall === this.findByIdCallCount) {
+      return null;
+    }
+    return super.findById(id, tenantId);
+  }
+}
+
 const TENANT = TenantId.create(uuidAt(1)).getValue();
 const SUBSCRIPTION_ID = SubscriptionId.create(uuidAt(2)).getValue();
 const CURRENT_PLAN = PlanId.create(uuidAt(10)).getValue();
@@ -282,5 +305,118 @@ describe('ApplyPlanUpgradeOnPaymentSucceeded — application d_un upgrade APRES 
     const subscription = await subscriptionRepository.findById(SUBSCRIPTION_ID, TENANT);
     expect(subscription?.currentPlanPriceId.equals(CURRENT_PRICE)).toBe(true);
     expect(logger.warnings[0]?.fields['reason']).toBe('request_replaced_or_unknown');
+  });
+
+  it('payload invalide (champ manquant) -> leve une erreur explicite', async () => {
+    const { handler } = await buildScenario();
+
+    await expect(
+      handler({
+        id: 'outbox-invalide',
+        eventType: 'payment.payment.saas-payment-succeeded',
+        eventVersion: 1,
+        aggregateId: uuidAt(50),
+        tenantId: TENANT.toString(),
+        occurredAt: CONFIRMED_AT,
+        payload: { tenantId: TENANT.toString() },
+      }),
+    ).rejects.toThrow(/Payload invalide/);
+  });
+
+  it('tenantId invalide dans le payload -> leve une erreur', async () => {
+    const { handler } = await buildScenario();
+
+    await expect(handler(envelope({ tenantId: 'pas-un-uuid' }))).rejects.toThrow(/tenantId invalide/);
+  });
+
+  it('ORPHELIN — demande retrouvee et subscriptionId coherent, mais abonnement introuvable : aucun effet, un log', async () => {
+    const subscriptionRepository = new InMemorySubscriptionRepository();
+    const planUpgradeRequestRepository = new InMemoryPlanUpgradeRequestRepository();
+    const planChangeRepository = new InMemoryPlanChangeRepository();
+    const unitOfWork = new InMemoryUnitOfWork();
+    const clock = new FixedClock(CONFIRMED_AT.toISOString());
+    const idGenerator = new SequentialIdGenerator();
+    const logger = new RecordingLogger();
+    const subscriptionAuditTrail = new InMemorySubscriptionAuditTrail();
+
+    // La demande est produite normalement par l'agregat puis persistee, mais l'abonnement
+    // lui-meme n'est JAMAIS sauvegarde (structurellement impossible en conditions reelles — un
+    // residu de test isole cette seule branche defensive du code).
+    const subscription = activeSubscription();
+    const request = subscription.requestUpgrade({
+      planChangeId: PLAN_CHANGE_ID,
+      toPlanId: TARGET_PLAN,
+      toPlanPriceId: TARGET_PRICE,
+      proratedAmount: Money.fromXOF(10_000).getValue(),
+      now: REQUESTED_AT,
+      clock: new FixedClock(REQUESTED_AT.toISOString()),
+      idGenerator,
+    });
+    await planUpgradeRequestRepository.replaceExpiredAndInsert(request, TENANT, REQUESTED_AT);
+
+    const handler = createApplyPlanUpgradeOnPaymentSucceededHandler({
+      subscriptionRepository,
+      planUpgradeRequestRepository,
+      planChangeRepository,
+      subscriptionAuditTrail,
+      unitOfWork,
+      clock,
+      idGenerator,
+      logger,
+    });
+
+    await expect(handler(envelope())).resolves.toBeUndefined();
+
+    expect(logger.warnings[0]?.fields['reason']).toBe('subscription_not_found');
+    expect(subscriptionAuditTrail.records).toHaveLength(0);
+  });
+
+  it('conflits de verrouillage optimiste persistants : abandon apres epuisement des tentatives', async () => {
+    const { handler, subscriptionRepository } = await buildScenario();
+    subscriptionRepository.failNextSaveWithConflict(3);
+
+    await expect(handler(envelope())).rejects.toThrow(/Conflit de verrouillage optimiste/);
+  });
+
+  it('conflit de verrouillage optimiste suivi d_une relecture introuvable : remonte l_erreur d_origine, jamais masquee', async () => {
+    const subscriptionRepository = new ReloadNullSubscriptionRepository();
+    const planUpgradeRequestRepository = new InMemoryPlanUpgradeRequestRepository();
+    const planChangeRepository = new InMemoryPlanChangeRepository();
+    const unitOfWork = new InMemoryUnitOfWork();
+    const clock = new FixedClock(CONFIRMED_AT.toISOString());
+    const idGenerator = new SequentialIdGenerator();
+    const logger = new RecordingLogger();
+    const subscriptionAuditTrail = new InMemorySubscriptionAuditTrail();
+
+    const subscription = activeSubscription();
+    const request = subscription.requestUpgrade({
+      planChangeId: PLAN_CHANGE_ID,
+      toPlanId: TARGET_PLAN,
+      toPlanPriceId: TARGET_PRICE,
+      proratedAmount: Money.fromXOF(10_000).getValue(),
+      now: REQUESTED_AT,
+      clock: new FixedClock(REQUESTED_AT.toISOString()),
+      idGenerator,
+    });
+    await planUpgradeRequestRepository.replaceExpiredAndInsert(request, TENANT, REQUESTED_AT);
+    await subscriptionRepository.save(subscription, TENANT);
+    subscriptionRepository.publishedEvents.length = 0;
+    // Appel #1 = lecture initiale de l'abonnement (doit reussir) ; le conflit survient au premier
+    // `save()` dans `saveWithConcurrencyRetry`, dont la RELECTURE consecutive est l'appel #2.
+    subscriptionRepository.failNextSaveWithConflict();
+    subscriptionRepository.returnNullOnFindByIdCall(2);
+
+    const handler = createApplyPlanUpgradeOnPaymentSucceededHandler({
+      subscriptionRepository,
+      planUpgradeRequestRepository,
+      planChangeRepository,
+      subscriptionAuditTrail,
+      unitOfWork,
+      clock,
+      idGenerator,
+      logger,
+    });
+
+    await expect(handler(envelope())).rejects.toThrow(/Conflit de verrouillage optimiste/);
   });
 });

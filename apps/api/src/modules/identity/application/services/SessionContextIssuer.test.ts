@@ -21,7 +21,7 @@ import { PasswordHash } from '../../domain/value-objects/PasswordHash.js';
 import { Permission } from '../../domain/value-objects/Permission.js';
 import { EncryptedTotpSecret } from '../../domain/value-objects/EncryptedTotpSecret.js';
 import { RecoveryCodeHash } from '../../domain/value-objects/RecoveryCodeHash.js';
-import type { MfaPendingSessionContext, TenantSessionContext } from '../ports/SessionStore.js';
+import type { MfaPendingSessionContext, PlatformSessionContext, TenantSessionContext } from '../ports/SessionStore.js';
 import { SessionContextIssuer } from './SessionContextIssuer.js';
 
 const TENANT_A = TenantId.create(uuidAt(7001)).getValue();
@@ -162,5 +162,158 @@ describe('SessionContextIssuer — table de decision ADR-0005 §4', () => {
     const result = await issuer.issueAfterChallenge({ userId: account.id, intent: { kind: 'TENANT', tenantId: TENANT_A.toString() } });
     expect(result.isFailure()).toBe(true);
     expect(result.getError()).toBe('CONTEXT_NO_LONGER_AVAILABLE');
+  });
+
+  async function superAdminAccount(): Promise<UserAccount> {
+    const account = UserAccount.register({
+      email: Email.create('super-admin@hopital.sn').getValue(),
+      passwordHash: PasswordHash.fromHash('hash').getValue(),
+      platformRole: 'SUPER_ADMIN',
+      clock,
+      idGenerator,
+    });
+    await accounts.save(account);
+    return account;
+  }
+
+  it('issueForNewContext : ACCOUNT_NOT_FOUND si le compte n_existe pas', async () => {
+    const result = await issuer.issueForNewContext({ userId: idFor.userAccount(9999), intent: { kind: 'PLATFORM' } });
+    expect(result.isFailure()).toBe(true);
+    expect(result.getError()).toBe('ACCOUNT_NOT_FOUND');
+  });
+
+  it('issueAfterChallenge (intent PLATFORM) : session PLATFORM complete, mfaSatisfiedAt renseigne', async () => {
+    const account = await superAdminAccount();
+
+    const result = await issuer.issueAfterChallenge({ userId: account.id, intent: { kind: 'PLATFORM' } });
+
+    expect(result.isSuccess()).toBe(true);
+    const session = result.getValue() as PlatformSessionContext;
+    expect(session.kind).toBe('PLATFORM');
+    expect(session.requiresMfa).toBe(true);
+    expect(session.mfaSatisfiedAt).not.toBeNull();
+    expect(session.sensitivityCategory).toBe('PLATFORM_SUPER_ADMIN');
+  });
+
+  it('issueAfterChallenge : ACCOUNT_NOT_FOUND est transmis tel quel (jamais collapse en CONTEXT_NO_LONGER_AVAILABLE)', async () => {
+    const result = await issuer.issueAfterChallenge({ userId: idFor.userAccount(9999), intent: { kind: 'PLATFORM' } });
+    expect(result.isFailure()).toBe(true);
+    expect(result.getError()).toBe('ACCOUNT_NOT_FOUND');
+  });
+
+  it('issueAfterChallenge : NOT_SUPER_ADMIN est transmis tel quel (jamais collapse en CONTEXT_NO_LONGER_AVAILABLE)', async () => {
+    const account = await accountWithRole('MEDECIN', 'patient:read');
+
+    const result = await issuer.issueAfterChallenge({ userId: account.id, intent: { kind: 'PLATFORM' } });
+
+    expect(result.isFailure()).toBe(true);
+    expect(result.getError()).toBe('NOT_SUPER_ADMIN');
+  });
+
+  it('issueForRefresh : ACCOUNT_NOT_FOUND est transmis tel quel', async () => {
+    const result = await issuer.issueForRefresh({
+      userId: idFor.userAccount(9999),
+      intent: { kind: 'PLATFORM' },
+      previousMfaSatisfiedAt: clock.now().toISOString(),
+      chainAbsoluteExpiresAt: new Date(clock.now().getTime() + 60_000).toISOString(),
+    });
+    expect(result.isFailure()).toBe(true);
+    expect(result.getError()).toBe('ACCOUNT_NOT_FOUND');
+  });
+
+  it('issueForRefresh : NOT_SUPER_ADMIN est transmis tel quel (intent PLATFORM sur un compte non SUPER_ADMIN)', async () => {
+    const account = await accountWithRole('MEDECIN', 'patient:read');
+
+    const result = await issuer.issueForRefresh({
+      userId: account.id,
+      intent: { kind: 'PLATFORM' },
+      previousMfaSatisfiedAt: clock.now().toISOString(),
+      chainAbsoluteExpiresAt: new Date(clock.now().getTime() + 60_000).toISOString(),
+    });
+
+    expect(result.isFailure()).toBe(true);
+    expect(result.getError()).toBe('NOT_SUPER_ADMIN');
+  });
+
+  it('issueForRefresh : un tenant SUSPENDU est collapse en CONTEXT_NO_LONGER_AVAILABLE (jamais le detail granulaire)', async () => {
+    const account = await accountWithRole('MEDECIN', 'patient:read');
+    tenants.seed(TENANT_A, 'SUSPENDED');
+
+    const result = await issuer.issueForRefresh({
+      userId: account.id,
+      intent: { kind: 'TENANT', tenantId: TENANT_A.toString() },
+      previousMfaSatisfiedAt: clock.now().toISOString(),
+      chainAbsoluteExpiresAt: new Date(clock.now().getTime() + 60_000).toISOString(),
+    });
+
+    expect(result.isFailure()).toBe(true);
+    expect(result.getError()).toBe('CONTEXT_NO_LONGER_AVAILABLE');
+  });
+
+  it('issueForRefresh (garde anti-escalade) : previousMfaSatisfiedAt=null ET requiresMfa devenu vrai => CONTEXT_NO_LONGER_AVAILABLE', async () => {
+    const account = await accountWithRole('ADMIN_ETABLISSEMENT', 'membership:administer');
+
+    const result = await issuer.issueForRefresh({
+      userId: account.id,
+      intent: { kind: 'TENANT', tenantId: TENANT_A.toString() },
+      previousMfaSatisfiedAt: null,
+      chainAbsoluteExpiresAt: new Date(clock.now().getTime() + 60_000).toISOString(),
+    });
+
+    expect(result.isFailure()).toBe(true);
+    expect(result.getError()).toBe('CONTEXT_NO_LONGER_AVAILABLE');
+  });
+
+  it('issueForRefresh (garde anti-escalade) : previousMfaSatisfiedAt=null MAIS aucun MFA requis => session complete, chainAbsoluteExpiresAt COPIE tel quel', async () => {
+    const account = await accountWithRole('MEDECIN', 'patient:read');
+    const chainAbsoluteExpiresAt = new Date(clock.now().getTime() + 123_000).toISOString();
+
+    const result = await issuer.issueForRefresh({
+      userId: account.id,
+      intent: { kind: 'TENANT', tenantId: TENANT_A.toString() },
+      previousMfaSatisfiedAt: null,
+      chainAbsoluteExpiresAt,
+    });
+
+    expect(result.isSuccess()).toBe(true);
+    const session = result.getValue() as TenantSessionContext;
+    expect(session.mfaSatisfiedAt).toBeNull();
+    expect(session.absoluteExpiresAt).toBe(chainAbsoluteExpiresAt);
+  });
+
+  it('issueForRefresh : previousMfaSatisfiedAt deja renseigne court-circuite entierement la garde MFA (jamais re-exige)', async () => {
+    const account = await accountWithRole('ADMIN_ETABLISSEMENT', 'membership:administer');
+    const previousMfaSatisfiedAt = clock.now().toISOString();
+    const chainAbsoluteExpiresAt = new Date(clock.now().getTime() + 60_000).toISOString();
+
+    const result = await issuer.issueForRefresh({
+      userId: account.id,
+      intent: { kind: 'TENANT', tenantId: TENANT_A.toString() },
+      previousMfaSatisfiedAt,
+      chainAbsoluteExpiresAt,
+    });
+
+    expect(result.isSuccess()).toBe(true);
+    const session = result.getValue() as TenantSessionContext;
+    expect(session.mfaSatisfiedAt).toBe(previousMfaSatisfiedAt);
+    expect(session.absoluteExpiresAt).toBe(chainAbsoluteExpiresAt);
+    expect(session.permissionCodes).toEqual(['membership:administer']);
+  });
+
+  it('issueForRefresh (intent PLATFORM) : session PLATFORM complete, absoluteExpiresAt COPIE tel quel', async () => {
+    const account = await superAdminAccount();
+    const chainAbsoluteExpiresAt = new Date(clock.now().getTime() + 60_000).toISOString();
+
+    const result = await issuer.issueForRefresh({
+      userId: account.id,
+      intent: { kind: 'PLATFORM' },
+      previousMfaSatisfiedAt: clock.now().toISOString(),
+      chainAbsoluteExpiresAt,
+    });
+
+    expect(result.isSuccess()).toBe(true);
+    const session = result.getValue() as PlatformSessionContext;
+    expect(session.kind).toBe('PLATFORM');
+    expect(session.absoluteExpiresAt).toBe(chainAbsoluteExpiresAt);
   });
 });

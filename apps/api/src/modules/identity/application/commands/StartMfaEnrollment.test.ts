@@ -36,6 +36,13 @@ class ConflictOnFirstSaveMfaEnrollmentRepository extends InMemoryMfaEnrollmentRe
   }
 }
 
+/** Simule une panne TECHNIQUE de `save()` sans rapport avec la course concurrente (ex. panne DB) — jamais avalee ni traduite en `Result.failure`, toujours propagee telle quelle. */
+class FailingMfaEnrollmentRepository extends InMemoryMfaEnrollmentRepository {
+  override async save(): Promise<void> {
+    throw new Error('panne technique simulee (test) : sans rapport avec un conflit de concurrence');
+  }
+}
+
 describe('StartMfaEnrollmentHandler', () => {
   let accounts: InMemoryUserAccountRepository;
   let mfaEnrollments: InMemoryMfaEnrollmentRepository;
@@ -201,6 +208,53 @@ describe('StartMfaEnrollmentHandler', () => {
     expect(result.isFailure()).toBe(true);
     expect(result.getError()).toBe('ENROLLMENT_ALREADY_ACTIVE_AND_NOT_REPLACEABLE');
     expect(auditTrail.records.at(-1)).toMatchObject({ eventType: 'MFA_ENROLLMENT_STARTED', outcome: 'FAILURE' });
+  });
+
+  it('panne technique de save() SANS rapport avec un conflit de concurrence : propagee telle quelle, jamais avalee', async () => {
+    const failingRepository = new FailingMfaEnrollmentRepository();
+    const failingHandler = new StartMfaEnrollmentHandler(
+      sessions,
+      accounts,
+      failingRepository,
+      totpService,
+      auditTrail,
+      new InMemoryUnitOfWork(),
+      clock,
+      idGenerator,
+    );
+    const account = await registerAccount();
+    const sessionId = await seedPendingEnrollmentSession(account.id.toString());
+
+    await expect(failingHandler.execute({ sessionId })).rejects.toThrow(/panne technique simulee/);
+  });
+
+  it('re-enrolement apres RESET_REQUIRED (forceReEnrollment prealable) : reussit et reprovisionne un nouveau secret', async () => {
+    const account = await registerAccount();
+    const firstSessionId = await seedPendingEnrollmentSession(account.id.toString(), 's1');
+    await handler.execute({ sessionId: firstSessionId });
+    const enrollment = await mfaEnrollments.findByUserId(account.id);
+    if (enrollment === null) {
+      throw new Error('Enrolement attendu apres le premier appel (bug de test).');
+    }
+    enrollment.confirmEnrollment({ timeStep: 1, recoveryCodes: [], clock, idGenerator });
+    await mfaEnrollments.save(enrollment);
+    expect(enrollment.isActive()).toBe(true);
+    enrollment.forceReEnrollment({ requestedByUserId: 'admin', reason: 'perte du telephone', clock, idGenerator });
+    await mfaEnrollments.save(enrollment);
+    expect(enrollment.status).toBe('RESET_REQUIRED');
+
+    const secondSessionId = await seedPendingEnrollmentSession(account.id.toString(), 's2');
+    const result = await handler.execute({ sessionId: secondSessionId });
+
+    expect(result.isSuccess()).toBe(true);
+    expect(result.getValue().provisioningUri).toContain('otpauth://');
+    const reloaded = await mfaEnrollments.findByUserId(account.id);
+    // `beginReEnrollment()` ne fait JAMAIS repasser le statut a `PENDING_ACTIVATION` (seul
+    // `MfaEnrollment.start()`, sur un agregat frais, le fait) : le compte reste `RESET_REQUIRED`
+    // tant que `ConfirmMfaEnrollment` n'a pas ete appele — seul `pendingSecret` est renouvele ici.
+    expect(reloaded?.status).toBe('RESET_REQUIRED');
+    expect(reloaded?.pendingSecret).not.toBeNull();
+    expect(auditTrail.records.at(-1)).toMatchObject({ eventType: 'MFA_ENROLLMENT_STARTED', outcome: 'SUCCESS' });
   });
 
   it('rejette une session MFA_PENDING corrompue (userId invalide) en levant une exception (bug infra, pas un Result.failure)', async () => {

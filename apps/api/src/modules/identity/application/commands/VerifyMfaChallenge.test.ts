@@ -229,5 +229,94 @@ describe('VerifyMfaChallengeHandler', () => {
 
     expect(result.isSuccess()).toBe(true);
     expect(auditTrail.records.some((r) => r.eventType === 'MFA_RECOVERY_CODE_CONSUMED' && r.outcome === 'SUCCESS')).toBe(true);
+    // Seed avec un SEUL code de recuperation (voir seedActiveEnrollment ci-dessus) : sa
+    // consommation epuise integralement le jeu -> MFA_RECOVERY_CODES_EXHAUSTED est audite EN PLUS.
+    expect(auditTrail.records.some((r) => r.eventType === 'MFA_RECOVERY_CODES_EXHAUSTED' && r.outcome === 'SUCCESS')).toBe(true);
+  });
+
+  it('SESSION_NOT_PENDING_MFA quand la session n_est pas MFA_PENDING', async () => {
+    const account = await seedMemberAccount();
+    const completeSession: TenantSessionContext = {
+      sessionId: 'complete-1',
+      kind: 'TENANT',
+      userId: account.id.toString(),
+      tenantId: TENANT_A.toString(),
+      membershipId: uuidAt(2),
+      roleCodes: [],
+      permissionCodes: [],
+      requiresMfa: false,
+      mfaSatisfiedAt: null,
+      issuedAt: clock.now().toISOString(),
+      sensitivityCategory: 'TENANT_STANDARD',
+      absoluteExpiresAt: new Date(clock.now().getTime() + 60_000).toISOString(),
+    };
+    await sessions.create(completeSession);
+
+    const result = await handler.execute({ pendingSessionId: completeSession.sessionId, factor: { kind: 'TOTP', code: '123456' } });
+
+    expect(result.isFailure()).toBe(true);
+    expect(result.getError()).toBe('SESSION_NOT_PENDING_MFA');
+  });
+
+  it('rejette une session MFA_PENDING corrompue (userId invalide) en levant une exception', async () => {
+    const session: MfaPendingSessionContext = {
+      sessionId: 'corrompue',
+      kind: 'MFA_PENDING',
+      userId: 'pas-un-uuid',
+      intent: { kind: 'TENANT', tenantId: TENANT_A.toString() },
+      reason: 'CHALLENGE_REQUIRED',
+      auditRoleCodes: [],
+      issuedAt: clock.now().toISOString(),
+      expiresAt: new Date(clock.now().getTime() + 300_000).toISOString(),
+    };
+    await sessions.create(session);
+
+    await expect(handler.execute({ pendingSessionId: session.sessionId, factor: { kind: 'TOTP', code: '123456' } })).rejects.toThrow();
+  });
+
+  it('ENROLLMENT_REQUIRED (dans la transaction) quand aucun enrolement actif n_existe plus, malgre une session CHALLENGE_REQUIRED', async () => {
+    const account = await seedMemberAccount();
+    // Aucun `seedActiveEnrollment` ici : la session pointe vers un compte sans enrolement actif
+    // (revoque/jamais confirme depuis l'ouverture de la session MFA_PENDING).
+    const pending = seedPendingSession(account.id.toString());
+
+    const result = await handler.execute({ pendingSessionId: pending.sessionId, factor: { kind: 'TOTP', code: '123456' } });
+
+    expect(result.isFailure()).toBe(true);
+    expect(result.getError()).toBe('ENROLLMENT_REQUIRED');
+    expect(auditTrail.records.some((r) => r.eventType === 'MFA_CHALLENGE_FAILED' && r.outcome === 'FAILURE')).toBe(true);
+  });
+
+  it('code TOTP rejoue (meme pas de temps qu_un challenge deja accepte) : INVALID_CODE, compteur incremente', async () => {
+    const account = await seedMemberAccount();
+    seedActiveEnrollment(account.id);
+    const first = seedPendingSession(account.id.toString());
+    const firstResult = await handler.execute({ pendingSessionId: first.sessionId, factor: { kind: 'TOTP', code: '123456' } });
+    expect(firstResult.isSuccess()).toBe(true);
+    totpService.nextTimeStep -= 1;
+
+    const second = seedPendingSession(account.id.toString());
+    const result = await handler.execute({ pendingSessionId: second.sessionId, factor: { kind: 'TOTP', code: '123456' } });
+
+    expect(result.isFailure()).toBe(true);
+    expect(result.getError()).toBe('INVALID_CODE');
+    const enrollment = await mfaEnrollments.findByUserId(account.id);
+    expect(enrollment?.consecutiveFailedAttempts).toBe(1);
+  });
+
+  it('CONTEXT_NO_LONGER_AVAILABLE quand le membership a ete revoque PENDANT la fenetre de challenge (facteur deja prouve, contexte disparu)', async () => {
+    const account = await seedMemberAccount();
+    seedActiveEnrollment(account.id);
+    const pending = seedPendingSession(account.id.toString());
+    const membership = await memberships.findActiveByUserAndTenant(account.id, TENANT_A);
+    membership?.revoke(clock, idGenerator);
+    if (membership !== null) {
+      await memberships.save(membership, TENANT_A);
+    }
+
+    const result = await handler.execute({ pendingSessionId: pending.sessionId, factor: { kind: 'TOTP', code: '123456' } });
+
+    expect(result.isFailure()).toBe(true);
+    expect(result.getError()).toBe('CONTEXT_NO_LONGER_AVAILABLE');
   });
 });

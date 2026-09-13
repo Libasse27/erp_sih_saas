@@ -66,6 +66,18 @@ describe('SendWelcomeEmailOnSubscriptionStarted (ADR-0007 §1)', () => {
     await expect(handler(envelope({ tenantId: null }))).rejects.toThrow();
   });
 
+  it('leve si tenantId est present mais invalide sur l_enveloppe', async () => {
+    const { handler } = build();
+    await expect(handler(envelope({ tenantId: 'pas-un-uuid' }))).rejects.toThrow(/tenantId invalide/);
+  });
+
+  it('leve si un destinataire resolu est inexploitable pour le canal EMAIL (bug de l_annuaire, jamais avale)', async () => {
+    const { handler, recipientDirectory } = build();
+    recipientDirectory.seed(TENANT_A, ['pas-un-email']);
+
+    await expect(handler(envelope())).rejects.toThrow();
+  });
+
   it("n'extrait AUCUN champ du payload (planId/trialEndsAt) — contenu ferme par gabarit, ADR-0007 §7", async () => {
     const { handler, notificationRepository, recipientDirectory } = build();
     recipientDirectory.seed(TENANT_A, ['admin@hopital.sn']);

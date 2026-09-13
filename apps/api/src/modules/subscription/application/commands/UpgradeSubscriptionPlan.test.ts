@@ -21,7 +21,36 @@ import { PlanLimits } from '../../domain/value-objects/PlanLimits.js';
 import { PlanName } from '../../domain/value-objects/PlanName.js';
 import { SubscriptionId } from '../../domain/value-objects/SubscriptionId.js';
 import type { SubscriptionStatus } from '../../domain/value-objects/SubscriptionStatus.js';
+import type { PlanUpgradeRequest } from '../../domain/PlanUpgradeRequest.js';
 import { UpgradeSubscriptionPlanHandler } from './UpgradeSubscriptionPlan.js';
+
+/** Simule une panne TECHNIQUE de `replaceExpiredAndInsert()` SANS rapport avec la contrainte UNIQUE (jamais un `PlanUpgradeRequestConflictError`) — doit etre propagee telle quelle, jamais traduite en `UPGRADE_ALREADY_PENDING`. */
+class FailingPlanUpgradeRequestRepository extends InMemoryPlanUpgradeRequestRepository {
+  override async replaceExpiredAndInsert(_request: PlanUpgradeRequest, _tenantId: TenantId, _now: Date): Promise<void> {
+    throw new Error('panne technique simulee (test) : sans rapport avec la contrainte UNIQUE subscription_id');
+  }
+}
+
+/**
+ * Simule une panne TECHNIQUE de `save()` SANS rapport avec un conflit de verrouillage optimiste
+ * (jamais un `SubscriptionConcurrencyConflictError`) — doit etre propagee immediatement, sans
+ * nouvelle tentative. `arm()` differe l'activation de la panne APRES le seed initial du scenario
+ * de test (qui passe lui aussi par `save()`).
+ */
+class FailingSaveSubscriptionRepository extends InMemorySubscriptionRepository {
+  private armed = false;
+
+  arm(): void {
+    this.armed = true;
+  }
+
+  override async save(subscription: Subscription, tenantId: TenantId): Promise<void> {
+    if (this.armed) {
+      throw new Error('panne technique simulee (test) : sans rapport avec un conflit de verrouillage optimiste');
+    }
+    await super.save(subscription, tenantId);
+  }
+}
 
 const TENANT_ID = uuidAt(1);
 const CATALOG_CLOCK = new FixedClock('2026-01-01T00:00:00Z');
@@ -273,5 +302,225 @@ describe('UpgradeSubscriptionPlanHandler — demande d_upgrade conditionnee au p
     const { handler, unitOfWork } = await buildScenario();
     await handler.execute({ tenantId: TENANT_ID, targetPlanCode: 'PROFESSIONNEL' });
     expect(unitOfWork.lastContext?.tenantId?.toString()).toBe(TENANT_ID);
+  });
+
+  it('TARGET_PLAN_NOT_FOUND : code de forfait valide (catalogue clos) mais absent du repository', async () => {
+    const planRepository = new InMemoryPlanRepository();
+    const planPriceRepository = new InMemoryPlanPriceRepository();
+    const subscriptionRepository = new InMemorySubscriptionRepository();
+    const planUpgradeRequestRepository = new InMemoryPlanUpgradeRequestRepository();
+    const unitOfWork = new InMemoryUnitOfWork();
+    const idGenerator = new SequentialIdGenerator();
+    // Seul STANDARD est seme (le forfait courant) : PROFESSIONNEL/COMPLET n'existent pas dans ce
+    // scenario, bien que des codes structurellement valides (catalogue clos, PlanCode.ts).
+    const standard = await seedPlan(planRepository, planPriceRepository, 'STANDARD', 35_000, { maxUsers: 10, maxBeds: 20 }, idGenerator);
+    const tenantId = TenantId.create(TENANT_ID).getValue();
+    const subscription = Subscription.reconstitute(SubscriptionId.create(idGenerator.generate()).getValue(), {
+      tenantId,
+      planId: standard.plan.id,
+      currentPlanPriceId: standard.price.id,
+      period: 'MENSUEL',
+      status: 'ACTIVE',
+      trialEndsAt: null,
+      periodStartsAt: new Date('2026-08-01T00:00:00Z'),
+      periodEndsAt: new Date('2026-08-31T00:00:00Z'),
+      createdAt: new Date('2026-08-01T00:00:00Z'),
+      gracePeriodStartedAt: null,
+      degradedModeEnteredAt: null,
+      degradedModeSustainedNotifiedAt: null,
+    });
+    await subscriptionRepository.save(subscription, tenantId);
+    const handler = new UpgradeSubscriptionPlanHandler(
+      planRepository,
+      planPriceRepository,
+      subscriptionRepository,
+      planUpgradeRequestRepository,
+      unitOfWork,
+      new FixedClock('2026-08-16T00:00:00Z'),
+      idGenerator,
+      new InMemorySubscriptionAuditTrail(),
+    );
+
+    const result = await handler.execute({ tenantId: TENANT_ID, targetPlanCode: 'PROFESSIONNEL' });
+
+    expect(result.isFailure()).toBe(true);
+    expect(result.getError()).toBe('TARGET_PLAN_NOT_FOUND');
+  });
+
+  it('TARGET_PLAN_PRICE_NOT_FOUND : le forfait cible existe mais ne porte aucun tarif effectif a cette date', async () => {
+    const planRepository = new InMemoryPlanRepository();
+    const planPriceRepository = new InMemoryPlanPriceRepository();
+    const subscriptionRepository = new InMemorySubscriptionRepository();
+    const planUpgradeRequestRepository = new InMemoryPlanUpgradeRequestRepository();
+    const unitOfWork = new InMemoryUnitOfWork();
+    const idGenerator = new SequentialIdGenerator();
+    const standard = await seedPlan(planRepository, planPriceRepository, 'STANDARD', 35_000, { maxUsers: 10, maxBeds: 20 }, idGenerator);
+    // PROFESSIONNEL existe au catalogue mais SANS tarif seme (aucun `PlanPrice` cree pour lui).
+    const professionnel = Plan.create({
+      code: 'PROFESSIONNEL',
+      name: PlanName.create('PROFESSIONNEL').getValue(),
+      limits: PlanLimits.create(30, 50).getValue(),
+      clock: CATALOG_CLOCK,
+      idGenerator,
+    });
+    await planRepository.save(professionnel);
+    const tenantId = TenantId.create(TENANT_ID).getValue();
+    const subscription = Subscription.reconstitute(SubscriptionId.create(idGenerator.generate()).getValue(), {
+      tenantId,
+      planId: standard.plan.id,
+      currentPlanPriceId: standard.price.id,
+      period: 'MENSUEL',
+      status: 'ACTIVE',
+      trialEndsAt: null,
+      periodStartsAt: new Date('2026-08-01T00:00:00Z'),
+      periodEndsAt: new Date('2026-08-31T00:00:00Z'),
+      createdAt: new Date('2026-08-01T00:00:00Z'),
+      gracePeriodStartedAt: null,
+      degradedModeEnteredAt: null,
+      degradedModeSustainedNotifiedAt: null,
+    });
+    await subscriptionRepository.save(subscription, tenantId);
+    const handler = new UpgradeSubscriptionPlanHandler(
+      planRepository,
+      planPriceRepository,
+      subscriptionRepository,
+      planUpgradeRequestRepository,
+      unitOfWork,
+      new FixedClock('2026-08-16T00:00:00Z'),
+      idGenerator,
+      new InMemorySubscriptionAuditTrail(),
+    );
+
+    const result = await handler.execute({ tenantId: TENANT_ID, targetPlanCode: 'PROFESSIONNEL' });
+
+    expect(result.isFailure()).toBe(true);
+    expect(result.getError()).toBe('TARGET_PLAN_PRICE_NOT_FOUND');
+  });
+
+  it('CURRENT_PLAN_PRICE_NOT_FOUND : le tarif courant de l_abonnement n_existe plus au catalogue', async () => {
+    const planRepository = new InMemoryPlanRepository();
+    const planPriceRepository = new InMemoryPlanPriceRepository();
+    const subscriptionRepository = new InMemorySubscriptionRepository();
+    const planUpgradeRequestRepository = new InMemoryPlanUpgradeRequestRepository();
+    const unitOfWork = new InMemoryUnitOfWork();
+    const idGenerator = new SequentialIdGenerator();
+    const standard = await seedPlan(planRepository, planPriceRepository, 'STANDARD', 35_000, { maxUsers: 10, maxBeds: 20 }, idGenerator);
+    await seedPlan(planRepository, planPriceRepository, 'PROFESSIONNEL', 55_000, { maxUsers: 30, maxBeds: 50 }, idGenerator);
+    const tenantId = TenantId.create(TENANT_ID).getValue();
+    // `currentPlanPriceId` fabrique, jamais persiste dans `planPriceRepository` — simule un tarif
+    // retire du catalogue depuis la souscription initiale de l'abonnement.
+    const orphanPriceId = PlanPrice.create({
+      planId: standard.plan.id,
+      amount: Money.fromXOF(30_000).getValue(),
+      period: 'MENSUEL',
+      effectiveFrom: new Date('2025-01-01T00:00:00Z'),
+      clock: CATALOG_CLOCK,
+      idGenerator,
+    }).id;
+    const subscription = Subscription.reconstitute(SubscriptionId.create(idGenerator.generate()).getValue(), {
+      tenantId,
+      planId: standard.plan.id,
+      currentPlanPriceId: orphanPriceId,
+      period: 'MENSUEL',
+      status: 'ACTIVE',
+      trialEndsAt: null,
+      periodStartsAt: new Date('2026-08-01T00:00:00Z'),
+      periodEndsAt: new Date('2026-08-31T00:00:00Z'),
+      createdAt: new Date('2026-08-01T00:00:00Z'),
+      gracePeriodStartedAt: null,
+      degradedModeEnteredAt: null,
+      degradedModeSustainedNotifiedAt: null,
+    });
+    await subscriptionRepository.save(subscription, tenantId);
+    const handler = new UpgradeSubscriptionPlanHandler(
+      planRepository,
+      planPriceRepository,
+      subscriptionRepository,
+      planUpgradeRequestRepository,
+      unitOfWork,
+      new FixedClock('2026-08-16T00:00:00Z'),
+      idGenerator,
+      new InMemorySubscriptionAuditTrail(),
+    );
+
+    const result = await handler.execute({ tenantId: TENANT_ID, targetPlanCode: 'PROFESSIONNEL' });
+
+    expect(result.isFailure()).toBe(true);
+    expect(result.getError()).toBe('CURRENT_PLAN_PRICE_NOT_FOUND');
+  });
+
+  // NOTE : la boucle de retry sur `SubscriptionConcurrencyConflictError` (MAX_ATTEMPTS=2, voir
+  // le commentaire de tete d'UpgradeSubscriptionPlan.ts) rejoue la TRANSACTION ENTIERE, ce qui
+  // exige un VRAI rollback (l'insertion de la `PlanUpgradeRequest` de la tentative avortee doit
+  // disparaitre) — `InMemoryUnitOfWork` ne simule pas de rollback transactionnel (voir son
+  // implementation dans le testKit), rendant ce scenario non reproductible fidelement en test
+  // unitaire pur : un essai avec `failNextSaveWithConflict()` ici percute a tort la propre
+  // insertion non annulee de la premiere tentative (`UPGRADE_ALREADY_PENDING`), plutot que de
+  // rejouer proprement. Ce comportement est couvert par le test d'integration Postgres reel
+  // (`test/subscription/integration/subscriptionOptimisticLock.test.ts`), ou la transaction est
+  // vraie.
+
+  it('panne technique de save() SANS rapport avec un conflit de concurrence : propagee immediatement, sans nouvelle tentative', async () => {
+    const planRepository = new InMemoryPlanRepository();
+    const planPriceRepository = new InMemoryPlanPriceRepository();
+    const subscriptionRepository = new FailingSaveSubscriptionRepository();
+    const planUpgradeRequestRepository = new InMemoryPlanUpgradeRequestRepository();
+    const unitOfWork = new InMemoryUnitOfWork();
+    const idGenerator = new SequentialIdGenerator();
+    const standard = await seedPlan(planRepository, planPriceRepository, 'STANDARD', 35_000, { maxUsers: 10, maxBeds: 20 }, idGenerator);
+    await seedPlan(planRepository, planPriceRepository, 'PROFESSIONNEL', 55_000, { maxUsers: 30, maxBeds: 50 }, idGenerator);
+    const tenantId = TenantId.create(TENANT_ID).getValue();
+    const subscription = Subscription.reconstitute(SubscriptionId.create(idGenerator.generate()).getValue(), {
+      tenantId,
+      planId: standard.plan.id,
+      currentPlanPriceId: standard.price.id,
+      period: 'MENSUEL',
+      status: 'ACTIVE',
+      trialEndsAt: null,
+      periodStartsAt: new Date('2026-08-01T00:00:00Z'),
+      periodEndsAt: new Date('2026-08-31T00:00:00Z'),
+      createdAt: new Date('2026-08-01T00:00:00Z'),
+      gracePeriodStartedAt: null,
+      degradedModeEnteredAt: null,
+      degradedModeSustainedNotifiedAt: null,
+    });
+    await subscriptionRepository.save(subscription, tenantId);
+    subscriptionRepository.arm();
+    const handler = new UpgradeSubscriptionPlanHandler(
+      planRepository,
+      planPriceRepository,
+      subscriptionRepository,
+      planUpgradeRequestRepository,
+      unitOfWork,
+      new FixedClock('2026-08-16T00:00:00Z'),
+      idGenerator,
+      new InMemorySubscriptionAuditTrail(),
+    );
+
+    await expect(handler.execute({ tenantId: TENANT_ID, targetPlanCode: 'PROFESSIONNEL' })).rejects.toThrow(
+      /panne technique simulee/,
+    );
+  });
+
+  it('panne technique de replaceExpiredAndInsert() SANS rapport avec la contrainte UNIQUE : propagee, jamais traduite en UPGRADE_ALREADY_PENDING', async () => {
+    const { planRepository, planPriceRepository, subscriptionRepository, unitOfWork, clock, tenantId, standard } = await buildScenario();
+    const failingPlanUpgradeRequestRepository = new FailingPlanUpgradeRequestRepository();
+    const handler = new UpgradeSubscriptionPlanHandler(
+      planRepository,
+      planPriceRepository,
+      subscriptionRepository,
+      failingPlanUpgradeRequestRepository,
+      unitOfWork,
+      clock,
+      new SequentialIdGenerator(),
+      new InMemorySubscriptionAuditTrail(),
+    );
+
+    await expect(handler.execute({ tenantId: TENANT_ID, targetPlanCode: 'PROFESSIONNEL' })).rejects.toThrow(
+      /panne technique simulee/,
+    );
+    // Aucun effet de bord : le forfait courant reste inchange malgre la panne.
+    const subscription = await subscriptionRepository.findByTenantId(tenantId);
+    expect(subscription?.planId.equals(standard.plan.id)).toBe(true);
   });
 });

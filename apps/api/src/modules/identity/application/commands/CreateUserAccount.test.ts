@@ -6,8 +6,23 @@ import {
   InMemoryUserAccountRepository,
   SequentialIdGenerator,
 } from '../../../../../test/identity/builders/testKit.js';
+import type { UserAccount } from '../../domain/UserAccount.js';
+import { UserAccountEmailAlreadyRegisteredError } from '../../domain/ports/UserAccountRepository.js';
 import { Email } from '../../domain/value-objects/Email.js';
 import { CreateUserAccountHandler } from './CreateUserAccount.js';
+
+/** Simule EXACTEMENT ce que `PrismaUserAccountRepository.save()` fait sur une violation de la contrainte UNIQUE `email` lors d'une creation concurrente : la premiere ecriture pour un email donne echoue avec `UserAccountEmailAlreadyRegisteredError`, comme si un AUTRE writer venait de gagner la course. */
+class ConflictOnFirstSaveUserAccountRepository extends InMemoryUserAccountRepository {
+  private hasThrown = false;
+
+  override async save(account: UserAccount): Promise<void> {
+    if (!this.hasThrown) {
+      this.hasThrown = true;
+      throw new UserAccountEmailAlreadyRegisteredError(account.email.value);
+    }
+    await super.save(account);
+  }
+}
 
 function buildHandler() {
   const repo = new InMemoryUserAccountRepository();
@@ -55,6 +70,22 @@ describe('CreateUserAccountHandler', () => {
     const { handler } = buildHandler();
     await handler.execute({ email: 'dup@hopital.sn', plainPassword: 'suffisant123', platformRole: 'NONE' });
     const result = await handler.execute({ email: 'dup@hopital.sn', plainPassword: 'suffisant456', platformRole: 'NONE' });
+    expect(result.isFailure()).toBe(true);
+    expect(result.getError()).toBe('EMAIL_ALREADY_REGISTERED');
+  });
+
+  it('course concurrente sur l_ecriture (UserAccountEmailAlreadyRegisteredError depuis save()) -> EMAIL_ALREADY_REGISTERED, jamais une exception non geree (BLOQUANT-2a)', async () => {
+    const repo = new ConflictOnFirstSaveUserAccountRepository();
+    const handler = new CreateUserAccountHandler(
+      repo,
+      new FakePasswordHasher(),
+      new InMemoryUnitOfWork(),
+      new FixedClock('2026-08-23T10:00:00Z'),
+      new SequentialIdGenerator(),
+    );
+
+    const result = await handler.execute({ email: 'concurrent@hopital.sn', plainPassword: 'suffisant123', platformRole: 'NONE' });
+
     expect(result.isFailure()).toBe(true);
     expect(result.getError()).toBe('EMAIL_ALREADY_REGISTERED');
   });

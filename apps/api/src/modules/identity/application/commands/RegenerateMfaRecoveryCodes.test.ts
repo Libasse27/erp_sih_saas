@@ -181,6 +181,65 @@ describe('RegenerateMfaRecoveryCodesHandler', () => {
     expect(auditTrail.records[0]).toMatchObject({ eventType: 'MFA_RECOVERY_CODES_REGENERATED', outcome: 'SUCCESS' });
   });
 
+  it('code TOTP rejoue (meme pas de temps qu_un challenge deja accepte) : INVALID_CODE, compteur incremente', async () => {
+    seedActiveEnrollment();
+    const firstSessionId = await seedStepUpSession(USER_ID.toString(), 's-first');
+    const first = await handler.execute({ sessionId: firstSessionId, totpCode: '123456' });
+    expect(first.isSuccess()).toBe(true);
+    // Reutilise EXACTEMENT le meme pas de temps que l_appel precedent (le fake incremente
+    // normalement `nextTimeStep` a chaque `verify()` reussi) : simule un rejeu du MEME code TOTP.
+    totpService.nextTimeStep -= 1;
+
+    const secondSessionId = await seedStepUpSession(USER_ID.toString(), 's-second');
+    const result = await handler.execute({ sessionId: secondSessionId, totpCode: '123456' });
+
+    expect(mustFail(result)).toBe('INVALID_CODE');
+    const enrollment = await mfaEnrollments.findByUserId(USER_ID);
+    expect(enrollment?.consecutiveFailedAttempts).toBe(1);
+    expect(auditTrail.records.at(-1)).toMatchObject({ eventType: 'MFA_RECOVERY_CODES_REGENERATED', outcome: 'FAILURE' });
+  });
+
+  it('rejette une session PLATFORM/TENANT corrompue (userId invalide) en levant une exception (bug infra, pas un Result.failure)', async () => {
+    const corrompue: PlatformSessionContext = {
+      sessionId: 's-corrompue',
+      kind: 'PLATFORM',
+      userId: 'pas-un-uuid',
+      requiresMfa: true,
+      mfaSatisfiedAt: clock.now().toISOString(),
+      issuedAt: clock.now().toISOString(),
+      sensitivityCategory: 'PLATFORM_SUPER_ADMIN',
+      absoluteExpiresAt: new Date(clock.now().getTime() + 60_000).toISOString(),
+    };
+    await sessions.create(corrompue);
+
+    await expect(handler.execute({ sessionId: corrompue.sessionId, totpCode: '123456' })).rejects.toThrow();
+  });
+
+  it('verrouillage atteint EXACTEMENT via un rejeu (registerSuccessfulChallenge en echec), pas seulement via un code faux : MFA_FACTOR_LOCKED_OUT audite (F-5)', async () => {
+    seedActiveEnrollment();
+    // Un premier challenge ACCEPTE (necessaire pour avoir un pas de temps a rejouer ensuite) —
+    // reinitialise le compteur d'echecs a zero, comme tout succes.
+    const firstAccepted = await seedStepUpSession(USER_ID.toString(), 's-accepted');
+    const accepted = await handler.execute({ sessionId: firstAccepted, totpCode: '123456' });
+    expect(accepted.isSuccess()).toBe(true);
+
+    for (let i = 0; i < 4; i += 1) {
+      const sessionId = await seedStepUpSession(USER_ID.toString(), `s-fail-${i}`);
+      await handler.execute({ sessionId, totpCode: 'mauvais' });
+    }
+    expect(auditTrail.records.filter((r) => r.eventType === 'MFA_FACTOR_LOCKED_OUT')).toHaveLength(0);
+    totpService.nextTimeStep -= 1; // prochain appel : rejeu du MEME pas de temps que l_accepte plus haut
+
+    const replaySessionId = await seedStepUpSession(USER_ID.toString(), 's-replay');
+    const result = await handler.execute({ sessionId: replaySessionId, totpCode: '123456' });
+
+    expect(mustFail(result)).toBe('INVALID_CODE');
+    const lockedOutEntries = auditTrail.records.filter((r) => r.eventType === 'MFA_FACTOR_LOCKED_OUT');
+    expect(lockedOutEntries).toHaveLength(1);
+    const enrollment = await mfaEnrollments.findByUserId(USER_ID);
+    expect(enrollment?.consecutiveFailedAttempts).toBe(5);
+  });
+
   it('TOO_MANY_ATTEMPTS quand deja verrouille, et audite MFA_FACTOR_LOCKED_OUT une seule fois (F-5)', async () => {
     seedActiveEnrollment();
     for (let i = 0; i < 5; i += 1) {

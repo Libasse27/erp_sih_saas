@@ -19,6 +19,29 @@ import { createReactivateSubscriptionOnPaymentSucceededHandler } from './Reactiv
 const TENANT = TenantId.create(uuidAt(1)).getValue();
 const SUBSCRIPTION_ID = SubscriptionId.create(uuidAt(2)).getValue();
 
+/**
+ * Specialise `InMemorySubscriptionRepository` pour simuler, de maniere DETERMINISTE, la relecture
+ * introuvable apres un conflit de verrouillage optimiste (`saveWithConcurrencyRetry`, branche
+ * `reloaded === null`) — aucun fake existant du testKit partage ne permet de cibler un appel
+ * PRECIS de `findById` par son rang, ajoute donc localement a ce seul fichier de test.
+ */
+class ReloadNullSubscriptionRepository extends InMemorySubscriptionRepository {
+  private findByIdCallCount = 0;
+  private nullOnCall: number | null = null;
+
+  returnNullOnFindByIdCall(callIndex: number): void {
+    this.nullOnCall = callIndex;
+  }
+
+  override async findById(id: SubscriptionId, tenantId: TenantId): Promise<Subscription | null> {
+    this.findByIdCallCount += 1;
+    if (this.nullOnCall === this.findByIdCallCount) {
+      return null;
+    }
+    return super.findById(id, tenantId);
+  }
+}
+
 const NEW_PERIOD_STARTS_AT = '2026-08-31T00:00:00Z';
 const NEW_PERIOD_ENDS_AT = '2026-09-30T00:00:00Z';
 
@@ -159,5 +182,91 @@ describe('ReactivateSubscriptionOnPaymentSucceeded — filtrage par nature du pa
     const subscription = await subscriptionRepository.findById(SUBSCRIPTION_ID, TENANT);
     expect(subscription?.status).toBe('ACTIVE');
     expect(subscription?.periodEndsAt).toEqual(new Date(NEW_PERIOD_ENDS_AT));
+  });
+
+  it('reactive un abonnement DEGRADED sur un paiement de RENOUVELLEMENT', async () => {
+    const { handler, subscriptionRepository } = await buildScenario('DEGRADED');
+
+    await handler(envelope());
+
+    const subscription = await subscriptionRepository.findById(SUBSCRIPTION_ID, TENANT);
+    expect(subscription?.status).toBe('ACTIVE');
+    expect(subscriptionRepository.publishedEvents[0]?.eventType).toBe('subscription.subscription.reactivated');
+  });
+
+  it('payload invalide (champ manquant) -> leve une erreur explicite', async () => {
+    const { handler } = await buildScenario('ACTIVE');
+
+    await expect(
+      handler({
+        id: 'outbox-invalide',
+        eventType: 'payment.payment.saas-payment-succeeded',
+        eventVersion: 1,
+        aggregateId: uuidAt(50),
+        tenantId: TENANT.toString(),
+        occurredAt: new Date('2026-09-02T00:00:00Z'),
+        payload: { tenantId: TENANT.toString() },
+      }),
+    ).rejects.toThrow(/Payload invalide/);
+  });
+
+  it('identifiants invalides (tenantId ou subscriptionId) dans le payload -> leve une erreur', async () => {
+    const { handler } = await buildScenario('ACTIVE');
+
+    await expect(
+      handler(envelope({ tenantId: 'pas-un-uuid' })),
+    ).rejects.toThrow(/Identifiants invalides/);
+  });
+
+  it('abonnement introuvable pour ce tenant : ignore silencieusement (aucune exception, aucune ecriture)', async () => {
+    const subscriptionRepository = new InMemorySubscriptionRepository();
+    const unitOfWork = new InMemoryUnitOfWork();
+    const clock = new FixedClock('2026-09-02T00:00:00Z');
+    const idGenerator = new SequentialIdGenerator();
+    const subscriptionAuditTrail = new InMemorySubscriptionAuditTrail();
+    const handler = createReactivateSubscriptionOnPaymentSucceededHandler({
+      subscriptionRepository,
+      subscriptionAuditTrail,
+      unitOfWork,
+      clock,
+      idGenerator,
+    });
+
+    await handler(envelope());
+
+    expect(await subscriptionRepository.findById(SUBSCRIPTION_ID, TENANT)).toBeNull();
+    expect(subscriptionAuditTrail.records).toHaveLength(0);
+  });
+
+  it('conflits de verrouillage optimiste persistants : abandon apres epuisement des tentatives', async () => {
+    const { handler, subscriptionRepository } = await buildScenario('GRACE_PERIOD');
+    subscriptionRepository.failNextSaveWithConflict(3);
+
+    await expect(handler(envelope())).rejects.toThrow(/Conflit de verrouillage optimiste/);
+  });
+
+  it('conflit de verrouillage optimiste suivi d_une relecture introuvable : remonte l_erreur d_origine, jamais masquee', async () => {
+    const subscriptionRepository = new ReloadNullSubscriptionRepository();
+    const unitOfWork = new InMemoryUnitOfWork();
+    const clock = new FixedClock('2026-09-02T00:00:00Z');
+    const idGenerator = new SequentialIdGenerator();
+    const subscriptionAuditTrail = new InMemorySubscriptionAuditTrail();
+
+    await subscriptionRepository.save(subscriptionWithStatus('GRACE_PERIOD'), TENANT);
+    subscriptionRepository.publishedEvents.length = 0;
+    // Appel #1 = lecture initiale de l'abonnement (doit reussir) ; le conflit survient au premier
+    // `save()` dans `saveWithConcurrencyRetry`, dont la RELECTURE consecutive est l'appel #2.
+    subscriptionRepository.failNextSaveWithConflict();
+    subscriptionRepository.returnNullOnFindByIdCall(2);
+
+    const handler = createReactivateSubscriptionOnPaymentSucceededHandler({
+      subscriptionRepository,
+      subscriptionAuditTrail,
+      unitOfWork,
+      clock,
+      idGenerator,
+    });
+
+    await expect(handler(envelope())).rejects.toThrow(/Conflit de verrouillage optimiste/);
   });
 });
