@@ -1,0 +1,54 @@
+{
+  "_comment": "Fichier d'exceptions/baseline unique du controle SCA (ADR-0014 S4, S6). Chaque entree deroge formellement a un avis de severite high/critical pour le gate CI (.github/workflows/sca.yml, scripts/sca/check-exceptions.mjs). Un avis absent d'ici, de severite high/critical, fait echouer le gate. Une entree expiree (champ expires depasse) cesse de couvrir l'avis : le blocage reprend automatiquement (ADR-0014 S6). Portee par identifiant GHSA, pas par paquet : si un GHSA touche plusieurs paquets, une seule entree les couvre tous (voir security/README.md). Relu en PR comme du code -- aucune modification sans revue.",
+  "exceptions": [
+    {
+      "ghsa": "GHSA-5xrq-8626-4rwp",
+      "package": "vitest",
+      "reason": "Avis critique (CVSS 9.8) conditionne a un serveur @vitest/ui en ecoute ; ce paquet est absent du depot (audit 2026-09-13, docs/architecture/reports/2026-09-13-sca-audit.md S2.3). Correctif reel = montee vitest 2 -> 3/4, mandat separe (ADR-0014 garde-fou S14.1, hors du present mandat pour ne pas deplacer les seuils geles du coverage gate item 10).",
+      "expires": "2026-12-13",
+      "approver": "libdevprod"
+    },
+    {
+      "ghsa": "GHSA-82fw-gwwq-j7x9",
+      "package": "vitest",
+      "reason": "Path traversal via redirection de mock @vitest/mocker, confine a l'execution de la suite de tests, jamais charge dans l'artefact deploye (audit 2026-09-13 S2.3). Correctif reel = montee vitest, meme mandat separe que GHSA-5xrq-8626-4rwp.",
+      "expires": "2026-12-13",
+      "approver": "libdevprod"
+    },
+    {
+      "ghsa": "GHSA-4w7w-66w2-5vf9",
+      "package": "vite",
+      "reason": "Path traversal dans la gestion des .map de deps optimisees par le serveur de dev Vite ; ce serveur n'est jamais demarre dans ce depot (build tsc, pas de vite dev server en CI/prod). Vient transitivement de vitest ; corrige par la meme montee de version.",
+      "expires": "2026-12-13",
+      "approver": "libdevprod"
+    },
+    {
+      "ghsa": "GHSA-v6wh-96g9-6wx3",
+      "package": "vite",
+      "reason": "Divulgation de hash NTLMv2 via launch-editor sur chemin UNC Windows, outil de dev uniquement, jamais invoque en CI (ubuntu-latest) ni en production. Vient transitivement de vitest ; corrige par la meme montee de version.",
+      "expires": "2026-12-13",
+      "approver": "libdevprod"
+    },
+    {
+      "ghsa": "GHSA-fx2h-pf6j-xcff",
+      "package": "vite",
+      "reason": "Contournement de server.fs.deny sur chemins alternatifs Windows, serveur de dev Vite jamais demarre dans ce depot. Vient transitivement de vitest ; corrige par la meme montee de version.",
+      "expires": "2026-12-13",
+      "approver": "libdevprod"
+    },
+    {
+      "ghsa": "GHSA-67mh-4wv8-2f99",
+      "package": "esbuild",
+      "reason": "Le serveur de dev esbuild accepte des requetes de tout site web ; ce serveur n'est jamais demarre dans ce depot (build tsc, pas d'esbuild serve). Vient transitivement de vitest ; corrige par la meme montee de version.",
+      "expires": "2026-12-13",
+      "approver": "libdevprod"
+    },
+    {
+      "ghsa": "GHSA-ggr8-5vv4-36mx",
+      "package": "deepmerge-ts",
+      "reason": "Epuisement de pile sur graphes recursifs profonds ; vient de la CLI Prisma (devDependency), jamais chargee au runtime (audit 2026-09-13 S2.3 : classification --prod demontree imparfaite ici). Correctif hors de notre controle, depend d'une publication amont de Prisma. Reexamine a chaque revue mensuelle (ADR-0014 S13, mandat e).",
+      "expires": "2026-12-13",
+      "approver": "libdevprod"
+    }
+  ]
+}

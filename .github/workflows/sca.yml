@@ -1,0 +1,53 @@
+name: SCA
+
+# Gate d'entree du controle de composition logicielle (SCA), Phase 0, etape 13/13, sous-sujet
+# SCA (ADR-0014 : D-SCA-1=A1 detecter-et-bloquer, D-SCA-2=B3 volet CI, D-SCA-3=C1 seuil
+# high/critical sur arbre complet dev inclus, D-SCA-4=D2 regime de derogation, D-SCA-5=E2
+# baseline gelee). Bloque toute dependance a avis high/critical non couverte par une exception
+# non expiree de security/sca-exceptions.json (artefact unique, ADR-0014 S6).
+#
+# Volontairement dans un fichier separe de ci.yml : ce gate ne modifie jamais, ne conditionne
+# jamais et ne depend jamais du coverage gate de l'item 10 (commit 1539d32) — garde-fou
+# ADR-0014 S14.2. Le volet plateforme (Dependabot/dependency graph) et la veille planifiee sont
+# hors de ce fichier, voir sca-scheduled.yml et le mandat (d) de l'ADR-0014.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: sca-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sca-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Tests de non-regression du mecanisme SCA lui-meme
+        run: pnpm run sca:test
+
+      - name: SCA gate (high/critical, arbre complet, exceptions non expirees — ADR-0014)
+        run: pnpm run sca:gate

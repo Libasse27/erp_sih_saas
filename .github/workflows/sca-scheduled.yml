@@ -1,0 +1,79 @@
+name: SCA - veille planifiee
+
+# Veille continue du controle SCA (ADR-0014, D-SCA-5=E2, volet detection distinct du gate
+# d'entree de sca.yml). Audit complet, toutes severites, JAMAIS bloquant : notifie via une
+# issue GitHub dediee plutot que d'echouer un build. Seul le gate de sca.yml fait autorite pour
+# un blocage (ADR-0014 S7) — une alerte issue de ce workflow n'echoue jamais un build et ne
+# vaut pas non plus quitus en son absence.
+on:
+  schedule:
+    - cron: '0 6 * * 1' # tous les lundis 06:00 UTC
+  workflow_dispatch: {}
+
+concurrency:
+  group: sca-watch
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sca-watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Audit complet (non bloquant)
+        run: pnpm --silent run sca:watch > sca-watch-report.md
+
+      - name: Publier ou mettre a jour l'issue de veille
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const body = fs.readFileSync("sca-watch-report.md", "utf8");
+            const label = "sca-veille";
+            const title = "Veille SCA — etat des avis de securite des dependances";
+            const { data: rawIssues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: label,
+            });
+            // listForRepo renvoie aussi les pull requests portant le label : les exclure pour ne
+            // jamais ecraser le corps d'une PR (revue de securite independante, finding S-9).
+            const issues = rawIssues.filter((i) => !i.pull_request);
+            if (issues.length > 0) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issues[0].number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: [label],
+              });
+            }

@@ -15,7 +15,10 @@
     "format:write": "prettier --write .",
     "test": "pnpm -r run test",
     "typecheck": "pnpm -r run typecheck",
-    "arch:check": "pnpm --filter @sih/api arch:check"
+    "arch:check": "pnpm --filter @sih/api arch:check",
+    "sca:gate": "node scripts/sca/check-exceptions.mjs --mode=gate",
+    "sca:watch": "node scripts/sca/check-exceptions.mjs --mode=watch",
+    "sca:test": "node --test scripts/sca/check-exceptions.test.mjs"
   },
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^8.18.0",
@@ -23,5 +26,11 @@
     "eslint": "^9.17.0",
     "prettier": "^3.4.2",
     "typescript": "^5.7.2"
+  },
+  "pnpm": {
+    "overrides": {
+      "js-yaml@>=4.0.0 <4.3.2": "^4.3.2",
+      "qs@>=6.14.2 <=6.15.3": ">=6.16.0"
+    }
   }
 }
