@@ -31,6 +31,14 @@
     "overrides": {
       "js-yaml@>=4.0.0 <4.3.2": "^4.3.2",
       "qs@>=6.14.2 <=6.15.3": ">=6.16.0"
-    }
+    },
+    "onlyBuiltDependencies": [
+      "@prisma/client",
+      "@prisma/engines",
+      "argon2",
+      "esbuild",
+      "msgpackr-extract",
+      "prisma"
+    ]
   }
 }
