@@ -22,6 +22,15 @@
    la doc fait partie du périmètre, pas d'un rattrapage.
 4. **Une phase bloquée par une décision métier ne démarre pas.** Les points « À VALIDER » de
    [03-open-decisions.md](03-open-decisions.md) sont des prérequis, pas des détails.
+5. **Le frontend (Web, Desktop, Mobile) est rattaché explicitement à la phase où il constitue
+   un critère de sortie, jamais implicitement à Phase 0 dans son ensemble.** Son absence ne
+   bloque pas une phase lorsqu'il n'est pas défini comme critère de sortie de cette phase-là.
+   Ce principe généralise, à l'ensemble Phase 0 → Phase 7, le rattachement déjà pratiqué par ce
+   document pour les tableaux de bord par rôle des Phases 3 à 6 — voir
+   [O-26](03-open-decisions.md#o-26--rattachement-du-frontend-webdesktopmobile-par-phase-plutôt-que-prérequis-global-de-phase-0).
+   Ce principe ne rend pas le frontend optionnel : un composant frontend explicitement rattaché
+   à une phase, ou explicitement différé (comme `apps/mobile`/`apps/desktop` vers la Phase 7),
+   reste un critère de sortie plein et entier de cette phase.
 
 **Aucune estimation en jours n'est donnée** : la charge dépend de l'effectif, inconnu à ce
 stade. Les phases sont ordonnées par dépendance.
@@ -90,9 +99,15 @@ de [01](01-target-architecture.md)), pas le reste du module.
 - Module **Notifications**, canaux email + SMS (O-07 ; fournisseur SMS et calendrier des
   rappels d'impayé restant à fixer avant la fin de la phase)
 - Infrastructure Outbox + workers BullMQ
-- Console Super Admin (v1) : établissements, abonnements, forfaits, limites, statistiques,
-  audit, activation/suspension
-- `apps/web` : LoginPage, RegisterPage (flux complet §5), onboarding
+- **Frontend Phase 0 attendu, phase cible non encore déterminée** — Console Super Admin (v1)
+  (établissements, abonnements, forfaits, limites, statistiques, audit, activation/suspension)
+  et `apps/web` (LoginPage, RegisterPage, onboarding) restent des fonctionnalités produit
+  légitimes, **non supprimées** par cet amendement. Conformément au Principe 5 et à
+  [O-26](03-open-decisions.md#o-26--rattachement-du-frontend-webdesktopmobile-par-phase-plutôt-que-prérequis-global-de-phase-0),
+  leur absence de code ne constitue plus, à elle seule, un blocage de clôture de Phase 0 : à la
+  différence d'`apps/mobile`/`apps/desktop` (différés explicitement vers la Phase 7), aucune
+  phase cible n'est aujourd'hui déterminée pour ces éléments par ce document — ce point reste
+  ouvert et n'est pas tranché ici.
 
 **Critères de sortie spécifiques**
 - Test de non-fuite inter-tenant au vert sur **tous** les agrégats du SaaS Core
@@ -111,7 +126,9 @@ de [01](01-target-architecture.md)), pas le reste du module.
   > (tests d'ADR-0008), et (b) que l'impayé **après** provisioning conduit bien à la période de
   > grâce puis au mode dégradé.
 - Test prouvant qu'un client transmettant un `tenantId` ou un rôle forgé est ignoré et audité
-- Le frontend ne contient **aucun** forfait ni permission codé en dur
+- Le frontend ne contient **aucun** forfait ni permission codé en dur — applicable dès qu'un
+  frontend est explicitement rattaché à Phase 0 comme critère de sortie (Principe 5) ; sans
+  objet tant qu'aucun ne l'est
 - ADR-0001 et ADR-0002 statués « Accepté »
 
 **Aucun module médical n'est ouvert tant que cette phase n'est pas close.**

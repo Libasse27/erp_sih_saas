@@ -244,6 +244,52 @@ décisions d'architecture non prises)** :
 
 ---
 
+### O-26 — Rattachement du frontend (Web/Desktop/Mobile) par phase, plutôt que prérequis global de Phase 0
+**TECHNIQUE · CLOS le 2026-09-20**
+
+**Problème initial** : `02-roadmap-migration.md` listait `apps/web` (LoginPage, RegisterPage,
+onboarding) et la Console Super Admin (v1) dans le périmètre « Livré » de Phase 0, sans qu'aucun
+report ne soit déclaré — contrairement à `apps/mobile`/`apps/desktop`, explicitement différés en
+Phase 7 dans leur propre `package.json`. Cette divergence documentaire était déjà signalée comme
+résidu par [ADR-0013](adr/0013-headers-securite-http.md) (§Conséquences, résidu 4, 2026-09-11),
+sans avoir été corrigée depuis.
+
+**Décision** : Option C retenue — généralisation du modèle « frontend attaché par phase » déjà
+pratiqué par le roadmap pour les tableaux de bord des Phases 3 à 6 (un tableau de bord par rôle,
+rattaché à la phase qui produit sa donnée). Le principe devient explicite pour l'ensemble
+Phase 0 → Phase 7 ([Principe 5](02-roadmap-migration.md#principes-de-séquencement)) :
+
+> Chaque composant frontend (Web, Desktop, Mobile) est rattaché explicitement à la phase où il
+> constitue un critère de sortie. Son absence ne bloque pas une phase lorsqu'il n'est pas défini
+> comme critère de sortie de cette phase.
+
+**Impact sur Phase 0** : LoginPage, RegisterPage, onboarding et la Console Super Admin (v1) ne
+sont plus traités comme un prérequis implicite de clôture de Phase 0 du seul fait de leur
+absence de code. Ils restent des fonctionnalités attendues du produit — **rien n'est
+supprimé** — mais leur phase cible n'est, à ce jour, **pas déterminée** par le roadmap existant.
+
+**Impact sur les Phases 1 → 7** : aucune contradiction constatée. Les Phases 3 à 6 appliquaient
+déjà ce principe (tableaux de bord Médecin / Infirmier / Pharmacien-Laboratoire / Caisse-
+Direction, chacun rattaché à sa phase). Phases 1 et 2 restent muettes sur tout frontend — non
+modifiées par cette décision, faute de rattachement déjà déterminé. Phase 7 (Mobile/Desktop)
+inchangée.
+
+**Éléments frontend dont la phase cible reste à déterminer** : LoginPage, RegisterPage,
+onboarding, Console Super Admin (v1). Aucune phase n'est inventée pour ces éléments par cette
+décision — leur rattachement reste un point ouvert, à trancher séparément.
+
+**Ce que cette décision ne fait pas** : elle ne déclare pas Phase 0 close, ne rouvre aucun
+invariant architectural listé dans la règle de gouvernance post-gel
+([00-executive-summary.md](00-executive-summary.md)), et ne modifie ni le critère CI, ni la
+couverture de tests, ni la configuration SCA. Le test
+`test/payment/integration/paymentWebhookRateLimiterFailure.test.ts` (CI rouge sur `main` depuis
+le commit `3d8093e`, toujours rouge au commit `599e1e9`) reste un problème strictement
+indépendant, **non traité par cette décision**.
+
+**Décideur** : responsable technique (2026-09-20).
+
+---
+
 ## Bloquants Phase 2
 
 ### O-10 — Règle de détection de doublon patient
@@ -501,3 +547,4 @@ une conception dédiée.
 | O-23 | Portail patient | MÉTIER | — | Hors scope V1 | Direction |
 | O-24 | Multi-sites / groupes | MÉTIER | — | Ouvert | Direction |
 | O-25 | Prestataire de paiement SaaS (7 sous-points) | MIXTE | P0 | **Clos structurellement (2026-08-23)** — 3 résidus opérationnels (fournisseur, compte de règlement, fréquence) | Direction + technique |
+| O-26 | Rattachement du frontend par phase (Option C) | TECHNIQUE | — | **Clos (2026-09-20)** — phase cible de `apps/web`/Console Super Admin encore à déterminer | Resp. technique |
