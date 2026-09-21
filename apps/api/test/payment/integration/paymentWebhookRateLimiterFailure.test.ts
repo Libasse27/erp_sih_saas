@@ -9,6 +9,7 @@ import { Payment } from '../../../src/modules/payment/domain/Payment.js';
 import { PlatformInvoice } from '../../../src/modules/payment/domain/PlatformInvoice.js';
 import { postRaw, startTestServer, type TestServerHandle } from '../../server/httpTestClient.js';
 import { createRawPgClient, uniqueId } from './dbTestHelpers.js';
+import { acquireGlobalWebhookRateLimitLock } from './globalWebhookRateLimitTestLock.js';
 
 const GLOBAL_WEBHOOK_RATE_LIMIT_KEY = 'sih:rate-limit:payment-webhook:global';
 
@@ -240,17 +241,31 @@ describe('POST /api/v1/payments/webhook — fail-closed silencieux quand le limi
     20_000,
   );
 
-  it(`la cle ${GLOBAL_WEBHOOK_RATE_LIMIT_KEY} n_est PAS posee quand le script Lua echoue (aucune commande Redis reussie, rien a incrementer)`, async () => {
-    await root.redis.del(GLOBAL_WEBHOOK_RATE_LIMIT_KEY);
-    const evalSpy = vi.spyOn(asEvalCapable(root.redis), 'eval').mockRejectedValueOnce(new Error('ECONNRESET simulee (double de test, BLOQUANT-1)'));
-    try {
-      const response = await postRaw(handle.baseUrl, '/api/v1/payments/webhook', 'garbage-body-not-a-valid-payload');
-      expect(response.status).toBe(200);
-      const exists = await root.redis.exists(GLOBAL_WEBHOOK_RATE_LIMIT_KEY);
-      expect(exists).toBe(0);
-    } finally {
-      evalSpy.mockRestore();
-      await root.redis.del(GLOBAL_WEBHOOK_RATE_LIMIT_KEY);
-    }
-  });
+  it(
+    `la cle ${GLOBAL_WEBHOOK_RATE_LIMIT_KEY} n_est PAS posee quand le script Lua echoue (aucune commande Redis reussie, rien a incrementer)`,
+    async () => {
+      // Seul scenario de ce fichier a lire/ecrire la cle GLOBALE partagee (les trois precedents
+      // n'evaluent que l'appel `eval` intercepte, jamais l'etat de la cle) — verrou dedie CI-03 :
+      // sans lui, une rafale reelle de `paymentWebhookRateLimiting.test.ts` executee en parallele
+      // dans un autre worker Vitest peut poser cette cle entre le `del` et l'assertion `exists`
+      // ci-dessous (reproduit de maniere deterministe, 3/3, avant correction).
+      const releaseWebhookRateLimitLock = await acquireGlobalWebhookRateLimitLock(root.redis);
+      try {
+        await root.redis.del(GLOBAL_WEBHOOK_RATE_LIMIT_KEY);
+        const evalSpy = vi.spyOn(asEvalCapable(root.redis), 'eval').mockRejectedValueOnce(new Error('ECONNRESET simulee (double de test, BLOQUANT-1)'));
+        try {
+          const response = await postRaw(handle.baseUrl, '/api/v1/payments/webhook', 'garbage-body-not-a-valid-payload');
+          expect(response.status).toBe(200);
+          const exists = await root.redis.exists(GLOBAL_WEBHOOK_RATE_LIMIT_KEY);
+          expect(exists).toBe(0);
+        } finally {
+          evalSpy.mockRestore();
+          await root.redis.del(GLOBAL_WEBHOOK_RATE_LIMIT_KEY);
+        }
+      } finally {
+        await releaseWebhookRateLimitLock();
+      }
+    },
+    20_000,
+  );
 });

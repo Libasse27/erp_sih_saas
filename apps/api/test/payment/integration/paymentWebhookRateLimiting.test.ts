@@ -10,6 +10,7 @@ import { PlatformInvoice } from '../../../src/modules/payment/domain/PlatformInv
 import { PAYMENT_WEBHOOK_RATE_LIMIT_MAX_REQUESTS } from '../../../src/shared-kernel/domain/RateLimitTuning.js';
 import { postRaw, startTestServer, type TestServerHandle } from '../../server/httpTestClient.js';
 import { createRawPgClient, uniqueId } from './dbTestHelpers.js';
+import { acquireGlobalWebhookRateLimitLock } from './globalWebhookRateLimitTestLock.js';
 
 const GLOBAL_WEBHOOK_RATE_LIMIT_KEY = 'sih:rate-limit:payment-webhook:global';
 
@@ -28,6 +29,14 @@ const GLOBAL_WEBHOOK_RATE_LIMIT_KEY = 'sih:rate-limit:payment-webhook:global';
  * APRES chaque scenario qui la sature, jamais en relevant le seuil de `RateLimitTuning.ts` pour
  * faire passer la suite.
  *
+ * CI-03 : cette suppression seule ne suffit pas contre un AUTRE fichier de test qui manipule la
+ * MEME cle en parallele dans un worker Vitest distinct (`paymentWebhookRateLimiterFailure.test.ts`,
+ * dont le dernier scenario verifie l'ABSENCE de cette cle) — reproduit de maniere deterministe en
+ * executant les deux fichiers ensemble. Chaque test de CE fichier detient donc, en plus de la
+ * suppression, le verrou Redis dedie `acquireGlobalWebhookRateLimitLock` pendant toute sa duree
+ * (voir `globalWebhookRateLimitTestLock.ts`) : isolation reelle de la cle partagee, jamais une
+ * desactivation du parallelisme Vitest.
+ *
  * Necessite `docker compose up -d` (PostgreSQL + Redis) et les migrations appliquees.
  */
 describe('POST /api/v1/payments/webhook — limitation de debit GLOBALE (ADR-0011 §3/§5)', () => {
@@ -35,6 +44,7 @@ describe('POST /api/v1/payments/webhook — limitation de debit GLOBALE (ADR-001
   let handle: TestServerHandle;
   let rawClient: Client;
   let sandbox: SandboxPaymentProviderAdapter;
+  let releaseWebhookRateLimitLock: (() => Promise<void>) | null = null;
 
   const createdPaymentIds: string[] = [];
   const createdInvoiceIds: string[] = [];
@@ -60,11 +70,14 @@ describe('POST /api/v1/payments/webhook — limitation de debit GLOBALE (ADR-001
   });
 
   beforeEach(async () => {
+    releaseWebhookRateLimitLock = await acquireGlobalWebhookRateLimitLock(root.redis);
     await root.redis.del(GLOBAL_WEBHOOK_RATE_LIMIT_KEY);
   });
 
   afterEach(async () => {
     await root.redis.del(GLOBAL_WEBHOOK_RATE_LIMIT_KEY);
+    await releaseWebhookRateLimitLock?.();
+    releaseWebhookRateLimitLock = null;
   });
 
   /** Plante un couple `PlatformInvoice`/`Payment` (statut initial PENDING) reel en base — meme Test Data Builder que `paymentWebhookHttp.test.ts`. */
