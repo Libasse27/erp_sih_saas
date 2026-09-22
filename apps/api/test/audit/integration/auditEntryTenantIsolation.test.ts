@@ -31,6 +31,7 @@ describe('AuditEntry — isolation inter-tenant (schema platform, sans RLS)', ()
   let prisma: PrismaClient;
   let rawClient: Client;
   let audit: AuditModule;
+  let fixedInstant: Date;
 
   const tenantAId = uniqueId();
   const tenantBId = uniqueId();
@@ -45,7 +46,15 @@ describe('AuditEntry — isolation inter-tenant (schema platform, sans RLS)', ()
   beforeAll(async () => {
     prisma = createTestPrismaClient();
     rawClient = await createRawPgClient();
-    audit = buildAuditModule({ prisma, clock: new FixedClock('2026-08-26T10:00:00Z'), idGenerator: new UuidGenerator() });
+    // Instant unique par execution (pas une date historique figee partagee entre fichiers) :
+    // la base Postgres est PARTAGEE et jamais purgee entre executions locales successives de la
+    // suite d'integration ; une date fixe accumule des lignes de runs precedents dans la meme
+    // fenetre `occurred_at`, ce qui rend `listForPlatform` non deterministe une fois le total
+    // cumule au-dela de `limit` (critere de sortie Phase 0 "non-fuite tenant",
+    // 02-roadmap-migration.md). `fixedInstant` reste un FixedClock au sens du domaine (immuable
+    // pour toute la duree du test), seule sa VALEUR devient unique par run.
+    fixedInstant = new Date();
+    audit = buildAuditModule({ prisma, clock: new FixedClock(fixedInstant.toISOString()), idGenerator: new UuidGenerator() });
 
     subjectAId = uniqueId();
     subjectBId = uniqueId();
@@ -217,17 +226,25 @@ describe('AuditEntry — isolation inter-tenant (schema platform, sans RLS)', ()
       expect(subjectIds).not.toContain(platformSubjectId);
     });
 
-    // Fenetre temporelle etroite autour du `FixedClock` utilise par `beforeAll` — cette base
-    // PostgreSQL est PARTAGEE avec l'ensemble de la suite d'integration (jamais reinitialisee
-    // entre fichiers) : sans ce filtre, `limit`/`AUDIT_PAGE_MAX_LIMIT` (200) ne suffirait pas a
-    // faire remonter des lignes anciennes noyees sous le volume accumule par les AUTRES tests. Le
-    // filtre `occurredFrom`/`occurredTo` est un champ ORDINAIRE d'`AuditEntryFilter` (§6) — son
-    // usage ici est un detail d'ISOLATION DE TEST, pas une regle metier.
-    const recordedAt = new Date('2026-08-26T10:00:00Z');
-    const narrowTimeWindow = { occurredFrom: new Date(recordedAt.getTime() - 1000), occurredTo: new Date(recordedAt.getTime() + 1000) };
+    // Fenetre temporelle autour de `fixedInstant` (unique par execution, capture dans
+    // `beforeAll`) — cette base PostgreSQL est PARTAGEE avec l'ensemble de la suite d'integration
+    // (jamais reinitialisee entre fichiers NI entre executions locales successives) : sans ce
+    // filtre, `limit`/`AUDIT_PAGE_MAX_LIMIT` (200) ne suffirait pas a faire remonter des lignes
+    // anciennes noyees sous le volume accumule par les AUTRES tests. Le filtre
+    // `occurredFrom`/`occurredTo` est un champ ORDINAIRE d'`AuditEntryFilter` (§6) — son usage ici
+    // est un detail d'ISOLATION DE TEST, pas une regle metier. `occurredFrom`/`occurredTo` sont
+    // fixes EXACTEMENT sur `fixedInstant` (pas une marge de +-1s) : les 4 entrees inserees par ce
+    // test portent toutes `occurred_at` rigoureusement egal a `fixedInstant` (`FixedClock`), donc
+    // une egalite stricte les capture sans dependre du debit d'ecriture concurrent des AUTRES
+    // fichiers de la suite (une marge temporelle, meme etroite, reste statistiquement exposee a
+    // cette meme classe de non-determinisme si un autre fichier ecrit beaucoup dans la fenetre).
+    // Calculee via une fonction (pas une constante au niveau du bloc `describe`) car
+    // `fixedInstant` n'est affecte que dans `beforeAll`, qui s'execute APRES la phase de collecte
+    // synchrone des blocs `describe`.
+    const narrowTimeWindow = () => ({ occurredFrom: fixedInstant, occurredTo: fixedInstant });
 
     it("listForPlatform({kind:'PLATFORM_ONLY'}) ne renvoie JAMAIS une ligne tenant (A ou B)", async () => {
-      const page = await audit.repositories.auditEntries.listForPlatform({ kind: 'PLATFORM_ONLY' }, narrowTimeWindow, {
+      const page = await audit.repositories.auditEntries.listForPlatform({ kind: 'PLATFORM_ONLY' }, narrowTimeWindow(), {
         cursor: null,
         limit: 200,
       });
@@ -240,7 +257,7 @@ describe('AuditEntry — isolation inter-tenant (schema platform, sans RLS)', ()
     });
 
     it("listForPlatform({kind:'ALL'}) voit A, B ET la plateforme (seule methode autorisee a traverser les tenants)", async () => {
-      const page = await audit.repositories.auditEntries.listForPlatform({ kind: 'ALL' }, narrowTimeWindow, {
+      const page = await audit.repositories.auditEntries.listForPlatform({ kind: 'ALL' }, narrowTimeWindow(), {
         cursor: null,
         limit: 200,
       });
@@ -282,7 +299,7 @@ describe('AuditEntry — isolation inter-tenant (schema platform, sans RLS)', ()
         // Page 1 du perimetre PLATEFORME (ALL, tous tenants + plateforme confondus), bornee a 1
         // ligne pour obtenir un `nextCursor` REEL — fenetre temporelle etroite pour la meme raison
         // que le bloc listForPlatform ci-dessus (base partagee entre fichiers de test).
-        const firstPageOfAll = await audit.repositories.auditEntries.listForPlatform({ kind: 'ALL' }, narrowTimeWindow, {
+        const firstPageOfAll = await audit.repositories.auditEntries.listForPlatform({ kind: 'ALL' }, narrowTimeWindow(), {
           cursor: null,
           limit: 1,
         });
