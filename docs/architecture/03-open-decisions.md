@@ -240,6 +240,13 @@ décisions d'architecture non prises)** :
 2. Compte de règlement légal (dépend aussi de la structure juridique de l'exploitant).
 3. Fréquence des reversements.
 
+**Amendement du 2026-09-24 (gouvernance produit/direction)** : ces résidus ne bloquent pas la
+clôture de Phase 0. Le socle architectural (port
+`PaymentProvider`, Anti-Corruption Layer, idempotence, signature des webhooks, rapprochement
+périodique) est implémenté et testé de bout en bout via `SandboxPaymentProviderAdapter`. Le
+résidu fournisseur conditionne le branchement d'un adaptateur réel pour `InitiatePaymentHandler` et le
+passage en production du module Payment, pas la sortie de Phase 0 ni le démarrage de Phase 1.
+
 **Décideur** : direction + responsable technique pour le choix final du prestataire (résidu 1).
 
 ---

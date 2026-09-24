@@ -73,11 +73,20 @@ contrats du SaaS Core, il ne les précède pas.**
 de session), O-07 (canaux de notification), O-25 (prestataire de paiement SaaS) de
 [03-open-decisions.md](03-open-decisions.md).
 **Statut au 2026-08-23 : les 8 sont clos** (O-03 sous réserve juridique ; O-02, O-04, O-06,
-O-07, O-25 avec résidus opérationnels/numériques/fournisseur explicitement tracés — voir
+O-07 avec résidus opérationnels/numériques et de fournisseur (SMS) explicitement tracés — voir
 [03-open-decisions.md](03-open-decisions.md) pour le détail). Ces résidus doivent être fermés
-avant la fin de la phase, pas avant son démarrage — le résidu fournisseur d'O-25 conditionne
-spécifiquement l'implémentation de l'étape `InitiatePayment` de la Saga de provisioning (§6.3
-de [01](01-target-architecture.md)), pas le reste du module.
+avant la fin de la phase, pas avant son démarrage.
+
+**Amendement du 2026-09-24 (gouvernance produit/direction)** : O-25 est clos structurellement
+pour la Phase 0 ; le port `PaymentProvider`, l'Anti-Corruption
+Layer et l'adaptateur sandbox couvrent l'idempotence, la signature des webhooks et le
+rapprochement périodique — la confirmation de paiement est prouvée bout en bout au niveau HTTP
+réel (signature, rejeu idempotent) contre `SandboxPaymentProviderAdapter` ; voir
+[03-open-decisions.md](03-open-decisions.md) pour le détail. Le résidu fournisseur réel d'O-25
+est un paramètre opérationnel externe (contrat commercial, KYC, compte de règlement), pas une
+lacune d'architecture ; il conditionne spécifiquement le branchement d'un adaptateur réel pour
+`InitiatePaymentHandler` et le passage en production du module Payment, mais ne bloque ni la
+sortie de Phase 0 ni le démarrage de Phase 1.
 
 **Livré**
 - Shared Kernel : `Entity`, `AggregateRoot`, `ValueObject`, `Result`, `DomainEvent`, `UnitOfWork`
