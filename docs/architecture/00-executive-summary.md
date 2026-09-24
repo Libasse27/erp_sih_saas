@@ -89,8 +89,15 @@ la foulée. Voir [03-open-decisions.md](03-open-decisions.md) pour la liste comp
   validation juridique de la politique d'impayé (O-03) ; procédures de récupération MFA pour
   `ADMIN_ETABLISSEMENT` et *break-glass* `SUPER_ADMIN` (O-04) ; valeurs numériques des plafonds
   de session et paliers d'inactivité (O-06) ; fournisseur SMS, calendrier des rappels d'impayé,
-  décision WhatsApp (O-07) ; seuils numériques des forfaits et méthode de proratisation (O-02) ;
-  fournisseur de paiement SaaS, compte de règlement, fréquence de reversement (O-25).
+  décision WhatsApp (O-07) ; seuils numériques des forfaits et méthode de proratisation (O-02).
+- **Amendement du 2026-09-24 (gouvernance produit/direction)** : le résidu O-25 (fournisseur de
+  paiement SaaS, compte de règlement, fréquence de reversement) est reclassé — il ne bloque plus
+  la clôture de Phase 0 ni le démarrage de Phase 1. Le socle architectural (port
+  `PaymentProvider`, Anti-Corruption Layer, idempotence, signature des webhooks, rapprochement
+  périodique) est implémenté et testé ; le résidu fournisseur conditionne uniquement le
+  branchement d'un adaptateur réel et le passage en production du module Payment. Voir
+  [02-roadmap-migration.md](02-roadmap-migration.md) et
+  [03-open-decisions.md](03-open-decisions.md) pour le détail.
 - **Bloquant Phase 3+** : règles de correction d'une consultation validée ; définition du
   « contexte clinique » autorisant l'accès à un dossier ; politique de bris de glace en
   urgence vitale.
