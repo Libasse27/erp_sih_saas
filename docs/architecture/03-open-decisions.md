@@ -209,7 +209,14 @@ de sécurité.
 1. Fournisseur SMS (comparaison agrégateur international / régional / API opérateur direct sur
    couverture Sénégal, délivrabilité, coût, SLA, conformité).
 2. Calendrier exact des 3 rappels d'impayé dans la fenêtre de grâce de 7 jours (O-03.2).
-3. Décision WhatsApp (BSP, tarification) — différée, pas seulement non choisie.
+
+**Amendement du 2026-09-25 (gouvernance produit/direction)** : WhatsApp est retiré de la liste
+ci-dessus. Sa formulation d'origine ("différée, pas seulement non choisie") ne demandait pas de
+choisir un BSP ni une tarification pendant Phase 0, seulement de confirmer ce report — la
+fermeture du résidu et le report lui-même sont la même chose. WhatsApp reste hors V1/Phase 0
+(O-07.4 ci-dessus, inchangé) ; le choix du BSP et de la tarification est une décision
+produit/direction différée à une phase ultérieure, non bloquante pour la clôture de Phase 0 ni
+le démarrage de Phase 1. Aucun BSP ni tarification choisi par cet amendement.
 
 ---
 

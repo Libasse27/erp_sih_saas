@@ -711,7 +711,11 @@ clinique**. **Un canal n'est exposé que s'il est réellement intégré et test�
   1. Fournisseur SMS (agrégateur international / régional / API opérateur direct) —
      comparaison réelle sur couverture Sénégal, délivrabilité, coût, SLA, conformité.
   2. Calendrier exact des 3 rappels d'impayé dans la fenêtre de grâce de 7 jours (O-03.2).
-  3. Décision WhatsApp (BSP, tarification) différée à une phase ultérieure.
+- **Amendement du 2026-09-25 (gouvernance produit/direction)** : la décision WhatsApp (BSP,
+  tarification) est retirée de la liste des résidus ci-dessus — elle est déjà différée à une
+  phase ultérieure par sa propre formulation, sans échéance Phase 0. WhatsApp reste hors V1
+  (inchangé ci-dessus) ; le choix du BSP et de la tarification n'est pas bloquant pour la
+  clôture de Phase 0 ni le démarrage de Phase 1. Aucun BSP ni tarification choisi.
 
 ## 10. Interopérabilité (§33)
 

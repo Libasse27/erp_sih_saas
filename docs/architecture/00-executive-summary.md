@@ -88,8 +88,14 @@ la foulée. Voir [03-open-decisions.md](03-open-decisions.md) pour la liste comp
   démarrage) — paramètres opérationnels, pas des décisions d'architecture manquantes** :
   validation juridique de la politique d'impayé (O-03) ; procédures de récupération MFA pour
   `ADMIN_ETABLISSEMENT` et *break-glass* `SUPER_ADMIN` (O-04) ; valeurs numériques des plafonds
-  de session et paliers d'inactivité (O-06) ; fournisseur SMS, calendrier des rappels d'impayé,
-  décision WhatsApp (O-07) ; seuils numériques des forfaits et méthode de proratisation (O-02).
+  de session et paliers d'inactivité (O-06) ; fournisseur SMS, calendrier des rappels d'impayé
+  (O-07) ; seuils numériques des forfaits et méthode de proratisation (O-02).
+- **Amendement du 2026-09-25 (gouvernance produit/direction)** : la décision WhatsApp (O-07,
+  BSP + tarification) est retirée de la liste ci-dessus — elle est déjà différée à une phase
+  ultérieure par sa propre formulation, sans échéance Phase 0 (voir
+  [01-target-architecture.md §9.4](01-target-architecture.md#94-notifications-28-o-07-clos-le-2026-08-23)
+  et [03-open-decisions.md](03-open-decisions.md) pour le détail). WhatsApp reste hors V1
+  (§6 ci-dessous, inchangé). Aucun BSP ni tarification choisi.
 - **Amendement du 2026-09-24 (gouvernance produit/direction)** : le résidu O-25 (fournisseur de
   paiement SaaS, compte de règlement, fréquence de reversement) est reclassé — il ne bloque plus
   la clôture de Phase 0 ni le démarrage de Phase 1. Le socle architectural (port
