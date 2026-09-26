@@ -220,6 +220,50 @@ le démarrage de Phase 1. Aucun BSP ni tarification choisi par cet amendement.
 
 ---
 
+### O-07.3.1 — Rattachement du numéro de téléphone
+**MÉTIER + TECHNIQUE · Ouvert · Prérequis architectural/fonctionnel pour l'implémentation du canal SMS ; ne modifie pas le statut de blocage Phase 0 d'O-07.3**
+
+Constat d'un audit read-only (2026-09-25, aucune modification de code) : aucun agrégat ne porte
+aujourd'hui de numéro de téléphone. Le VO `PhoneNumber` (format E.164 Sénégal,
+`shared-kernel/domain/value-objects/PhoneNumber.ts`) existe et est testé isolément, mais n'est
+câblé sur aucun des trois candidats suivants :
+
+| Candidat | Portée | Ce qu'il porte aujourd'hui |
+|---|---|---|
+| `UserAccount` | Plateforme, hors tenant — identité unique de la personne (O-05.1) | `email`, `passwordHash`, `platformRole` |
+| `UserTenantMembership` | Tenant-scopé, RLS FORCE — appartenance à un établissement | `userId`, `tenantId`, `roleIds`, `status` |
+| `HealthFacility` | Tenant (l'agrégat racine EST le tenant) | `name`, `status` — volontairement minimal |
+
+**Observation architecturale, distincte d'une décision** : le port `RecipientDirectory` résout
+déjà les destinataires de notification par `email`, lu sur `UserAccount` — jamais sur
+`UserTenantMembership`. Pour un canal SMS visant le même type de destinataire (une personne, pas
+un établissement), `UserAccount` serait l'option symétrique à l'existant. Ceci est un signal de
+cohérence architecturale, **pas un choix arrêté** — aucune des questions ci-dessous n'en découle
+automatiquement.
+
+**Non défini, cinq questions distinctes à arbitrer** :
+1. **Propriétaire du numéro** — `UserAccount` (option privilégiée par symétrie avec `email`),
+   `UserTenantMembership` (incohérent avec le modèle de contact actuel) ou `HealthFacility`
+   (répondrait à un besoin différent — contact institutionnel, pas destinataire personnel de SMS
+   transactionnel — à ne pas confondre).
+2. **Obligatoire ou optionnel** — pour tous les utilisateurs, seulement certains rôles (ex.
+   `ADMIN_ETABLISSEMENT`), ou seulement lorsqu'un canal SMS est effectivement utilisé.
+3. **Moment et lieu de capture** — inscription (`POST /api/v1/registrations`, ADR-0010),
+   onboarding établissement, ou profil utilisateur ultérieur. Aucun champ téléphone n'existe
+   actuellement dans le payload d'inscription.
+4. **Vérification** — simple validation syntaxique (déjà couverte par le VO `PhoneNumber`) ou
+   vérification effective du numéro (SMS de confirmation).
+5. **Consentement / opt-out** — se rattache au résidu déjà tracé ADR-0007 §8.5 (aucune politique
+   de préférence de canal n'existe aujourd'hui) ; à qualifier spécifiquement pour le téléphone.
+
+**Ce que cette décision ne fait pas** : elle ne choisit pas de fournisseur SMS (O-07.3, inchangé,
+toujours bloquant Phase 0 tel qu'écrit ci-dessus) ; elle ne modifie aucun schéma Prisma ni aucune
+route HTTP ; elle ne rend le téléphone obligatoire sur aucun agrégat.
+
+**Décideur attendu** : direction (produit) + responsable technique pour la cohérence du modèle.
+
+---
+
 ### O-25 — Prestataire de paiement SaaS (encaissement des abonnements d'établissement)
 **TECHNIQUE + MÉTIER · CLOS STRUCTURELLEMENT le 2026-08-23 · Détail dans [01 §6.3](01-target-architecture.md#63-saas-core)**
 
