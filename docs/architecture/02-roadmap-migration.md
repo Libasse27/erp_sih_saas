@@ -140,6 +140,25 @@ sortie de Phase 0 ni le démarrage de Phase 1.
   objet tant qu'aucun ne l'est
 - ADR-0001 et ADR-0002 statués « Accepté »
 
+**Précision sur l'étape 13 (SCA / scan de secrets / SAST / déploiement)** : le SCA est câblé et
+bloquant via `.github/workflows/sca.yml` (ADR-0014) ; `sca-scheduled.yml` n'ajoute qu'une veille
+périodique **non bloquante**, distincte du gate. `.github/workflows/ci.yml` exclut explicitement
+de son propre périmètre le scan de secrets, le SAST et le déploiement — un choix de périmètre de
+ce fichier, qui ne suffit pas à conclure que le scan de secrets serait désactivé côté plateforme
+GitHub. Le rapport d'audit SCA du 2026-09-13 constatait, à cette date, GitHub Secret Scanning et
+Push Protection **activés** ; l'état actuel de ces réglages n'a pas été revérifié ici et reste non
+confirmé. Sur les trois workflows examinés (`ci.yml`, `sca.yml`, `sca-scheduled.yml` — aucune
+autre configuration CI/déploiement trouvée à la racine du dépôt), aucun n'y définit de job SAST ni
+de déploiement.
+Ni les « Critères de sortie communs » ni les « Critères de sortie spécifiques » ci-dessus ne
+nomment explicitement le SAST, le scan de secrets ou le déploiement en production ; ADR-0014 §15
+les qualifie de « sujets successifs de l'étape 13 », sans établir à lui seul qu'ils conditionnent
+la clôture de Phase 0. Selon les critères actuellement écrits, leur absence de
+`.github/workflows/ci.yml` ne constitue donc pas en soi un échec d'un critère de sortie. Leur
+statut définitif reste un travail distinct de l'étape 13, non arbitré par cette note — qui ne
+déclare ni l'étape 13 terminée, ni ces contrôles obligatoires avant production, ni une acceptation
+formelle de risque.
+
 **Aucun module médical n'est ouvert tant que cette phase n'est pas close.**
 
 ---
