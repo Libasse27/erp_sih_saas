@@ -450,3 +450,37 @@ implémentation.
   sécurité initiale (correctif F-1) — à retester intégralement, pas seulement le cas ajouté.
 - Nouveau résidu ouvert par cet amendement : durée de validité d'une requête break-glass `PENDING`
   (voir ci-dessus).
+
+## Amendement 2 (2026-09-27) — risque résiduel accepté : durée de validité `PENDING` break-glass, résidu distinct sur la notification de A
+
+**Contexte** : suite à l'Amendement 1 (résidu "durée de validité d'une requête `PENDING` non
+approuvée"), une revue de sécurité indépendante en lecture seule a été conduite (2026-09-27),
+sans modification de code, pour qualifier les implications de l'absence d'expiration avant tout
+arbitrage d'une valeur numérique.
+
+**Constat de la revue** : le statut binaire `PENDING`/`APPROVED` (`SuperAdminBreakGlassRequest.ts`)
+ne porte aucune comparaison temporelle dans `approve()`. Ceci n'ouvre aucun contournement du
+quorum A≠B≠C ni de l'audit — c'est un écart *time-of-check/time-of-use* (une demande PENDING est
+une capacité armée sans péremption), classé **risque Moyen, non bloquant** pour la clôture de
+Phase 0.
+
+**Risque résiduel accepté** : le statu quo (aucune durée de validité) est accepté pour la clôture
+de Phase 0, à deux conditions :
+- **Responsable** : Direction (rôle de gouvernance, pas de nom propre engagé ici).
+- **Réexamen déclenché par jalon fonctionnel**, pas par date calendaire : ce risque doit être
+  réexaminé et une durée arbitrée **avant toute exposition du mécanisme à de vrais `SUPER_ADMIN`
+  de production**. Aucune valeur numérique n'est fixée par cet amendement — même régime
+  qu'O-06.1/O-06.2 avant leur clôture : aucune valeur par défaut n'est inventée.
+
+**Résidu distinct, non résolu par cet amendement** : la revue de sécurité a constaté une
+divergence entre cette ADR (§ ci-dessus, l. 425-427 : « ni A, dont le compte est par hypothèse
+inaccessible ») et le comportement réel du code (`SendSuperAdminBreakGlassRequestedAlert.ts`),
+qui notifie effectivement A (le filtre exclut uniquement B). Aucune des deux sources n'est
+corrigée ici — lequel est correct (documentation à ajuster, ou comportement à changer) reste une
+décision séparée, non tranchée.
+
+### Conséquences de cet amendement
+- Résidu "durée de validité PENDING" (Amendement 1) : **reclassé risque résiduel accepté**,
+  responsable Direction, réexamen par jalon — pas de valeur numérique, pas de fermeture définitive.
+- Nouveau résidu ouvert : divergence ADR/code sur la notification de A — décideur non désigné à ce
+  stade.

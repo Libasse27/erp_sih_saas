@@ -142,8 +142,12 @@ Sept sous-décisions :
 2. ~~Procédure *break-glass* de récupération pour `SUPER_ADMIN`~~ — **CLOS le 2026-09-03**, même
    amendement : quorum de deux `SUPER_ADMIN` indépendants (demandeur ≠ approbateur ≠ sujet), aucun
    approbateur unique codé, cas « deux `SUPER_ADMIN` seulement » traité en runbook opérationnel hors
-   bande. Nouveau résidu ouvert par cette clôture : durée de validité d'une requête `PENDING` non
-   approuvée — aucune valeur inventée, à trancher séparément.
+   bande. Résidu "durée de validité PENDING" — **risque résiduel accepté le 2026-09-27**
+   ([ADR-0005 Amendement 2](adr/0005-mfa-totp-et-audit-plateforme-minimal.md#amendement-2-2026-09-27--risque-résiduel-accepté--durée-de-validité-pending-break-glass-résidu-distinct-sur-la-notification-de-a)) :
+   responsable Direction, réexamen par jalon fonctionnel (avant exposition à de vrais `SUPER_ADMIN`
+   de production), aucune valeur numérique fixée.
+3. Divergence ADR/code sur la notification du sujet A d'une demande break-glass — ouverte,
+   décideur non désigné, voir ADR-0005 Amendement 2.
 
 ---
 
