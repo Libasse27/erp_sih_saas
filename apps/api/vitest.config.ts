@@ -44,6 +44,10 @@ export default defineConfig({
         'src/**/*.test.ts',
         'src/server.ts',
         'src/composition-root.ts',
+        // Exclu du gate (decision item #6, 2026-09-27) : code mort en production, aucun agregat
+        // ne le porte (ADR-0007 §2, residu O-07.3.1 toujours ouvert) — seule reference hors test
+        // est un commentaire dans Notification.ts. A reinclure quand le canal SMS sera cable.
+        'src/shared-kernel/domain/value-objects/PhoneNumber.ts',
       ],
       thresholds: {
         // Plancher global (§9.2 du system prompt) — s'applique a tout `src/**/*.ts` non couvert
