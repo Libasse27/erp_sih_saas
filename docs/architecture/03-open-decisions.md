@@ -256,11 +256,29 @@ automatiquement.
 5. **Consentement / opt-out** — se rattache au résidu déjà tracé ADR-0007 §8.5 (aucune politique
    de préférence de canal n'existe aujourd'hui) ; à qualifier spécifiquement pour le téléphone.
 
-**Ce que cette décision ne fait pas** : elle ne choisit pas de fournisseur SMS (O-07.3, inchangé,
-toujours bloquant Phase 0 tel qu'écrit ci-dessus) ; elle ne modifie aucun schéma Prisma ni aucune
-route HTTP ; elle ne rend le téléphone obligatoire sur aucun agrégat.
+**Synthèse de travail (2026-09-26)** — issue d'un arbitrage point par point (constat → options
+réellement supportées par le repo → conséquences → proposition) : **aucune décision produit
+définitive n'est actée**. A, B et E font l'objet d'une proposition unique soumise à validation.
+C et D sont retenus comme bases de travail (collecte différée ; validation syntaxique
+uniquement) — également non actés en tant que décision produit définitive, mais ne nécessitant
+pas d'arbitrage supplémentaire pour poursuivre le mandat.
 
-**Décideur attendu** : direction (produit) + responsable technique pour la cohérence du modèle.
+| Point | Réponse de travail | Statut |
+|---|---|---|
+| A — Propriétaire | `UserAccount` (symétrie avec `email`, seule option qui n'invente aucune capacité non demandée) | Proposé, non acté |
+| B — Caractère | Facultatif (aucune rupture de joignabilité, O-07.5 garantit déjà l'email en parallèle ; ne rouvre pas ADR-0010) | Proposé, non acté |
+| C — Collecte | Différée — aucune surface self-service/onboarding n'existe aujourd'hui (même résidu que O-26) ; pas de point de collecte arrêté | Base de travail retenue, aucune modification de surface HTTP |
+| D — Vérification | Validation syntaxique E.164 uniquement (déjà couverte par le VO `PhoneNumber`) ; pas de vérification de possession tant qu'aucun fournisseur SMS (O-07.3) n'est choisi | Base de travail retenue |
+| E — Consentement/opt-out | Aucune règle nouvelle ; le résidu ADR-0007 §8.5 continue de s'appliquer identiquement au canal SMS, sans duplication ni réécriture | Proposé, non acté |
+
+**Ce que cette synthèse ne fait pas** : elle ne choisit pas de fournisseur SMS (**O-07.3 reste
+ouvert et bloquant Phase 0, statut inchangé**) ; elle ne modifie aucun schéma Prisma ni aucune
+route HTTP ; elle ne rend le téléphone obligatoire sur aucun agrégat ; elle n'invente aucune
+vérification de possession ; elle n'invente aucune politique de consentement nouvelle ; elle ne
+constitue pas un mandat d'implémentation.
+
+**Décideur attendu** : direction (produit) + responsable technique pour la cohérence du modèle et
+la validation finale des points A, B et E.
 
 ---
 
