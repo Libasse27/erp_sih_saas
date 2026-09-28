@@ -14,7 +14,7 @@ import { UserAccountId } from '../../../src/modules/identity/domain/value-object
 import { Email } from '../../../src/modules/identity/domain/value-objects/Email.js';
 import { PasswordHash } from '../../../src/modules/identity/domain/value-objects/PasswordHash.js';
 import { uniqueEmail, uniqueFacilityName } from '../../identity/integration/dbTestHelpers.js';
-import { InMemoryProvisioningAuditTrail } from '../../tenant/builders/testKit.js';
+import { InMemoryProvisioningAuditTrail, InMemoryTenantConfigAuditTrail } from '../../tenant/builders/testKit.js';
 import { InMemorySubscriptionAuditTrail } from '../builders/testKit.js';
 import { createRawPgClient, createTestPrismaClient } from './dbTestHelpers.js';
 
@@ -58,6 +58,7 @@ describe('StartTrialSubscriptionOnHealthFacilityCreated — consommateur Outbox 
       idGenerator: new UuidGenerator(),
       userAccountExistenceChecker,
       provisioningAuditTrail: new InMemoryProvisioningAuditTrail(),
+      tenantConfigAuditTrail: new InMemoryTenantConfigAuditTrail(),
     });
     subscription = buildSubscriptionModule({
       prisma,

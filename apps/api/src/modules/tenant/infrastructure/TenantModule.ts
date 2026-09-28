@@ -6,11 +6,14 @@ import type { OutboxEventHandler } from '../../../shared-kernel/application/Outb
 import { PgUnitOfWork } from '../../../shared-kernel/infrastructure/persistence/PgUnitOfWork.js';
 import { CompleteProvisioningHandler } from '../application/commands/CompleteProvisioning.js';
 import { CreateHealthFacilityHandler } from '../application/commands/CreateHealthFacility.js';
+import { RenameHealthFacilityHandler } from '../application/commands/RenameHealthFacility.js';
 import { SeedFacilityConfigurationHandler } from '../application/commands/SeedFacilityConfiguration.js';
+import { GetHealthFacilityHandler } from '../application/queries/GetHealthFacility.js';
 import { createCompleteProvisioningOnFacilityConfigurationSeededHandler } from '../application/services/CompleteProvisioningOnFacilityConfigurationSeeded.js';
 import { createSeedFacilityConfigurationOnMembershipGrantedHandler } from '../application/services/SeedFacilityConfigurationOnMembershipGranted.js';
 import type { UserAccountExistenceChecker } from '../application/ports/UserAccountExistenceChecker.js';
 import type { ProvisioningAuditTrail } from '../application/ports/ProvisioningAuditTrail.js';
+import type { TenantConfigAuditTrail } from '../application/ports/TenantConfigAuditTrail.js';
 import type { FacilitySettingsRepository } from '../domain/ports/FacilitySettingsRepository.js';
 import type { HealthFacilityRepository } from '../domain/ports/HealthFacilityRepository.js';
 import { PrismaFacilitySettingsRepository } from './persistence/PrismaFacilitySettingsRepository.js';
@@ -26,6 +29,9 @@ export interface TenantModule {
     readonly createHealthFacility: CreateHealthFacilityHandler;
     readonly seedFacilityConfiguration: SeedFacilityConfigurationHandler;
     readonly completeProvisioning: CompleteProvisioningHandler;
+    /** Phase 1, premier increment vertical (permission `tenant-config:administer`). */
+    readonly getHealthFacility: GetHealthFacilityHandler;
+    readonly renameHealthFacility: RenameHealthFacilityHandler;
   };
   /** Consommateurs Outbox exposes par ce module — cables UNIQUEMENT dans composition-root.ts. */
   readonly outboxHandlers: {
@@ -60,6 +66,8 @@ export function buildTenantModule(deps: {
   userAccountExistenceChecker: UserAccountExistenceChecker;
   /** Port sortant vers le module `audit`, categorie `PROVISIONING` (ADR-0009 §2.2/§4) — l'adaptateur reel est cable par composition-root.ts. */
   provisioningAuditTrail: ProvisioningAuditTrail;
+  /** Port sortant vers le module `audit`, categorie `TENANT_CONFIG` (Phase 1, premier increment vertical) — l'adaptateur reel est cable par composition-root.ts. */
+  tenantConfigAuditTrail: TenantConfigAuditTrail;
 }): TenantModule {
   const healthFacilities = new PrismaHealthFacilityRepository(deps.prisma);
   const facilitySettings = new PrismaFacilitySettingsRepository(deps.prisma);
@@ -94,6 +102,14 @@ export function buildTenantModule(deps: {
       ),
       seedFacilityConfiguration,
       completeProvisioning,
+      getHealthFacility: new GetHealthFacilityHandler(healthFacilities, unitOfWork),
+      renameHealthFacility: new RenameHealthFacilityHandler(
+        healthFacilities,
+        unitOfWork,
+        deps.clock,
+        deps.idGenerator,
+        deps.tenantConfigAuditTrail,
+      ),
     },
     outboxHandlers: {
       seedFacilityConfigurationOnMembershipGranted: createSeedFacilityConfigurationOnMembershipGrantedHandler({

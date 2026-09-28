@@ -15,7 +15,7 @@ import { buildSubscriptionModule, seedPlanCatalog, type SubscriptionModule } fro
 import { PrismaUserAccountRepository } from '../../../src/modules/identity/infrastructure/persistence/PrismaUserAccountRepository.js';
 import { UserAccountId } from '../../../src/modules/identity/domain/value-objects/UserAccountId.js';
 import { InMemoryAuditTrail, InMemoryMembershipAuditTrail, InMemorySessionAuditTrail } from '../builders/testKit.js';
-import { InMemoryProvisioningAuditTrail } from '../../tenant/builders/testKit.js';
+import { InMemoryProvisioningAuditTrail, InMemoryTenantConfigAuditTrail } from '../../tenant/builders/testKit.js';
 import { InMemorySubscriptionAuditTrail } from '../../subscription/builders/testKit.js';
 import { createTestPrismaClient, createTestRedisClient, uniqueEmail, uniqueFacilityName } from './dbTestHelpers.js';
 
@@ -62,6 +62,7 @@ describe('Identity — flux integres (Prisma + Redis reels)', () => {
       idGenerator: new UuidGenerator(),
       userAccountExistenceChecker,
       provisioningAuditTrail: new InMemoryProvisioningAuditTrail(),
+      tenantConfigAuditTrail: new InMemoryTenantConfigAuditTrail(),
     });
     subscription = buildSubscriptionModule({
       prisma,

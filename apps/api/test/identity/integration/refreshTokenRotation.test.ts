@@ -16,7 +16,7 @@ import { buildSubscriptionModule, seedPlanCatalog, type SubscriptionModule } fro
 import { buildAuditModule, type AuditModule } from '../../../src/modules/audit/infrastructure/AuditModule.js';
 import { PrismaUserAccountRepository } from '../../../src/modules/identity/infrastructure/persistence/PrismaUserAccountRepository.js';
 import { UserAccountId } from '../../../src/modules/identity/domain/value-objects/UserAccountId.js';
-import { InMemoryProvisioningAuditTrail } from '../../tenant/builders/testKit.js';
+import { InMemoryProvisioningAuditTrail, InMemoryTenantConfigAuditTrail } from '../../tenant/builders/testKit.js';
 import { InMemorySubscriptionAuditTrail } from '../../subscription/builders/testKit.js';
 import { InMemoryMembershipAuditTrail } from '../builders/testKit.js';
 import { createTestPrismaClient, createTestRedisClient, uniqueEmail, uniqueFacilityName } from './dbTestHelpers.js';
@@ -82,6 +82,7 @@ describe('Refresh token rotation — integration Postgres + Redis reelle (O-06.5
       idGenerator: new UuidGenerator(),
       userAccountExistenceChecker,
       provisioningAuditTrail: new InMemoryProvisioningAuditTrail(),
+      tenantConfigAuditTrail: new InMemoryTenantConfigAuditTrail(),
     });
     subscription = buildSubscriptionModule({
       prisma,

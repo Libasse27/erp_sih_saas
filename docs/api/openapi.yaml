@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
-  title: SIH SaaS API — Contrat HTTP complet de la Phase 0 (SaaS Core)
-  version: 0.3.0
+  title: SIH SaaS API — Contrat HTTP complet de la Phase 0 (SaaS Core) et du premier increment de Phase 1
+  version: 0.4.0
   description: >
     Premier fichier OpenAPI de ce depot (Phase 0, etape 5/13 : confirmation de paiement
     d'abonnement SaaS serveur-a-serveur, O-25.5). Etendu a l'etape 11/13 (ADR-0009) avec le
@@ -9,7 +9,11 @@ info:
     (`GET /api/v1/audit-entries`). Etendu a l'etape 12/13 item 11 (gap transverse, pas specifique
     a l'isolation/securite) pour couvrir les 10 routes reellement montees dans `createApp()`
     (`apps/api/src/server.ts`) : inscription/connexion/MFA (ADR-0010), recuperation break-glass
-    `SUPER_ADMIN` (ADR-0005 Amendement 1) et `/health`. Document PUREMENT DESCRIPTIF : aucune
+    `SUPER_ADMIN` (ADR-0005 Amendement 1) et `/health`. Etendu au premier increment vertical de
+    Phase 1 (permission `tenant-config:administer`, decision de gouvernance 2026-09-28 sur le
+    passage Phase 0 -> Phase 1) avec `GET`/`PATCH /api/v1/facility` : consultation et renommage de
+    l'identite de l'etablissement du tenant courant (`HealthFacility`), PREMIER endpoint HTTP du
+    module `tenant`. Document PUREMENT DESCRIPTIF : aucune
     route ici n'introduit un comportement nouveau — chaque section reference l'ADR qui a
     reellement tranche le comportement documente, verifie par relecture du controleur et des
     tests d'integration existants (jamais suppose). Aucune route CRUD Payment/PlatformInvoice/
@@ -856,7 +860,7 @@ paths:
           in: query
           schema:
             type: string
-            enum: [MFA, SESSION, PROVISIONING, MEMBERSHIP, SUBSCRIPTION, BILLING, AUDIT_ACCESS]
+            enum: [MFA, SESSION, PROVISIONING, MEMBERSHIP, SUBSCRIPTION, BILLING, AUDIT_ACCESS, TENANT_CONFIG]
           example: SUBSCRIPTION
         - name: eventType
           in: query
@@ -1027,6 +1031,162 @@ paths:
               example:
                 error: internal_error
 
+  /api/v1/facility:
+    get:
+      operationId: getHealthFacility
+      tags: [Facility]
+      summary: Consulter l'identite de l'etablissement du tenant courant (Phase 1, premier increment vertical)
+      description: >
+        PREMIER endpoint HTTP du module `tenant` — permission `tenant-config:administer`, deja
+        declaree au catalogue de roles (`SystemRoleCatalog.ts`, role `ADMIN_ETABLISSEMENT`) mais
+        jusqu'ici inutilisee par aucune route. `tenantId` n'est JAMAIS lu depuis un parametre de
+        requete : cette route retourne TOUJOURS "l'etablissement du principal courant", derive
+        exclusivement du `ServerContext` serveur (`Authorization: Bearer`). Une session `PLATFORM`
+        est refusee explicitement (`403`) — cette permission est portee EXCLUSIVEMENT par un role
+        TENANT (`ADMIN_ETABLISSEMENT`), une session `PLATFORM` n'a structurellement aucun tenant sur
+        lequel l'exercer.
+      security:
+        - bearerSessionAuth: []
+      responses:
+        '200':
+          description: Identite du `HealthFacility` du tenant courant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthFacilityResponse'
+              example:
+                tenantId: 7c8f0a2e-4b1d-4e9a-9f3e-1a2b3c4d5e6f
+                name: Hopital Principal de Dakar
+                status: ACTIVE
+                createdAt: '2026-08-24T10:00:00.000Z'
+        '401':
+          description: Aucune session valide.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: unauthenticated
+        '403':
+          description: Authentifie mais non autorise — `tenant-config:administer` absent, OU session `PLATFORM` (refus explicite, voir description).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: forbidden
+        '404':
+          description: >
+            Defensif : aucun `HealthFacility` ne correspond au tenant du principal courant. Ne
+            devrait jamais survenir pour une session `TENANT` valide (le provisioning garantit son
+            existence) — voir `GetHealthFacility.ts`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: not_found
+        '500':
+          description: Defaillance technique.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: internal_error
+
+    patch:
+      operationId: renameHealthFacility
+      tags: [Facility]
+      summary: Renommer l'etablissement du tenant courant (Phase 1, premier increment vertical)
+      description: >
+        Meme regle de derivation de `tenantId` que `GET /api/v1/facility` — TOUJOURS "mon propre
+        etablissement", jamais un identifiant fourni par le client. Schema `.strict()` : tout champ
+        inconnu du corps (notamment `tenantId`/`role`/`permissionCodes`) est rejete en `400`, jamais
+        ignore silencieusement (anti mass-assignment). Idempotence : un renommage vers un nom
+        STRICTEMENT identique au nom courant est un refus metier explicite (`409`,
+        `FacilityNameUnchangedError`), jamais un succes silencieux ni une double emission
+        d'evenement. Tout refus d'autorisation (`403`) est journalise (`AuditEntry`,
+        categorie `TENANT_CONFIG`, `outcome: DENIED`) DANS LA MEME transaction que le controle
+        (ADR-0005 Amendement 3) — un succes produit, lui, une entree `outcome: SUCCESS`.
+      security:
+        - bearerSessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+              example:
+                name: Hopital Principal de Dakar — Site Renove
+      responses:
+        '200':
+          description: Etablissement renomme — ressource mise a jour retournee.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthFacilityResponse'
+              example:
+                tenantId: 7c8f0a2e-4b1d-4e9a-9f3e-1a2b3c4d5e6f
+                name: Hopital Principal de Dakar — Site Renove
+                status: ACTIVE
+                createdAt: '2026-08-24T10:00:00.000Z'
+        '400':
+          description: Corps malforme, champ inconnu (mass-assignment), ou `name` vide/trop long apres normalisation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: invalid_request
+        '401':
+          description: Aucune session valide.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: unauthenticated
+        '403':
+          description: Authentifie mais non autorise — `tenant-config:administer` absent, OU session `PLATFORM` (refus explicite).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: forbidden
+        '404':
+          description: Defensif — aucun `HealthFacility` ne correspond au tenant du principal courant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: not_found
+        '409':
+          description: Refus metier — le nom soumis est strictement identique au nom actuel (`FacilityNameUnchangedError`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: conflict
+        '500':
+          description: Defaillance technique.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: internal_error
+
 components:
   securitySchemes:
     bearerSessionAuth:
@@ -1116,7 +1276,7 @@ components:
           format: uuid
         category:
           type: string
-          enum: [MFA, SESSION, PROVISIONING, MEMBERSHIP, SUBSCRIPTION, BILLING, AUDIT_ACCESS]
+          enum: [MFA, SESSION, PROVISIONING, MEMBERSHIP, SUBSCRIPTION, BILLING, AUDIT_ACCESS, TENANT_CONFIG]
         eventType:
           type: string
         outcome:
@@ -1268,3 +1428,25 @@ components:
           items:
             type: string
             format: uuid
+
+    HealthFacilityResponse:
+      type: object
+      description: >
+        DTO explicite (jamais l'agregat `HealthFacility` ni une ligne Prisma brute exposee — regle
+        6 du system prompt), Phase 1 premier increment vertical — reponse PARTAGEE par
+        `GET /api/v1/facility` et `PATCH /api/v1/facility` (`FacilityDto.ts`).
+      required: [tenantId, name, status, createdAt]
+      properties:
+        tenantId:
+          type: string
+          format: uuid
+          description: 'Le `HealthFacility` EST le tenant : `id` et `tenantId` portent la meme valeur.'
+        name:
+          type: string
+          maxLength: 200
+        status:
+          type: string
+          enum: [ACTIVE, SUSPENDED]
+        createdAt:
+          type: string
+          format: date-time

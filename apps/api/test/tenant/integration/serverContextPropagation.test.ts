@@ -15,7 +15,7 @@ import { PrismaUserAccountRepository } from '../../../src/modules/identity/infra
 import { UserAccountId } from '../../../src/modules/identity/domain/value-objects/UserAccountId.js';
 import { createTestPrismaClient, createTestRedisClient, uniqueEmail, uniqueFacilityName } from '../../identity/integration/dbTestHelpers.js';
 import { InMemoryAuditTrail, InMemoryMembershipAuditTrail, InMemorySessionAuditTrail } from '../../identity/builders/testKit.js';
-import { InMemoryProvisioningAuditTrail } from '../builders/testKit.js';
+import { InMemoryProvisioningAuditTrail, InMemoryTenantConfigAuditTrail } from '../builders/testKit.js';
 import { InMemorySubscriptionAuditTrail } from '../../subscription/builders/testKit.js';
 
 /**
@@ -59,6 +59,7 @@ describe('Contexte serveur — de sessionId a une requete RLS-scopee reelle (Ide
       idGenerator: new UuidGenerator(),
       userAccountExistenceChecker,
       provisioningAuditTrail: new InMemoryProvisioningAuditTrail(),
+      tenantConfigAuditTrail: new InMemoryTenantConfigAuditTrail(),
     });
     subscription = buildSubscriptionModule({
       prisma,

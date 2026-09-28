@@ -14,7 +14,7 @@ import { UserTenantMembershipId } from '../../../src/modules/identity/domain/val
 import { buildTenantModule, type TenantModule } from '../../../src/modules/tenant/infrastructure/TenantModule.js';
 import type { UserAccountExistenceChecker } from '../../../src/modules/tenant/application/ports/UserAccountExistenceChecker.js';
 import { buildSubscriptionModule, seedPlanCatalog, type SubscriptionModule } from '../../../src/modules/subscription/infrastructure/SubscriptionModule.js';
-import { InMemoryProvisioningAuditTrail } from '../../tenant/builders/testKit.js';
+import { InMemoryProvisioningAuditTrail, InMemoryTenantConfigAuditTrail } from '../../tenant/builders/testKit.js';
 import { InMemorySubscriptionAuditTrail } from '../../subscription/builders/testKit.js';
 import { InMemoryAuditTrail, InMemoryMembershipAuditTrail, InMemorySessionAuditTrail } from '../builders/testKit.js';
 import { createTestPrismaClient, createTestRedisClient, uniqueEmail, uniqueFacilityName } from './dbTestHelpers.js';
@@ -63,6 +63,7 @@ describe('Refresh token — isolation tenant (etape 12/13, ADR-0006 §4/§6)', (
       idGenerator: new UuidGenerator(),
       userAccountExistenceChecker,
       provisioningAuditTrail: new InMemoryProvisioningAuditTrail(),
+      tenantConfigAuditTrail: new InMemoryTenantConfigAuditTrail(),
     });
     subscription = buildSubscriptionModule({
       prisma,

@@ -10,8 +10,12 @@
  *   - `SUBSCRIPTION` : cycle de vie commercial de l'abonnement, mode degrade compris.
  *   - `BILLING`      : `Payment` (encaissement PSP) ET `PlatformInvoice` (emission/reglement).
  *   - `AUDIT_ACCESS` : consultation du journal lui-meme.
- * Aucune categorie `PLATFORM_ADMIN`/`TENANT_CONFIG` n'est ajoutee (ADR-0009 §2 : aucune commande
- * productrice n'existe encore dans ce depot pour l'une ou l'autre).
+ * Aucune categorie `PLATFORM_ADMIN` n'est ajoutee (ADR-0009 §2 : aucune commande productrice
+ * n'existe encore dans ce depot).
+ *
+ * `TENANT_CONFIG` ajoutee Phase 1, premier increment vertical (permission
+ * `tenant-config:administer`) : premiere commande productrice de ce depot pour cette categorie
+ * jusque-la seulement anticipee par ADR-0009 §2 (`RenameHealthFacility.ts`, module `tenant`).
  */
 export type AuditCategory =
   | 'MFA'
@@ -20,4 +24,5 @@ export type AuditCategory =
   | 'MEMBERSHIP'
   | 'SUBSCRIPTION'
   | 'BILLING'
-  | 'AUDIT_ACCESS';
+  | 'AUDIT_ACCESS'
+  | 'TENANT_CONFIG';

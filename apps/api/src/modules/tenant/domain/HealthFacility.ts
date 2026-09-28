@@ -4,6 +4,7 @@ import type { Clock } from '../../../shared-kernel/domain/ports/Clock.js';
 import type { IdGenerator } from '../../../shared-kernel/domain/ports/IdGenerator.js';
 import { TenantId } from '../../../shared-kernel/domain/value-objects/TenantId.js';
 import { HealthFacilityCreated } from './events/HealthFacilityCreated.js';
+import { HealthFacilityRenamed } from './events/HealthFacilityRenamed.js';
 import type { FacilityName } from './value-objects/FacilityName.js';
 import type { FacilityStatus } from './value-objects/FacilityStatus.js';
 
@@ -18,6 +19,24 @@ export class FacilityAlreadyActiveError extends Error {
   constructor() {
     super('Cet etablissement est deja actif.');
     this.name = 'FacilityAlreadyActiveError';
+  }
+}
+
+/**
+ * Renommage demande vers un nom STRICTEMENT identique au nom courant (apres normalisation
+ * `FacilityName`, donc comparaison insensible aux espaces superflus deja geree par le VO —
+ * `trim()`, aucune autre normalisation). Convention retenue par coherence avec le seul precedent
+ * du depot pour "changement demande explicitement vers une valeur identique a l'etat courant" :
+ * `ProrationCalculator.calculateUpgradeProration()` (`NOT_AN_UPGRADE` quand `newPrice` n'est pas
+ * strictement superieur a `oldPrice`) — un `Result.failure` NOMME, jamais un succes silencieux
+ * sans evenement (ce dernier idiome, illustre par `Subscription.applyPlanUpgrade()`, couvre un cas
+ * different : une RE-LIVRAISON at-least-once d'un evenement DEJA applique, pas une commande
+ * utilisateur explicite portant sur une valeur inchangee).
+ */
+export class FacilityNameUnchangedError extends Error {
+  constructor() {
+    super('Le nouveau nom est identique au nom actuel.');
+    this.name = 'FacilityNameUnchangedError';
   }
 }
 
@@ -124,6 +143,34 @@ export class HealthFacility extends AggregateRoot<TenantId> {
       return Result.failure(new FacilityAlreadyActiveError());
     }
     this.props.status = 'ACTIVE';
+    return Result.success(undefined);
+  }
+
+  /**
+   * Renomme l'etablissement (Phase 1, premier increment vertical, permission
+   * `tenant-config:administer`). `newName` est deja un `FacilityName` VALIDE — la normalisation
+   * (`trim`, non-vide, <= 200 caracteres) est ENTIEREMENT la responsabilite du VO
+   * (`FacilityName.create()`), jamais redupliquee ici (regle d'escalade : reutiliser une regle
+   * deja decidee, ne pas en inventer une seconde). Refuse explicitement (`FacilityNameUnchangedError`,
+   * pas un succes silencieux) un renommage vers un nom strictement identique au nom courant —
+   * voir le commentaire de tete de cette erreur pour la convention retenue. N'emet
+   * `HealthFacilityRenamed` que sur un changement EFFECTIF.
+   */
+  rename(newName: FacilityName, clock: Clock, idGenerator: IdGenerator): Result<void, FacilityNameUnchangedError> {
+    if (this.props.name.equals(newName)) {
+      return Result.failure(new FacilityNameUnchangedError());
+    }
+    const previousName = this.props.name;
+    this.props.name = newName;
+    this.addDomainEvent(
+      HealthFacilityRenamed.create({
+        healthFacilityId: this.id.toString(),
+        previousName: previousName.value,
+        newName: newName.value,
+        clock,
+        idGenerator,
+      }),
+    );
     return Result.success(undefined);
   }
 }

@@ -56,6 +56,9 @@ import { buildTenantModule, type TenantModule } from './modules/tenant/infrastru
 import type { UserAccountExistenceChecker } from './modules/tenant/application/ports/UserAccountExistenceChecker.js';
 import type { HealthFacilityRepository } from './modules/tenant/domain/ports/HealthFacilityRepository.js';
 import type { ProvisioningAuditRecordInput, ProvisioningAuditTrail } from './modules/tenant/application/ports/ProvisioningAuditTrail.js';
+import type { TenantConfigAuditRecordInput, TenantConfigAuditTrail } from './modules/tenant/application/ports/TenantConfigAuditTrail.js';
+import type { TenantConfigPrincipal } from './modules/tenant/application/TenantConfigPrincipal.js';
+import { FacilityController } from './modules/tenant/presentation/http/FacilityController.js';
 import type { SubscriptionRepository } from './modules/subscription/domain/ports/SubscriptionRepository.js';
 import type { SubscriptionAuditRecordInput, SubscriptionAuditTrail } from './modules/subscription/application/ports/SubscriptionAuditTrail.js';
 import {
@@ -277,6 +280,35 @@ class AuditModuleBackedProvisioningAuditTrail implements ProvisioningAuditTrail 
 }
 
 /**
+ * Adaptateur cross-module implementant le port `TenantConfigAuditTrail` de Tenant en s'appuyant
+ * sur le module `audit` (Phase 1, premier increment vertical). Vit ICI et nulle part ailleurs —
+ * meme raisonnement qu'`AuditModuleBackedProvisioningAuditTrail` ci-dessus. Categorie fixee a
+ * `'TENANT_CONFIG'`, `targetType` fixe a `'HEALTH_FACILITY'` : cet adaptateur ne sert QUE le port
+ * `TenantConfigAuditTrail`, jamais etendu par un `if` sur l'appelant.
+ */
+class AuditModuleBackedTenantConfigAuditTrail implements TenantConfigAuditTrail {
+  constructor(private readonly audit: AuditModule) {}
+
+  async record(input: TenantConfigAuditRecordInput): Promise<void> {
+    await this.audit.services.recordEntry({
+      category: 'TENANT_CONFIG',
+      eventType: input.eventType,
+      outcome: input.outcome,
+      tenantId: input.tenantId,
+      actorKind: input.actorKind,
+      actorUserId: input.actorUserId,
+      actorRoleCodes: input.actorRoleCodes,
+      subjectUserId: null,
+      targetType: 'HEALTH_FACILITY',
+      targetId: input.targetId,
+      reason: input.reason,
+      sessionId: input.sessionId,
+      correlationId: input.correlationId,
+    });
+  }
+}
+
+/**
  * Adaptateur cross-module implementant le TROISIEME port sortant d'Identity vers le module
  * `audit`, categorie `MEMBERSHIP` (ADR-0009 §2.2/§4 : "jamais une extension d'AuditTrail
  * (categorie MFA)"). `targetType` fixe a `'MEMBERSHIP'` — seule valeur pertinente pour ce port.
@@ -360,13 +392,17 @@ class AuditModuleBackedBillingAuditTrail implements BillingAuditTrail {
 
 /**
  * Middleware HTTP UNIQUE de resolution de contexte authentifie (ADR-0009 §8.2) — construit ICI,
- * seul endroit du code autorise a connaitre `identity` ET `audit` a la fois. Lit le `sessionId`
- * depuis `Authorization: Bearer <sessionId>` (jamais un cookie, §8.3), appelle
+ * seul endroit du code autorise a connaitre `identity`, `audit` ET `tenant` a la fois. Lit le
+ * `sessionId` depuis `Authorization: Bearer <sessionId>` (jamais un cookie, §8.3), appelle
  * `ServerContextResolver.resolve()` — LE point de passage obligatoire existant, jamais un second
  * chemin de resolution — et traduit :
- *   `SESSION_NOT_FOUND` -> 401 ; `MFA_REQUIRED` -> 403 `mfa_required` ; succes -> `AuditReadPrincipal`
- *   attache a `res.locals` (voir `AuditHttpLocals`), jamais l'agregat `ServerContext` lui-meme
- *   (le module `audit` ne connait que son propre type `AuditReadPrincipal`).
+ *   `SESSION_NOT_FOUND` -> 401 ; `MFA_REQUIRED` -> 403 `mfa_required` ; succes -> DEUX principaux
+ *   attaches a `res.locals` (voir `AuditHttpLocals`/`FacilityHttpLocals`), jamais l'agregat
+ *   `ServerContext` lui-meme (chaque module ne connait que son PROPRE type de principal —
+ *   `AuditReadPrincipal` pour `audit`, `TenantConfigPrincipal` pour `tenant`, Phase 1 premier
+ *   increment vertical). Les deux principaux portent structurellement les memes champs pour une
+ *   session TENANT (`tenantId`/`roleCodes`/`permissionCodes`) : DEUX types nominaux distincts,
+ *   jamais un seul type partage entre modules (meme discipline que le reste de ce fichier).
  * Une session `MFA_PENDING` ne produit donc JAMAIS de principal : `ServerContextResolver.resolve()`
  * retourne `MFA_REQUIRED` AVANT toute construction d'objet porteur de tenant/acteur, aucune
  * transaction ne s'ouvre (meme garantie que `mfaSessionGate.test.ts`).
@@ -399,7 +435,21 @@ function buildRequireAuthenticatedContext(serverContextResolver: ServerContextRe
       }
 
       const context = result.getValue();
-      const principal: AuditReadPrincipal =
+      const auditPrincipal: AuditReadPrincipal =
+        context.kind === 'PLATFORM'
+          ? { kind: 'PLATFORM', actorUserId: context.actorUserId }
+          : {
+              kind: 'TENANT',
+              actorUserId: context.actorUserId,
+              tenantId: context.tenantId.toString(),
+              roleCodes: context.session.roleCodes,
+              permissionCodes: context.session.permissionCodes,
+            };
+      // Phase 1, premier increment vertical (permission `tenant-config:administer`) — TYPE
+      // DISTINCT (`tenant` ne connait jamais `AuditReadPrincipal`, module `audit`), meme si les
+      // champs coincident structurellement pour une session TENANT (voir le commentaire de tete de
+      // cette fonction).
+      const tenantConfigPrincipal: TenantConfigPrincipal =
         context.kind === 'PLATFORM'
           ? { kind: 'PLATFORM', actorUserId: context.actorUserId }
           : {
@@ -410,7 +460,11 @@ function buildRequireAuthenticatedContext(serverContextResolver: ServerContextRe
               permissionCodes: context.session.permissionCodes,
             };
 
-      const locals: AuditHttpLocals = { auditPrincipal: principal, sessionId };
+      const locals: AuditHttpLocals & { readonly tenantConfigPrincipal: TenantConfigPrincipal } = {
+        auditPrincipal,
+        tenantConfigPrincipal,
+        sessionId,
+      };
       Object.assign(res.locals, locals);
       next();
     })().catch(next);
@@ -500,6 +554,8 @@ export interface CompositionRoot {
     readonly mfaEnrollmentController: MfaEnrollmentController;
     /** ADR-0005 Amendement 1 (O-04 residu 4), etape 12/13 — mono-module (identity seul), derriere `requireAuthenticatedContext`. */
     readonly superAdminBreakGlassController: SuperAdminBreakGlassController;
+    /** Phase 1, premier increment vertical (permission `tenant-config:administer`) — mono-module (tenant seul), derriere `requireAuthenticatedContext`. */
+    readonly facilityController: FacilityController;
     /** ADR-0010 §8 — un middleware par famille de limite, valeurs dans shared-kernel/domain/RateLimitTuning.ts (non definitives). */
     readonly rateLimitRegistrations: RequestHandler;
     readonly rateLimitLogin: RequestHandler;
@@ -592,6 +648,7 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
   // autres (voir plus bas).
   const audit = buildAuditModule({ prisma, clock, idGenerator });
   const provisioningAuditTrail = new AuditModuleBackedProvisioningAuditTrail(audit);
+  const tenantConfigAuditTrail = new AuditModuleBackedTenantConfigAuditTrail(audit);
   const subscriptionAuditTrail = new AuditModuleBackedSubscriptionAuditTrail(audit);
   const membershipAuditTrail = new AuditModuleBackedMembershipAuditTrail(audit);
   const billingAuditTrail = new AuditModuleBackedBillingAuditTrail(audit);
@@ -606,7 +663,14 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
   // port `TenantAccessChecker` cote Subscription), sa construction est simplement AVANCEE ici pour
   // etre disponible au moment ou `TenantModuleBackedAccessChecker` en a besoin. Tenant, lui, recoit
   // desormais `userAccountExistenceChecker` (port cross-module, pas le module Identity lui-meme).
-  const tenant = buildTenantModule({ prisma, clock, idGenerator, userAccountExistenceChecker, provisioningAuditTrail });
+  const tenant = buildTenantModule({
+    prisma,
+    clock,
+    idGenerator,
+    userAccountExistenceChecker,
+    provisioningAuditTrail,
+    tenantConfigAuditTrail,
+  });
   const subscription = buildSubscriptionModule({
     prisma,
     clock,
@@ -904,6 +968,12 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
     identity.handlers.requestSuperAdminBreakGlass,
     identity.handlers.approveSuperAdminBreakGlass,
   );
+  // Phase 1, premier increment vertical (permission `tenant-config:administer`) — mono-module
+  // (tenant SEUL), meme discipline de cablage que les controleurs ci-dessus.
+  const facilityController = new FacilityController(
+    tenant.handlers.getHealthFacility,
+    tenant.handlers.renameHealthFacility,
+  );
 
   // Limiteur de debit PARTAGE (ADR-0010 §8/§12 point 4) — port `RateLimiter` (shared-kernel),
   // implementation Redis REELLE construite plus haut (`rateLimiter`, avant meme le module
@@ -988,6 +1058,7 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
       sessionController,
       mfaEnrollmentController,
       superAdminBreakGlassController,
+      facilityController,
       rateLimitRegistrations,
       rateLimitLogin,
       rateLimitMfa,

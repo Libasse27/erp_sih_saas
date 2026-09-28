@@ -73,6 +73,18 @@ export function postJson(
   });
 }
 
+export function patchJson(
+  baseUrl: string,
+  path: string,
+  body: unknown,
+  options: TestRequestOptions = {},
+): Promise<TestHttpResponse> {
+  return rawRequest(baseUrl, 'PATCH', path, body === undefined ? undefined : JSON.stringify(body), {
+    ...options,
+    headers: { 'Content-Type': 'application/json', ...options.headers },
+  });
+}
+
 /** Corps BRUT (jamais serialise) — utilise pour les scenarios "JSON illisible". */
 export function postRaw(baseUrl: string, path: string, rawBody: string, options: TestRequestOptions = {}): Promise<TestHttpResponse> {
   return rawRequest(baseUrl, 'POST', path, rawBody, {

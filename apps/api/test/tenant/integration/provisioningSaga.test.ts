@@ -17,7 +17,7 @@ import { PrismaUserAccountRepository } from '../../../src/modules/identity/infra
 import { UserAccountId } from '../../../src/modules/identity/domain/value-objects/UserAccountId.js';
 import { InMemoryAuditTrail, InMemoryMembershipAuditTrail, InMemorySessionAuditTrail } from '../../identity/builders/testKit.js';
 import { InMemoryPlanPriceRepository, InMemoryPlanRepository, InMemorySubscriptionAuditTrail } from '../../subscription/builders/testKit.js';
-import { InMemoryProvisioningAuditTrail } from '../../tenant/builders/testKit.js';
+import { InMemoryProvisioningAuditTrail, InMemoryTenantConfigAuditTrail } from '../../tenant/builders/testKit.js';
 import { createTestRedisClient, uniqueEmail } from '../../identity/integration/dbTestHelpers.js';
 import { createRawPgClient, createTestPrismaClient, uniqueFacilityName } from './dbTestHelpers.js';
 
@@ -74,6 +74,7 @@ describe('Saga de provisioning — chaine complete reelle (ADR-0008, amendement 
       idGenerator: new UuidGenerator(),
       userAccountExistenceChecker,
       provisioningAuditTrail: new InMemoryProvisioningAuditTrail(),
+      tenantConfigAuditTrail: new InMemoryTenantConfigAuditTrail(),
     });
     subscription = buildSubscriptionModule({
       prisma,

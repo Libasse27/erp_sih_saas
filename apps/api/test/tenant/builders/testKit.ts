@@ -11,6 +11,10 @@ import type {
   ProvisioningAuditRecordInput,
   ProvisioningAuditTrail,
 } from '../../../src/modules/tenant/application/ports/ProvisioningAuditTrail.js';
+import type {
+  TenantConfigAuditRecordInput,
+  TenantConfigAuditTrail,
+} from '../../../src/modules/tenant/application/ports/TenantConfigAuditTrail.js';
 import { Result } from '../../../src/shared-kernel/domain/Result.js';
 
 // Duplique volontairement les primitives generiques de test/identity/builders/testKit.ts plutot
@@ -50,9 +54,28 @@ export function uuidAt(counter: number): string {
 export class InMemoryUnitOfWork implements UnitOfWork {
   public lastContext: UnitOfWorkContext | undefined;
 
+  /**
+   * Profondeur de transaction courante (0 = hors transaction) — meme discipline que
+   * `test/identity/builders/testKit.ts::InMemoryUnitOfWork` (duplication deliberee, §9.2 : chaque
+   * module garde sa suite de test independante). Expose pour permettre a
+   * `InMemoryTenantConfigAuditTrail` (quand un test lui passe CETTE MEME instance) de detecter un
+   * appel `record()` hors transaction — ADR-0005 Amendement 3, "le controle d'autorisation et son
+   * audit DENIED doivent s'executer a l'interieur de la transaction, jamais avant".
+   */
+  private depth = 0;
+
+  get transactionDepth(): number {
+    return this.depth;
+  }
+
   async withTransaction<T>(work: () => Promise<T>, context?: UnitOfWorkContext): Promise<T> {
     this.lastContext = context;
-    return work();
+    this.depth += 1;
+    try {
+      return await work();
+    } finally {
+      this.depth -= 1;
+    }
   }
 }
 
@@ -114,6 +137,27 @@ export class InMemoryProvisioningAuditTrail implements ProvisioningAuditTrail {
   public readonly records: ProvisioningAuditRecordInput[] = [];
 
   async record(input: ProvisioningAuditRecordInput): Promise<void> {
+    this.records.push(input);
+  }
+}
+
+/**
+ * Fake du port `TenantConfigAuditTrail` (Phase 1, premier increment vertical) — accumule les
+ * entrees enregistrees, sans I/O. Durci (meme discipline que
+ * `test/identity/builders/testKit.ts::InMemoryAuditTrail`) : si une `InMemoryUnitOfWork` lui est
+ * passee en construction, `record()` leve si aucune transaction n'est ouverte (ADR-0005
+ * Amendement 3) — rend visible, au niveau des tests unitaires de handler, toute regression qui
+ * auditerait un refus AVANT `withTransaction`.
+ */
+export class InMemoryTenantConfigAuditTrail implements TenantConfigAuditTrail {
+  public readonly records: TenantConfigAuditRecordInput[] = [];
+
+  constructor(private readonly unitOfWork?: InMemoryUnitOfWork) {}
+
+  async record(input: TenantConfigAuditRecordInput): Promise<void> {
+    if (this.unitOfWork !== undefined && this.unitOfWork.transactionDepth === 0) {
+      throw new Error('InMemoryTenantConfigAuditTrail.record() appele hors transaction (InMemoryUnitOfWork.withTransaction non ouvert).');
+    }
     this.records.push(input);
   }
 }

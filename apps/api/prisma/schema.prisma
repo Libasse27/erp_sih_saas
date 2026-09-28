@@ -804,6 +804,9 @@ enum AuditCategory {
   SUBSCRIPTION
   BILLING
   AUDIT_ACCESS
+  /// Ajoutee Phase 1, premier increment vertical (permission `tenant-config:administer`) —
+  /// configuration de l'identite du tenant (renommage de `HealthFacility`).
+  TENANT_CONFIG
 
   @@schema("platform")
 }
@@ -897,6 +900,9 @@ enum AuditEventType {
   /// Etape 11/13 (ADR-0009 §7) — consultation du journal lui-meme.
   AUDIT_TRAIL_QUERIED
   AUDIT_TRAIL_QUERY_DENIED
+  /// Phase 1, premier increment vertical (permission `tenant-config:administer`) — renommage de
+  /// l'identite du tenant (`HealthFacility.rename()`).
+  TENANT_CONFIG_FACILITY_RENAMED
 
   @@schema("platform")
 }

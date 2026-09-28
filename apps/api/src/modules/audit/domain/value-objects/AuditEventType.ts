@@ -67,4 +67,6 @@ export type AuditEventType =
   | 'BILLING_PLATFORM_INVOICE_SETTLED'
   // ===== AUDIT_ACCESS (ADR-0009 §7) =====
   | 'AUDIT_TRAIL_QUERIED'
-  | 'AUDIT_TRAIL_QUERY_DENIED';
+  | 'AUDIT_TRAIL_QUERY_DENIED'
+  // ===== TENANT_CONFIG (Phase 1, premier increment vertical — tenant-config:administer) =====
+  | 'TENANT_CONFIG_FACILITY_RENAMED';

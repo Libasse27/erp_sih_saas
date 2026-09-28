@@ -200,6 +200,22 @@ export function createApp(root: CompositionRoot): Express {
     asyncRoute(root.presentation.superAdminBreakGlassController.approve),
   );
 
+  // Phase 1, premier increment vertical (permission `tenant-config:administer`) : consultation et
+  // renommage de l'identite de l'etablissement du tenant courant. `tenantId` n'est JAMAIS dans
+  // l'URL ni dans le corps — toujours "mon propre etablissement", derive du `ServerContext` serveur
+  // (voir FacilityController.ts).
+  app.get(
+    '/api/v1/facility',
+    root.presentation.requireAuthenticatedContext,
+    asyncRoute(root.presentation.facilityController.get),
+  );
+  app.patch(
+    '/api/v1/facility',
+    root.presentation.requireAuthenticatedContext,
+    parseJsonBody,
+    asyncRoute(root.presentation.facilityController.rename),
+  );
+
   // Monte APRES toutes les routes (contrat Express des middlewares d'erreur) — voir
   // `createErrorHandler` ci-dessus pour le detail de ce qu'il couvre et pourquoi.
   app.use(createErrorHandler(root.logger));
