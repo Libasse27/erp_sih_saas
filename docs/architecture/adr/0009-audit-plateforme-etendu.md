@@ -366,8 +366,15 @@ détient déjà la session elle-même — il n'apprend rien qu'il ne sache.
 
 ### 4. Canal d'écriture : inchangé, mais la règle « jamais via l'Outbox » doit être énoncée précisément
 
-ADR-0005 §5 reste intégralement en vigueur : l'entrée d'audit est écrite **dans la transaction de
-l'action auditée**, via `resolvePrismaClient`, jamais par un consommateur Outbox.
+ADR-0005 §5 reste intégralement en vigueur **pour la règle de canal** : l'entrée d'audit est
+écrite **dans la transaction de l'action auditée**, via `resolvePrismaClient`, jamais par un
+consommateur Outbox.
+
+> **Correction (2026-09-27, [ADR-0005 Amendement 3](0005-mfa-totp-et-audit-plateforme-minimal.md#amendement-3-2026-09-27--correction-de-la-prémisse--sans-contention-possible--5-convention-daudit-des-refus-pré-transaction))**
+> : l'affirmation ci-dessus ne vaut que pour la règle de canal. La *justification* de §5
+> (« sans invariant propre, sans contention possible ») est **obsolète depuis ce document** :
+> §5.3 ci-dessous introduit précisément l'invariant partagé (unicité de chaîne) et la contention
+> par verrou consultatif qu'elle niait. Le canal n'a jamais changé ; la justification, si.
 
 Cette étape multiplie les producteurs et rend nécessaire une formulation que l'implémentation ne
 peut pas interpréter de travers :

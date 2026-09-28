@@ -148,6 +148,22 @@ Sept sous-décisions :
    de production), aucune valeur numérique fixée.
 3. Divergence ADR/code sur la notification du sujet A d'une demande break-glass — ouverte,
    décideur non désigné, voir ADR-0005 Amendement 2.
+4. Audit hors transaction sur la branche `FORBIDDEN` de `RequestSuperAdminBreakGlass.ts` (et,
+   même défaut, `ForceMfaReEnrollment.ts`) — **sévérité Moyen, toujours ouvert, sans acceptation
+   formelle** ([ADR-0005 Amendement 3](adr/0005-mfa-totp-et-audit-plateforme-minimal.md#amendement-3-2026-09-27--correction-de-la-prémisse--sans-contention-possible--5-convention-daudit-des-refus-pré-transaction)).
+   **Faits établis** (lecture de code, aucun test exécuté) : viole le contrat "non négociable" du
+   port `AuditTrail` ; le verrou consultatif de la chaîne d'audit n'a aucune portée hors
+   transaction ; aucune corruption silencieuse possible (contrainte d'unicité en base) ; aucun
+   `try/catch` sur ce chemin, donc un conflit remonterait en erreur 500 au lieu d'un refus 403 ;
+   la chaîne affectée est **le plus souvent celle du tenant de l'acteur**
+   (`chain_key = COALESCE(tenant_id, 'PLATFORM')`), pas uniquement une chaîne `PLATFORM` partagée.
+   **Scénario possible, non prouvé empiriquement** : une collision concurrente réelle entre deux
+   écritures sur la même chaîne, et son effet d'avortement d'une transaction métier légitime —
+   **aucune donnée de production n'existe à ce jour** pour établir sa fréquence. Convention de
+   correction actée (audit dans la transaction, modèle `ApproveSuperAdminBreakGlass`) ; aucun code
+   ni test modifié à ce stade — mandat de mise en conformité séparé, non encore lancé.
+   `ServerContextResolver.ts` (`MFA_BYPASS_ATTEMPTED`) reste une exception distincte, à instruire
+   séparément.
 
 ---
 

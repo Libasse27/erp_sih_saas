@@ -484,3 +484,70 @@ décision séparée, non tranchée.
   responsable Direction, réexamen par jalon — pas de valeur numérique, pas de fermeture définitive.
 - Nouveau résidu ouvert : divergence ADR/code sur la notification de A — décideur non désigné à ce
   stade.
+
+## Amendement 3 (2026-09-27) — correction de la prémisse « sans contention possible » (§5), convention d'audit des refus pré-transaction
+
+**Contexte** : deux revues de sécurité indépendantes en lecture seule puis une décision `architect`
+en lecture seule (2026-09-27) ont examiné `RequestSuperAdminBreakGlass.ts:72-75`, dont la branche
+`FORBIDDEN` audite un refus **avant** l'ouverture de `withTransaction(...)`, en violation du
+contrat du port `AuditTrail.ts` (« NON NEGOCIABLE : `record()` DOIT être appelé DANS LA
+TRANSACTION COURANTE »). Aucun code n'est modifié par cet amendement — voir « Conséquences »
+ci-dessous pour ce qui reste à faire dans un mandat séparé.
+
+**Correction documentaire, dissociée de la règle de canal** : la phrase du §5 ci-dessus
+(« `AuditEntry` est une ligne immuable, **sans invariant propre, sans contention possible**,
+jamais mise à jour ») est **devenue fausse** le jour où [ADR-0009](0009-audit-plateforme-etendu.md)
+a introduit la chaîne de hachage append-only : celle-ci impose un invariant partagé (unicité de
+`(chain_key, previous_entry_hash)`) et une contention réelle, sérialisée par un verrou consultatif
+`pg_advisory_xact_lock` **à portée transaction** (`PrismaAuditEntryRepository.append()`). Ce
+verrou n'a strictement aucune sémantique hors d'une transaction explicite : il est pris et relâché
+par la transaction implicite de chaque requête séparée, donc ne sérialise plus rien.
+
+Cette correction **ne remet pas en cause la règle de canal** de ce même §5 : l'entrée d'audit
+continue d'être écrite **directement, dans la transaction courante de l'action auditée — jamais
+via l'Outbox**. Seule la justification « sans contention possible » est retirée ; les trois
+raisons données au §5 (échec sans agrégat sauvegardé, non-perdable, pas de doublon) restent
+valides et inchangées.
+
+**Convention retenue pour l'audit d'un refus intervenant avant la transaction métier** : le modèle
+déjà correct d'`ApproveSuperAdminBreakGlass.ts:81-90` (contrôle d'autorisation et audit `DENIED`
+exécutés **à l'intérieur** de `withTransaction`) devient la règle générale. Les handlers qui
+reçoivent un `UnitOfWork` et auditent un refus avant de l'ouvrir doivent s'y conformer —
+notamment `RequestSuperAdminBreakGlass.ts:72-75` et `ForceMfaReEnrollment.ts:84-91` (dont le
+commentaire `:85-88` invoque justement la prémisse ci-dessus, désormais caduque).
+
+**Aucune dérogation générale n'est créée.** Une option de dérogation (audit hors transaction avec
+déduplication) a été examinée et rejetée : le verrou consultatif n'a aucune portée hors
+transaction et une déduplication (type Redis) ne fait que borner la fréquence d'écriture, sans
+empêcher qu'une transaction métier légitime lisant la même chaîne se fasse avorter par une
+violation d'unicité — la chaîne concernée est le plus souvent celle du **tenant de l'acteur**
+(`chain_key = COALESCE(tenant_id, 'PLATFORM')`), pas seulement une chaîne `PLATFORM` partagée.
+
+**Contention assumée pour une requête non autorisée** : appliquer cette convention fait ouvrir une
+transaction et prendre un verrou de chaîne même pour une requête qui sera finalement refusée
+(403). Sur un endpoint martelé, ceci sérialise des transactions sur la chaîne d'un tenant — un
+comportement que [ADR-0009 §9](0009-audit-plateforme-etendu.md) assume déjà comme contention « à
+mesurer ». La réponse à ce risque est le **rate limiting HTTP**, à traiter comme un sujet séparé,
+jamais comme une dérogation au régime d'audit transactionnel.
+
+**Cas structurellement distinct, non couvert par cet amendement** : `ServerContextResolver.ts`
+(chemin `MFA_BYPASS_ATTEMPTED`) écrit aussi son audit hors transaction, mais ce service ne reçoit
+aucun `UnitOfWork` à la construction — il ne peut structurellement pas ouvrir de transaction
+(invariant documenté : aucune transaction ne s'ouvre jamais sous une session `MFA_PENDING`) — et
+est déjà déduplifié par session (Redis). Ce n'est pas un exemple de la dérogation rejetée
+ci-dessus, mais une exception nommée et bornée à son propre contexte. Son réexamen éventuel est un
+**résidu distinct**, à instruire séparément.
+
+### Conséquences de cet amendement
+- Correction de §5 : la prémisse « sans contention possible » est retirée ; la règle de canal
+  (direct, dans la transaction, jamais l'Outbox) reste inchangée.
+- Convention actée : audit d'un refus pré-transaction = dans la transaction (modèle
+  `ApproveSuperAdminBreakGlass`), applicable à tout handler disposant d'un `UnitOfWork`.
+- Aucun code n'est modifié ici. Résidu **explicitement laissé ouvert**, non reclassé comme risque
+  accepté : la mise en conformité de `RequestSuperAdminBreakGlass.ts` et `ForceMfaReEnrollment.ts`
+  reste un mandat de code séparé, précédé si besoin d'un mandat test (le fake `InMemoryUnitOfWork`
+  actuel ne distingue pas "dans/hors transaction", ce qui rend la régression actuelle invisible
+  aux tests).
+- Nouveau résidu distinct, non priorisé : réexamen de l'exception `ServerContextResolver.ts`.
+- Nouveau résidu distinct, non priorisé : traitement du rate limiting HTTP sur les routes
+  break-glass (déjà noté comme résidu 1 du commit `95c4b02`, voir mémoire projet).
