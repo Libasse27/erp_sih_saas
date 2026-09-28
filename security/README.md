@@ -85,6 +85,7 @@ montee de version pnpm (actuellement F3, ecartee).
 
 ## Rituel
 
-Les divergences plateforme/CI et les exceptions proches de leur expiration sont traitees par la
-revue mensuelle instituee par l'ADR-0014 §13 (mandat (e), non encore livre au moment de la
-redaction de ce fichier).
+Institue par ADR-0014 §13 (mandat (e)). Procedure et journal cumulatif :
+[`security/sca-monthly-review.md`](sca-monthly-review.md). La revue mensuelle consigne des
+decisions humaines a partir du signal accumule par les deux workflows ci-dessus — elle n'en
+remplace aucun.
