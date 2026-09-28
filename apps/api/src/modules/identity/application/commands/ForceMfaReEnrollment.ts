@@ -81,16 +81,19 @@ export class ForceMfaReEnrollmentHandler {
     const actorTenantId = actorSession.kind === 'TENANT' ? actorSession.tenantId : null;
     const actorRoleCodes = actorSession.kind === 'TENANT' ? actorSession.roleCodes : [];
 
-    if (!this.isAuthorized(actorSession)) {
-      // Acteur authentifie et identifiable, mais non habilite (permission `mfa:reset` manquante
-      // ou pas de step-up) : refus journalise (F-4), en dehors de toute transaction de mutation
-      // (meme discipline que `MFA_BYPASS_ATTEMPTED` dans `ServerContextResolver` — un simple INSERT
-      // autonome, sans mutation a proteger atomiquement).
-      await this.audit(subjectId, actorSession, actorTenantId, actorRoleCodes, command, 'DENIED', null);
-      return Result.failure('FORBIDDEN');
-    }
-
     const outcome = await this.unitOfWork.withTransaction(async () => {
+      // Controle d'autorisation ET audit DENIED executes DANS la transaction (ADR-0005
+      // Amendement 3, convention alignee sur `ApproveSuperAdminBreakGlass.ts` MAJEUR-1) :
+      // `AuditTrail.record()` doit etre appele dans la transaction courante, contrairement au
+      // chemin `MFA_BYPASS_ATTEMPTED` de `ServerContextResolver` (qui ne recoit structurellement
+      // aucun `UnitOfWork` et reste une exception nommee, cf. ADR-0005 Amendement 3). Un refus
+      // n'est pas une exception : retourner `Result.failure` ici laisse committer l'entree
+      // d'audit meme si la commande echoue globalement.
+      if (!this.isAuthorized(actorSession)) {
+        await this.audit(subjectId, actorSession, actorTenantId, actorRoleCodes, command, 'DENIED', null);
+        return Result.failure<void, ForceMfaReEnrollmentError>('FORBIDDEN');
+      }
+
       if (command.reason.trim().length === 0) {
         await this.audit(subjectId, actorSession, actorTenantId, actorRoleCodes, command, 'FAILURE', null);
         return Result.failure<void, ForceMfaReEnrollmentError>('REASON_REQUIRED');

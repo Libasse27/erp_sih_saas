@@ -45,6 +45,7 @@ describe('ForceMfaReEnrollmentHandler', () => {
   let mfaEnrollments: InMemoryMfaEnrollmentRepository;
   let sessions: InMemorySessionStore;
   let auditTrail: InMemoryAuditTrail;
+  let unitOfWork: InMemoryUnitOfWork;
   let handler: ForceMfaReEnrollmentHandler;
   let clock: FixedClock;
   let idGenerator: SequentialIdGenerator;
@@ -63,7 +64,11 @@ describe('ForceMfaReEnrollmentHandler', () => {
     );
     mfaEnrollments = new InMemoryMfaEnrollmentRepository();
     sessions = new InMemorySessionStore();
-    auditTrail = new InMemoryAuditTrail();
+    unitOfWork = new InMemoryUnitOfWork();
+    // `unitOfWork` partage avec `auditTrail` (ADR-0005 Amendement 3) : `InMemoryAuditTrail.record()`
+    // leve desormais une erreur si le handler l'appelle hors de `withTransaction` — regression
+    // exactement du type deja corrige (audit du refus FORBIDDEN avant l'ouverture transactionnelle).
+    auditTrail = new InMemoryAuditTrail(unitOfWork);
     clock = new FixedClock('2026-08-26T10:00:00Z');
     idGenerator = new SequentialIdGenerator();
     handler = new ForceMfaReEnrollmentHandler(
@@ -74,7 +79,7 @@ describe('ForceMfaReEnrollmentHandler', () => {
       mfaEnrollments,
       buildTestRefreshTokenIssuer({ clock, idGenerator }),
       auditTrail,
-      new InMemoryUnitOfWork(),
+      unitOfWork,
       clock,
       idGenerator,
     );

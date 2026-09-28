@@ -209,6 +209,11 @@ describe('POST /api/v1/platform/super-admin/break-glass-requests(...) — refus 
   const sessionRequesterX = randomUUID();
   const requesterXId = UserAccountId.create(randomUUID()).getValue();
   const subjectOfSelfApprovalId = UserAccountId.create(randomUUID()).getValue();
+  // Captures nommees (plutot que `randomUUID()` inline) : necessaires pour interroger ensuite
+  // `platform.AuditEntry` par `actor_user_id` (ADR-0005 Amendement 3, preuve HTTP que le refus
+  // pre-transaction corrige est bien audite ET committe).
+  const tenantActorUserId = randomUUID();
+  const platformNoStepUpUserId = randomUUID();
 
   let selfApprovalRequestId: string;
 
@@ -228,7 +233,7 @@ describe('POST /api/v1/platform/super-admin/break-glass-requests(...) — refus 
     const tenantSession: TenantSessionContext = {
       sessionId: sessionTenant,
       kind: 'TENANT',
-      userId: randomUUID(),
+      userId: tenantActorUserId,
       tenantId,
       membershipId: randomUUID(),
       roleCodes: ['ADMIN_ETABLISSEMENT'],
@@ -244,7 +249,7 @@ describe('POST /api/v1/platform/super-admin/break-glass-requests(...) — refus 
     const platformSessionNoStepUp: PlatformSessionContext = {
       sessionId: sessionPlatformNoStepUp,
       kind: 'PLATFORM',
-      userId: randomUUID(),
+      userId: platformNoStepUpUserId,
       requiresMfa: true,
       mfaSatisfiedAt: null,
       issuedAt: now.toISOString(),
@@ -301,6 +306,23 @@ describe('POST /api/v1/platform/super-admin/break-glass-requests(...) — refus 
     return `${REQUEST_PATH}/${requestId}/approval`;
   }
 
+  /**
+   * Preuve HTTP, niveau ROUTE REELLE, que le refus pre-transaction (ADR-0005 Amendement 3) est
+   * bien audite ET COMMIT en base — pas seulement renvoye au client. Interroge directement
+   * `platform.AuditEntry` (role applicatif `sih_app`, la meme connexion `rawClient` que le reste
+   * de ce fichier) : la ligne la plus recente pour ce couple (eventType, actorUserId).
+   */
+  async function findLatestAuditEntry(
+    eventType: string,
+    actorUserId: string,
+  ): Promise<{ outcome: string; subject_user_id: string | null } | undefined> {
+    const result = await rawClient.query<{ outcome: string; subject_user_id: string | null }>(
+      'SELECT outcome, subject_user_id FROM "platform"."AuditEntry" WHERE event_type = $1 AND actor_user_id = $2 ORDER BY created_at DESC LIMIT 1',
+      [eventType, actorUserId],
+    );
+    return result.rows[0];
+  }
+
   it('POST creation de demande SANS en-tete Authorization -> 401', async () => {
     const response = await postJson(handle.baseUrl, REQUEST_PATH, {
       subjectUserAccountId: randomUUID(),
@@ -316,16 +338,23 @@ describe('POST /api/v1/platform/super-admin/break-glass-requests(...) — refus 
     expect(JSON.parse(response.body)).toEqual({ error: 'unauthenticated' });
   });
 
-  it('POST creation de demande avec une session TENANT (pas PLATFORM) -> 403 forbidden', async () => {
-    const response = await postJson(
-      handle.baseUrl,
-      REQUEST_PATH,
-      { subjectUserAccountId: randomUUID(), reason: 'motif suffisamment long pour passer la validation de forme' },
-      { headers: bearer(sessionTenant) },
-    );
-    expect(response.status).toBe(403);
-    expect(JSON.parse(response.body)).toEqual({ error: 'forbidden' });
-  });
+  it(
+    'POST creation de demande avec une session TENANT (pas PLATFORM) -> 403 forbidden, refus AUDITE ET COMMIT ' +
+      '(ADR-0005 Amendement 3 : le controle isAuthorized/audit DENIED tourne desormais DANS withTransaction)',
+    async () => {
+      const response = await postJson(
+        handle.baseUrl,
+        REQUEST_PATH,
+        { subjectUserAccountId: randomUUID(), reason: 'motif suffisamment long pour passer la validation de forme' },
+        { headers: bearer(sessionTenant) },
+      );
+      expect(response.status).toBe(403);
+      expect(JSON.parse(response.body)).toEqual({ error: 'forbidden' });
+
+      const entry = await findLatestAuditEntry('SUPER_ADMIN_BREAK_GLASS_REQUESTED', tenantActorUserId);
+      expect(entry?.outcome).toBe('DENIED');
+    },
+  );
 
   it('POST approbation avec une session TENANT (pas PLATFORM) -> 403 forbidden', async () => {
     const response = await postJson(handle.baseUrl, approvalPath(randomUUID()), {}, { headers: bearer(sessionTenant) });
@@ -335,7 +364,7 @@ describe('POST /api/v1/platform/super-admin/break-glass-requests(...) — refus 
 
   it(
     'POST creation de demande avec une session PLATFORM authentifiee mais SANS step-up MFA recent ' +
-      '(mfaSatisfiedAt: null) -> 403 forbidden (jamais un simple 401, la session existe et est PLATFORM)',
+      '(mfaSatisfiedAt: null) -> 403 forbidden (jamais un simple 401, la session existe et est PLATFORM), refus AUDITE ET COMMIT',
     async () => {
       const response = await postJson(
         handle.baseUrl,
@@ -345,6 +374,9 @@ describe('POST /api/v1/platform/super-admin/break-glass-requests(...) — refus 
       );
       expect(response.status).toBe(403);
       expect(JSON.parse(response.body)).toEqual({ error: 'forbidden' });
+
+      const entry = await findLatestAuditEntry('SUPER_ADMIN_BREAK_GLASS_REQUESTED', platformNoStepUpUserId);
+      expect(entry?.outcome).toBe('DENIED');
     },
   );
 

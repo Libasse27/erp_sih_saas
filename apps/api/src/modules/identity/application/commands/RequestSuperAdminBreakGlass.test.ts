@@ -22,6 +22,7 @@ describe('RequestSuperAdminBreakGlassHandler (ADR-0005 Amendement 1, O-04 residu
   let breakGlassRequests: InMemorySuperAdminBreakGlassRequestRepository;
   let sessions: InMemorySessionStore;
   let auditTrail: InMemoryAuditTrail;
+  let unitOfWork: InMemoryUnitOfWork;
   let handler: RequestSuperAdminBreakGlassHandler;
   let clock: FixedClock;
   let idGenerator: SequentialIdGenerator;
@@ -30,10 +31,14 @@ describe('RequestSuperAdminBreakGlassHandler (ADR-0005 Amendement 1, O-04 residu
     accounts = new InMemoryUserAccountRepository();
     breakGlassRequests = new InMemorySuperAdminBreakGlassRequestRepository();
     sessions = new InMemorySessionStore();
-    auditTrail = new InMemoryAuditTrail();
+    unitOfWork = new InMemoryUnitOfWork();
+    // `unitOfWork` partage avec `auditTrail` (ADR-0005 Amendement 3) : `InMemoryAuditTrail.record()`
+    // leve desormais une erreur si le handler l'appelle hors de `withTransaction` — regression
+    // exactement du type deja corrige (audit du refus FORBIDDEN avant l'ouverture transactionnelle).
+    auditTrail = new InMemoryAuditTrail(unitOfWork);
     clock = new FixedClock('2026-09-03T10:00:00Z');
     idGenerator = new SequentialIdGenerator();
-    handler = new RequestSuperAdminBreakGlassHandler(sessions, accounts, breakGlassRequests, auditTrail, new InMemoryUnitOfWork(), clock, idGenerator);
+    handler = new RequestSuperAdminBreakGlassHandler(sessions, accounts, breakGlassRequests, auditTrail, unitOfWork, clock, idGenerator);
   });
 
   async function registerAccount(platformRole: 'SUPER_ADMIN' | 'NONE'): Promise<UserAccount> {

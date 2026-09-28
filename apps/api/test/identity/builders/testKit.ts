@@ -74,8 +74,27 @@ export function uuidAt(counter: number): string {
 }
 
 export class InMemoryUnitOfWork implements UnitOfWork {
+  /**
+   * Profondeur de transaction courante (0 = hors transaction, incremente/decremente autour de
+   * `work()`). Expose uniquement pour permettre a `InMemoryAuditTrail` (quand un test lui passe
+   * CETTE MEME instance en construction) de detecter un appel `record()` hors transaction — c'est
+   * ce qui rend visible, au niveau des tests unitaires de handler, une regression du type deja
+   * corrige par ADR-0005 Amendement 3 (MAJEUR-1 : `RequestSuperAdminBreakGlass.ts` /
+   * `ForceMfaReEnrollment.ts` auditaient un refus AVANT l'ouverture de `withTransaction`).
+   */
+  private depth = 0;
+
+  get transactionDepth(): number {
+    return this.depth;
+  }
+
   async withTransaction<T>(work: () => Promise<T>): Promise<T> {
-    return work();
+    this.depth += 1;
+    try {
+      return await work();
+    } finally {
+      this.depth -= 1;
+    }
   }
 }
 
@@ -376,10 +395,30 @@ export class FakeRecoveryCodeGenerator implements RecoveryCodeGenerator {
   }
 }
 
+/**
+ * Fake du port `AuditTrail`. Le parametre optionnel `unitOfWork` est le durcissement ADR-0005
+ * Amendement 3 : quand un test le fournit (la MEME instance de `InMemoryUnitOfWork` que celle
+ * injectee dans le handler sous test), `record()` leve une erreur explicite si aucune transaction
+ * n'est ouverte au moment de l'appel — ce que le fake d'origine (sans etat de transaction) ne
+ * pouvait pas detecter.
+ *
+ * Par defaut (`unitOfWork` omis), AUCUNE verification n'est effectuee — comportement STRICTEMENT
+ * inchange, necessaire pour :
+ * - les usages hors transaction structurellement legitimes (`ServerContextResolver`, qui ne
+ *   recoit jamais de `UnitOfWork` a la construction, ADR-0005 Amendement 3, cas nomme et borne) ;
+ * - les tests d'integration qui composent le VRAI `PgUnitOfWork` (`buildIdentityModule` et
+ *   assimiles) tout en gardant ce fake comme simple sonde de capture — la transactionnalite reelle
+ *   y est deja prouvee ailleurs (`test/audit/integration/auditEntryTransactionality.test.ts`).
+ */
 export class InMemoryAuditTrail implements AuditTrail {
   readonly records: AuditRecordInput[] = [];
 
+  constructor(private readonly unitOfWork?: InMemoryUnitOfWork) {}
+
   async record(input: AuditRecordInput): Promise<void> {
+    if (this.unitOfWork !== undefined && this.unitOfWork.transactionDepth === 0) {
+      throw new Error('InMemoryAuditTrail.record() appele hors transaction (InMemoryUnitOfWork.withTransaction non ouvert).');
+    }
     this.records.push(input);
   }
 }

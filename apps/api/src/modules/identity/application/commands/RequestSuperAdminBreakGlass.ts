@@ -69,12 +69,17 @@ export class RequestSuperAdminBreakGlassHandler {
     }
     const subjectId = subjectIdResult.getValue();
 
-    if (!this.isAuthorized(actorSession)) {
-      await this.audit(subjectId, actorSession, actorTenantId, actorRoleCodes, 'DENIED', null, command.correlationId ?? null);
-      return Result.failure('FORBIDDEN');
-    }
-
     const outcome = await this.unitOfWork.withTransaction(async () => {
+      // Controle d'autorisation ET audit DENIED executes DANS la transaction (ADR-0005
+      // Amendement 3, convention alignee sur `ApproveSuperAdminBreakGlass.ts` MAJEUR-1) :
+      // `AuditTrail.record()` doit etre appele dans la transaction courante — un refus n'est pas
+      // une exception, donc `Result.failure` ici laisse committer l'entree d'audit meme si la
+      // commande echoue globalement.
+      if (!this.isAuthorized(actorSession)) {
+        await this.audit(subjectId, actorSession, actorTenantId, actorRoleCodes, 'DENIED', null, command.correlationId ?? null);
+        return Result.failure<RequestSuperAdminBreakGlassResult, RequestSuperAdminBreakGlassError>('FORBIDDEN');
+      }
+
       if (command.reason.trim().length === 0) {
         await this.audit(subjectId, actorSession, actorTenantId, actorRoleCodes, 'FAILURE', null, command.correlationId ?? null);
         return Result.failure<RequestSuperAdminBreakGlassResult, RequestSuperAdminBreakGlassError>('REASON_REQUIRED');
