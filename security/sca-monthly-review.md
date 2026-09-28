@@ -65,3 +65,13 @@ supposé.
 ## Journal
 
 (entrées les plus récentes en tête)
+
+### 2026-09-28 — revue menée par `Libasse27`
+
+- Résultat du dernier gate CI consulté : `sca.yml` sur `main`, SHA `0b03d00` — succès.
+- Avis nouveaux (`sca:watch` + Dependabot, recoupés par GHSA) : aucune divergence. `GHSA-82fw-gwwq-j7x9` ; Dependabot affiche 3 occurrences sur deux manifestes et `sca:watch` 2 lignes par paquet. Les deux décomptes sont cohérents.
+- Divergences plateforme/CI (§7) : aucune sur les avis. Le rapport de l'issue `sca-veille` est ancien : le run du 28 septembre a évalué `46b9345`, antérieur aux mises à jour de dépendances. Le run a réussi et son résultat identique à celui du 21 septembre explique l'absence d'édition de l'issue.
+- Exceptions actives examinées : 1 ; expirant sous 30 jours : aucune. Exception `GHSA-82fw-gwwq-j7x9`, échéance `2026-12-13`.
+- Décisions prises : maintenir l'exception jusqu'à réexamen ; aucune reconduction tacite ni modification aujourd'hui.
+- `sca:test` exécuté ? Non — aucun changement du mécanisme SCA depuis la dernière exécution rapportée (19/19).
+- Reporté au mois suivant : réexaminer l'exception ; vérifier que la veille planifiée évalue un SHA récent de `main`. Le run du 28 septembre a aussi signalé une échéance de migration de l'image `ubuntu-latest` au 19 octobre 2026.
