@@ -384,6 +384,35 @@ indépendant, **non traité par cette décision**.
 
 ---
 
+## Passage Phase 0 → Phase 1 — décision de gouvernance (2026-09-28)
+
+**Décision** : Phase 1 peut démarrer alors que des résidus de Phase 0 restent ouverts, sous
+réserve que :
+
+1. Les critères de sécurité et d'isolation du SaaS Core exigés avant Phase 1 soient satisfaits et
+   vérifiés dans le CI : test automatisé de non-fuite inter-tenant sur chaque agrégat exposé
+   (règle déjà posée par [00-executive-summary.md](00-executive-summary.md#7-recommandation) §7,
+   point 3), RLS PostgreSQL vérifié par un test contournant la couche applicative, et rejet audité
+   d'un `tenantId` ou d'un rôle forgé par le client. Cette décision ne dispense d'aucun de ces
+   contrôles.
+2. Pour chaque incrément Phase 1, aucun résidu ouvert ne constitue un prérequis métier ou
+   technique de cet incrément. Cette vérification se fait incrément par incrément.
+3. Les résidus de Phase 0 restent tracés avec leur statut actuel. Cette décision ne les clôt pas,
+   ne les requalifie pas en risques acceptés et ne leur attribue ni responsable ni échéance.
+
+**Ce que cette décision ne fait pas** : elle ne déclare pas Phase 0 close. O-07.3 reste ouvert et
+en pause ; aucun fournisseur SMS n'est choisi et aucun canal SMS réel n'est autorisé par cette
+décision. Tout incrément qui dépend du SMS reste bloqué par O-07.3. Les autres résidus ouverts,
+dont le calendrier des rappels et la divergence de notification du sujet A, conservent leur
+statut.
+
+**Portée** : cette règle ne concerne que le passage de Phase 0 à Phase 1. Elle ne modifie aucun
+critère de sortie ni aucune règle de passage des phases suivantes.
+
+**Décideur** : responsable technique (2026-09-28).
+
+---
+
 ## Bloquants Phase 2
 
 ### O-10 — Règle de détection de doublon patient
