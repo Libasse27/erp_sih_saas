@@ -551,3 +551,17 @@ ci-dessus, mais une exception nommée et bornée à son propre contexte. Son ré
 - Nouveau résidu distinct, non priorisé : réexamen de l'exception `ServerContextResolver.ts`.
 - Nouveau résidu distinct, non priorisé : traitement du rate limiting HTTP sur les routes
   break-glass (déjà noté comme résidu 1 du commit `95c4b02`, voir mémoire projet).
+
+**Note de clôture (2026-09-28)** : le résidu de mise en conformité laissé ouvert ci-dessus (« aucun
+code n'est modifié ici ») est **traité par le commit `1b9f18e`**. Le contrôle d'autorisation et
+l'audit `DENIED` de `RequestSuperAdminBreakGlass.ts` et de `ForceMfaReEnrollment.ts` s'exécutent
+désormais **à l'intérieur** de `withTransaction`, conformément à la convention actée ci-dessus
+(calque `ApproveSuperAdminBreakGlass`). Le gap de test signalé (`InMemoryUnitOfWork` incapable de
+distinguer "dans/hors transaction") est comblé : `InMemoryAuditTrail` accepte désormais un
+`unitOfWork` optionnel et lève une erreur si `record()` est appelé hors transaction — câblé sur
+les deux handlers corrigés (choix délibérément **opt-in**, pour ne pas casser les tests qui
+composent légitimement le vrai `PgUnitOfWork` avec ce même fake). Une preuve HTTP réelle
+(`superAdminBreakGlassHttp.test.ts`) confirme qu'un refus 403 reste audité et committé en base.
+Ce résidu est donc **résolu par mise en conformité**, pas reclassé comme risque accepté. Les deux
+résidus distincts listés ci-dessus (`ServerContextResolver.ts`, rate limiting HTTP) restent
+ouverts, non traités par ce commit.
