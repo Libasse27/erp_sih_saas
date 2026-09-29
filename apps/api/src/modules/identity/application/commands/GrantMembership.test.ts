@@ -127,4 +127,36 @@ describe('GrantMembershipHandler', () => {
     expect(result.isFailure()).toBe(true);
     expect(result.getError()).toBe('ROLE_NOT_FOUND');
   });
+
+  it("prend le verrou commun avant de verifier le tenant lorsqu'un role accorde membership:administer", async () => {
+    roles.seed(
+      Role.system({
+        id: idFor.role(3),
+        code: 'ADMIN_ETABLISSEMENT',
+        name: 'Admin',
+        permissions: [permission('membership:administer')],
+      }),
+    );
+    const order: string[] = [];
+    const lock = memberships.lockTenantForAdminRecovery.bind(memberships);
+    const findActive = memberships.findActiveByUserAndTenant.bind(memberships);
+    memberships.lockTenantForAdminRecovery = async (tenantId) => {
+      order.push('lock');
+      await lock(tenantId);
+    };
+    memberships.findActiveByUserAndTenant = async (userId, tenantId) => {
+      order.push('check');
+      return findActive(userId, tenantId);
+    };
+
+    const result = await handler.execute({
+      userId: account.id.toString(),
+      tenantId: TENANT_A.toString(),
+      createdBy: account.id.toString(),
+      initialRoleCodes: ['ADMIN_ETABLISSEMENT'],
+    });
+
+    expect(result.isSuccess()).toBe(true);
+    expect(order).toEqual(['lock', 'check']);
+  });
 });

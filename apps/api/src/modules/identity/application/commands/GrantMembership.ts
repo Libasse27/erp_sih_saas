@@ -71,25 +71,39 @@ export class GrantMembershipHandler {
     }
 
     return this.unitOfWork.withTransaction(async () => {
-      const existing = await this.membershipRepository.findActiveByUserAndTenant(userId, tenantId);
-      if (existing !== null) {
-        return Result.failure('MEMBERSHIP_ALREADY_EXISTS');
-      }
-
-      const roleIds = [];
+      const roles = [];
       for (const code of command.initialRoleCodes) {
         const role = await this.roleRepository.findSystemRoleByCode(code);
         if (role === null) {
           return Result.failure('ROLE_NOT_FOUND');
         }
-        roleIds.push(role.id);
+        roles.push(role);
+      }
+
+      // Meme verrou advisory que celui utilise par `ApproveTenantAdminRecoveryHandler`
+      // (namespace `'tenant-admin-recovery'`) — PRIS AVANT toute verification, pas seulement
+      // avant la mutation. Sans ca, une redelivrance at-least-once de
+      // `subscription.subscription.started` (GrantOwnerMembershipOnSubscriptionStarted, qui
+      // octroie ADMIN_ETABLISSEMENT) pourrait s'executer EN PARALLELE d'une approbation de
+      // recuperation plateforme pour le MEME tenant : les deux chemins liraient alors "aucun
+      // admin actif" a partir du meme etat perime et pourraient tous deux reussir, chacun
+      // attribuant un membership portant `membership:administer` sans jamais se voir l'un
+      // l'autre — exactement la course qu'`ApproveTenantAdminRecovery` pretend fermer seule.
+      // Cout nul pour tout octroi qui ne porte pas cette permission (branche jamais prise).
+      if (roles.some((role) => role.permissions.some((permission) => permission.code === 'membership:administer'))) {
+        await this.membershipRepository.lockTenantForAdminRecovery(tenantId);
+      }
+
+      const existing = await this.membershipRepository.findActiveByUserAndTenant(userId, tenantId);
+      if (existing !== null) {
+        return Result.failure('MEMBERSHIP_ALREADY_EXISTS');
       }
 
       const membership = UserTenantMembership.grant({
         userId,
         tenantId,
         createdBy,
-        initialRoleIds: roleIds,
+        initialRoleIds: roles.map((role) => role.id),
         clock: this.clock,
         idGenerator: this.idGenerator,
       });

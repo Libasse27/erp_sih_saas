@@ -28,7 +28,13 @@ export interface UserTenantMembershipRepository {
 
   findById(id: UserTenantMembershipId, tenantId: TenantId): Promise<UserTenantMembership | null>;
 
-  /** Sérialise les récupérations d'accès administrateur d'un même tenant ; transaction + RLS requis. */
+  /**
+   * Sérialise, pour un même tenant, TOUT chemin qui attribue un rôle portant
+   * `membership:administer` — pas seulement `ApproveTenantAdminRecoveryHandler` : aussi
+   * `GrantMembershipHandler` quand le rôle demandé porte cette permission (`GrantMembership.ts`),
+   * pour empêcher qu'une redelivrance Outbox du provisioning initial et une récupération
+   * plateforme s'exécutent en parallèle sur le même tenant sans se voir. Transaction + RLS requis.
+   */
   lockTenantForAdminRecovery(tenantId: TenantId): Promise<void>;
 
   listActiveTenantIdsForUser(userId: UserAccountId): Promise<readonly TenantId[]>;
