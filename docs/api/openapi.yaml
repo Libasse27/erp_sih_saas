@@ -840,6 +840,188 @@ paths:
               example:
                 error: internal_error
 
+  /api/v1/platform/tenant-admin-recovery-requests:
+    post:
+      operationId: requestTenantAdminRecovery
+      tags: [PlatformTenantAdminRecovery]
+      summary: Demander la récupération de l'accès administrateur d'un tenant
+      description: >
+        Route plateforme authentifiée : session `PLATFORM` (SUPER_ADMIN) avec MFA satisfaite.
+        Cette action ouvre une demande sans accorder de membership. L'approbation doit venir d'un
+        autre SUPER_ADMIN. Avant approbation, deux SUPER_ADMIN supplémentaires, distincts du
+        demandeur et de l'approbateur, doivent avoir effectué la vérification
+        d'identité hors bande prévue par la gouvernance. La méthode concrète reste à définir ;
+        l'API ne collecte ni ne vérifie ces attestations.
+      security:
+        - bearerSessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenantId, beneficiaryUserId, reason]
+              additionalProperties: false
+              properties:
+                tenantId:
+                  type: string
+                  format: uuid
+                beneficiaryUserId:
+                  type: string
+                  format: uuid
+                reason:
+                  type: string
+                  minLength: 1
+                  maxLength: 500
+      responses:
+        '201':
+          description: Demande créée, en attente de l'approbation d'un second SUPER_ADMIN.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [requestId, status]
+                properties:
+                  requestId:
+                    type: string
+                    format: uuid
+                  status:
+                    type: string
+                    enum: [PENDING]
+        '400':
+          description: Corps invalide ou raison vide après normalisation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: invalid_request
+        '401':
+          description: Aucune session valide.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: unauthenticated
+        '403':
+          description: Session valide, mais pas PLATFORM avec MFA satisfaite.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: forbidden
+        '404':
+          description: Tenant ou compte bénéficiaire introuvable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: not_found
+        '500':
+          description: Défaillance technique.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: internal_error
+
+  /api/v1/platform/tenant-admin-recovery-requests/{requestId}/approval:
+    post:
+      operationId: approveTenantAdminRecovery
+      tags: [PlatformTenantAdminRecovery]
+      summary: Approuver une demande de récupération d'accès administrateur
+      description: >
+        Session PLATFORM avec MFA satisfaite, distincte du demandeur. La mutation et les deux
+        écritures d'audit sont atomiques. L'opération ne réussit que si aucun membership actif du
+        tenant ne porte `membership:administer`, y compris via un rôle personnalisé. Les deux
+        SUPER_ADMIN chargés de la vérification d'identité hors bande doivent être distincts du
+        demandeur et de l'approbateur ; cette condition humaine n'est pas validée par l'API et sa
+        procédure concrète reste à définir.
+      security:
+        - bearerSessionAuth: []
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              description: Doit être absent ou un objet vide.
+      responses:
+        '200':
+          description: Demande approuvée et accès administrateur attribué.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, membershipId]
+                properties:
+                  status:
+                    type: string
+                    enum: [approved]
+                  membershipId:
+                    type: string
+                    format: uuid
+        '400':
+          description: Identifiant invalide ou corps non vide.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: invalid_request
+        '401':
+          description: Aucune session valide.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: unauthenticated
+        '403':
+          description: Session valide, mais pas PLATFORM avec MFA satisfaite.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: forbidden
+        '404':
+          description: Demande, tenant ou compte bénéficiaire introuvable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: not_found
+        '409':
+          description: Demande déjà traitée, demandeur approbateur, ou tenant ayant déjà un administrateur.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: conflict
+        '500':
+          description: Défaillance technique.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: internal_error
+
   /api/v1/audit-entries:
     get:
       operationId: listAuditEntries

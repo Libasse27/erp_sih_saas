@@ -200,6 +200,22 @@ export function createApp(root: CompositionRoot): Express {
     asyncRoute(root.presentation.superAdminBreakGlassController.approve),
   );
 
+  // Récupération d'accès administrateur d'un tenant sans admin : distincte du break-glass MFA.
+  // Les deux actions sont limitées par le handler aux sessions PLATFORM avec MFA satisfaite ;
+  // l'approbation est obligatoirement faite par un autre SUPER_ADMIN.
+  app.post(
+    '/api/v1/platform/tenant-admin-recovery-requests',
+    root.presentation.requireAuthenticatedContext,
+    parseJsonBody,
+    asyncRoute(root.presentation.tenantAdminRecoveryController.request),
+  );
+  app.post(
+    '/api/v1/platform/tenant-admin-recovery-requests/:requestId/approval',
+    root.presentation.requireAuthenticatedContext,
+    parseJsonBody,
+    asyncRoute(root.presentation.tenantAdminRecoveryController.approve),
+  );
+
   // Phase 1, premier increment vertical (permission `tenant-config:administer`) : consultation et
   // renommage de l'identite de l'etablissement du tenant courant. `tenantId` n'est JAMAIS dans
   // l'URL ni dans le corps — toujours "mon propre etablissement", derive du `ServerContext` serveur

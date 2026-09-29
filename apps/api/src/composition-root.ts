@@ -34,6 +34,7 @@ import { AuditEntryController, type AuditHttpLocals } from './modules/audit/pres
 import { SessionController } from './modules/identity/presentation/http/SessionController.js';
 import { MfaEnrollmentController } from './modules/identity/presentation/http/MfaEnrollmentController.js';
 import { SuperAdminBreakGlassController } from './modules/identity/presentation/http/SuperAdminBreakGlassController.js';
+import { TenantAdminRecoveryController } from './modules/identity/presentation/http/TenantAdminRecoveryController.js';
 import { MembershipController } from './modules/identity/presentation/http/MembershipController.js';
 import type { MembershipAdminPrincipal } from './modules/identity/application/MembershipAdminPrincipal.js';
 import { RegistrationController } from './presentation/http/RegistrationController.js';
@@ -329,7 +330,7 @@ class AuditModuleBackedMembershipAuditTrail implements MembershipAuditTrail {
       actorUserId: input.actorUserId,
       actorRoleCodes: input.actorRoleCodes,
       subjectUserId: input.subjectUserId,
-      targetType: 'MEMBERSHIP',
+      targetType: input.targetType ?? 'MEMBERSHIP',
       targetId: input.targetId,
       reason: input.reason,
       sessionId: input.sessionId,
@@ -576,6 +577,7 @@ export interface CompositionRoot {
     readonly mfaEnrollmentController: MfaEnrollmentController;
     /** ADR-0005 Amendement 1 (O-04 residu 4), etape 12/13 — mono-module (identity seul), derriere `requireAuthenticatedContext`. */
     readonly superAdminBreakGlassController: SuperAdminBreakGlassController;
+    readonly tenantAdminRecoveryController: TenantAdminRecoveryController;
     /** Phase 1, premier increment vertical (permission `tenant-config:administer`) — mono-module (tenant seul), derriere `requireAuthenticatedContext`. */
     readonly facilityController: FacilityController;
     /** Phase 1, deuxieme increment vertical (permission `membership:administer`) — mono-module (identity seul), derriere `requireAuthenticatedContext`. */
@@ -994,6 +996,10 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
     identity.handlers.requestSuperAdminBreakGlass,
     identity.handlers.approveSuperAdminBreakGlass,
   );
+  const tenantAdminRecoveryController = new TenantAdminRecoveryController(
+    identity.handlers.requestTenantAdminRecovery,
+    identity.handlers.approveTenantAdminRecovery,
+  );
   // Phase 1, premier increment vertical (permission `tenant-config:administer`) — mono-module
   // (tenant SEUL), meme discipline de cablage que les controleurs ci-dessus.
   const facilityController = new FacilityController(
@@ -1090,6 +1096,7 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
       sessionController,
       mfaEnrollmentController,
       superAdminBreakGlassController,
+      tenantAdminRecoveryController,
       facilityController,
       membershipController,
       facilitySettingsController,

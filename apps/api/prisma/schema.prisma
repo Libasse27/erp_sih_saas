@@ -759,6 +759,13 @@ enum SuperAdminBreakGlassRequestStatus {
   @@schema("platform")
 }
 
+enum TenantAdminRecoveryRequestStatus {
+  PENDING
+  APPROVED
+
+  @@schema("platform")
+}
+
 /// Recuperation break-glass d'un SUPER_ADMIN (ADR-0005 Amendement 1, O-04 residu 4). Aucune
 /// relation Prisma vers UserAccount (memes raisons qu'AuditEntry : trois references distinctes a
 /// la meme table nommeraient trois relations, et cette table ne doit jamais cascade-supprimer avec
@@ -776,6 +783,27 @@ model SuperAdminBreakGlassRequest {
   @@index([subjectUserAccountId])
   @@index([status])
   @@map("SuperAdminBreakGlassRequest")
+  @@schema("platform")
+}
+
+/// Récupération du premier accès administrateur à un tenant, sous contrôle plateforme à deux
+/// `SUPER_ADMIN` distincts. La vérification d'identité du bénéficiaire reste hors bande (quatre
+/// personnes au total selon 03-open-decisions.md). Aucune relation FK : cette preuve ne cascade
+/// pas avec la suppression d'un compte ou d'un tenant.
+model TenantAdminRecoveryRequest {
+  id                   String                           @id @db.Uuid
+  tenantId             String                           @map("tenant_id") @db.Uuid
+  beneficiaryUserId    String                           @map("beneficiary_user_id") @db.Uuid
+  requestedByUserId    String                           @map("requested_by_user_id") @db.Uuid
+  reason               String
+  status               TenantAdminRecoveryRequestStatus @default(PENDING)
+  approvedByUserId     String?                          @map("approved_by_user_id") @db.Uuid
+  requestedAt          DateTime                         @map("requested_at")
+  approvedAt           DateTime?                        @map("approved_at")
+
+  @@index([tenantId, status])
+  @@index([beneficiaryUserId])
+  @@map("TenantAdminRecoveryRequest")
   @@schema("platform")
 }
 
@@ -888,6 +916,9 @@ enum AuditEventType {
   MEMBERSHIP_REVOKED
   MEMBERSHIP_ROLE_ASSIGNED
   MEMBERSHIP_ROLE_UNASSIGNED
+  /// Récupération d'accès administrateur tenant sous contrôle plateforme (03-open-decisions.md).
+  TENANT_ADMIN_RECOVERY_REQUESTED
+  TENANT_ADMIN_RECOVERY_APPROVED
   /// Etape 11/13 (ADR-0009 §2.2) — cycle de vie commercial de l'abonnement.
   SUBSCRIPTION_TRIAL_STARTED
   SUBSCRIPTION_PLAN_UPGRADE_REQUESTED

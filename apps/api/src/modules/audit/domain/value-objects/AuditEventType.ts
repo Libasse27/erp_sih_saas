@@ -51,6 +51,8 @@ export type AuditEventType =
   // etape) plutot que d'inventer une commande non demandee par ailleurs par l'ADR.
   | 'MEMBERSHIP_ROLE_ASSIGNED'
   | 'MEMBERSHIP_ROLE_UNASSIGNED'
+  | 'TENANT_ADMIN_RECOVERY_REQUESTED'
+  | 'TENANT_ADMIN_RECOVERY_APPROVED'
   // ===== SUBSCRIPTION (ADR-0009 §2.2) =====
   | 'SUBSCRIPTION_TRIAL_STARTED'
   | 'SUBSCRIPTION_PLAN_UPGRADE_REQUESTED'

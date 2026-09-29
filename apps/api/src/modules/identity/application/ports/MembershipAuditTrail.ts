@@ -14,7 +14,9 @@ export type MembershipAuditEventType =
   | 'MEMBERSHIP_GRANTED'
   | 'MEMBERSHIP_REVOKED'
   | 'MEMBERSHIP_ROLE_ASSIGNED'
-  | 'MEMBERSHIP_ROLE_UNASSIGNED';
+  | 'MEMBERSHIP_ROLE_UNASSIGNED'
+  | 'TENANT_ADMIN_RECOVERY_REQUESTED'
+  | 'TENANT_ADMIN_RECOVERY_APPROVED';
 
 /**
  * "Depuis quel contexte" — miroir primitif d'`ActorKind`. `GrantMembershipHandler` porte deja un
@@ -28,12 +30,14 @@ export type MembershipActorKind = 'USER_TENANT' | 'USER_PLATFORM' | 'SYSTEM';
 export interface MembershipAuditRecordInput {
   readonly eventType: MembershipAuditEventType;
   readonly outcome: 'SUCCESS' | 'FAILURE' | 'DENIED';
-  readonly tenantId: string;
+  /** Null uniquement pour les refus plateforme avant qu'un tenant cible fiable soit établi. */
+  readonly tenantId: string | null;
   readonly actorKind: MembershipActorKind;
   readonly actorUserId: string | null;
   readonly actorRoleCodes: readonly string[];
   readonly subjectUserId: string;
   readonly targetId: string;
+  readonly targetType?: 'MEMBERSHIP' | 'HEALTH_FACILITY';
   readonly reason: string | null;
   readonly sessionId: string | null;
   readonly correlationId: string | null;

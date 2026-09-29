@@ -161,6 +161,10 @@ export class InMemoryUserTenantMembershipRepository implements UserTenantMembers
     return membership;
   }
 
+  async lockTenantForAdminRecovery(_tenantId: TenantId): Promise<void> {
+    return undefined;
+  }
+
   async listActiveTenantIdsForUser(userId: UserAccountId): Promise<readonly TenantId[]> {
     const result: TenantId[] = [];
     for (const membership of this.byId.values()) {

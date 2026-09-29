@@ -59,6 +59,14 @@ export class PrismaUserTenantMembershipRepository implements UserTenantMembershi
     return row === null ? null : this.toDomain(row);
   }
 
+  async lockTenantForAdminRecovery(tenantId: TenantId): Promise<void> {
+    const client = resolvePrismaClient(this.prisma);
+    // Verrou advisory transactionnel namespace par la fonctionnalité, indépendant du schéma/table
+    // du module Tenant. Les deux verrous int4 utilisent le même idiome que le chaînage d'audit ;
+    // hashtext peut seulement sur-sérialiser en cas de collision, jamais laisser passer une course.
+    await client.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('tenant-admin-recovery'), hashtext(${tenantId.toString()}))`;
+  }
+
   async listActiveTenantIdsForUser(userId: UserAccountId): Promise<readonly TenantId[]> {
     const client = resolvePrismaClient(this.prisma);
     const rows = await client.userTenantMembership.findMany({

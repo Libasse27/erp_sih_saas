@@ -28,6 +28,9 @@ export interface UserTenantMembershipRepository {
 
   findById(id: UserTenantMembershipId, tenantId: TenantId): Promise<UserTenantMembership | null>;
 
+  /** Sérialise les récupérations d'accès administrateur d'un même tenant ; transaction + RLS requis. */
+  lockTenantForAdminRecovery(tenantId: TenantId): Promise<void>;
+
   listActiveTenantIdsForUser(userId: UserAccountId): Promise<readonly TenantId[]>;
 
   /** Compte des memberships ACTIFS pour un tenant — jamais des roles (regle O-05 derivee, maxUsers). */

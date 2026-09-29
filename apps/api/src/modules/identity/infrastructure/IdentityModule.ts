@@ -19,6 +19,8 @@ import { VerifyMfaChallengeHandler } from '../application/commands/VerifyMfaChal
 import { RefreshSessionHandler } from '../application/commands/RefreshSession.js';
 import { RequestSuperAdminBreakGlassHandler } from '../application/commands/RequestSuperAdminBreakGlass.js';
 import { ApproveSuperAdminBreakGlassHandler } from '../application/commands/ApproveSuperAdminBreakGlass.js';
+import { RequestTenantAdminRecoveryHandler } from '../application/commands/RequestTenantAdminRecovery.js';
+import { ApproveTenantAdminRecoveryHandler } from '../application/commands/ApproveTenantAdminRecovery.js';
 import { createGrantOwnerMembershipOnSubscriptionStartedHandler } from '../application/services/GrantOwnerMembershipOnSubscriptionStarted.js';
 import { SessionContextIssuer } from '../application/services/SessionContextIssuer.js';
 import { ServerContextResolver } from '../application/services/ServerContextResolver.js';
@@ -32,6 +34,7 @@ import type { UserAccountRepository } from '../domain/ports/UserAccountRepositor
 import type { UserTenantMembershipRepository } from '../domain/ports/UserTenantMembershipRepository.js';
 import type { RefreshTokenRepository } from '../domain/ports/RefreshTokenRepository.js';
 import type { SuperAdminBreakGlassRequestRepository } from '../domain/ports/SuperAdminBreakGlassRequestRepository.js';
+import type { TenantAdminRecoveryRequestRepository } from '../domain/ports/TenantAdminRecoveryRequestRepository.js';
 import type { TenantAccessChecker } from '../application/ports/TenantAccessChecker.js';
 import { PgUnitOfWork } from '../../../shared-kernel/infrastructure/persistence/PgUnitOfWork.js';
 import { PrismaMfaEnrollmentRepository } from './persistence/PrismaMfaEnrollmentRepository.js';
@@ -40,6 +43,7 @@ import { PrismaUserAccountRepository } from './persistence/PrismaUserAccountRepo
 import { PrismaUserTenantMembershipRepository } from './persistence/PrismaUserTenantMembershipRepository.js';
 import { PrismaRefreshTokenRepository } from './persistence/PrismaRefreshTokenRepository.js';
 import { PrismaSuperAdminBreakGlassRequestRepository } from './persistence/PrismaSuperAdminBreakGlassRequestRepository.js';
+import { PrismaTenantAdminRecoveryRequestRepository } from './persistence/PrismaTenantAdminRecoveryRequestRepository.js';
 import { Argon2PasswordHasher } from './security/Argon2PasswordHasher.js';
 import { AesGcmSecretCipher } from './security/AesGcmSecretCipher.js';
 import { CryptoRecoveryCodeGenerator } from './security/CryptoRecoveryCodeGenerator.js';
@@ -73,6 +77,7 @@ export interface IdentityModule {
     readonly mfaEnrollments: MfaEnrollmentRepository;
     readonly refreshTokens: RefreshTokenRepository;
     readonly superAdminBreakGlassRequests: SuperAdminBreakGlassRequestRepository;
+    readonly tenantAdminRecoveryRequests: TenantAdminRecoveryRequestRepository;
   };
   readonly unitOfWork: UnitOfWork;
   readonly handlers: {
@@ -90,6 +95,8 @@ export interface IdentityModule {
     readonly refreshSession: RefreshSessionHandler;
     readonly requestSuperAdminBreakGlass: RequestSuperAdminBreakGlassHandler;
     readonly approveSuperAdminBreakGlass: ApproveSuperAdminBreakGlassHandler;
+    readonly requestTenantAdminRecovery: RequestTenantAdminRecoveryHandler;
+    readonly approveTenantAdminRecovery: ApproveTenantAdminRecoveryHandler;
     /** Phase 1, deuxieme increment vertical (permission `membership:administer`). */
     readonly listTenantMemberships: ListTenantMembershipsHandler;
   };
@@ -130,6 +137,7 @@ export function buildIdentityModule(deps: {
   const mfaEnrollments = new PrismaMfaEnrollmentRepository(deps.prisma);
   const refreshTokens = new PrismaRefreshTokenRepository(deps.prisma);
   const superAdminBreakGlassRequests = new PrismaSuperAdminBreakGlassRequestRepository(deps.prisma);
+  const tenantAdminRecoveryRequests = new PrismaTenantAdminRecoveryRequestRepository(deps.prisma);
   const unitOfWork = new PgUnitOfWork(deps.prisma);
   const passwordHasher = new Argon2PasswordHasher();
   const sessionStore = new RedisSessionStore(deps.redis);
@@ -173,7 +181,7 @@ export function buildIdentityModule(deps: {
   );
 
   return {
-    repositories: { userAccounts, memberships, roles, mfaEnrollments, refreshTokens, superAdminBreakGlassRequests },
+    repositories: { userAccounts, memberships, roles, mfaEnrollments, refreshTokens, superAdminBreakGlassRequests, tenantAdminRecoveryRequests },
     unitOfWork,
     handlers: {
       createUserAccount: new CreateUserAccountHandler(
@@ -287,6 +295,28 @@ export function buildIdentityModule(deps: {
         mfaEnrollments,
         refreshTokenIssuer,
         deps.auditTrail,
+        unitOfWork,
+        deps.clock,
+        deps.idGenerator,
+      ),
+      requestTenantAdminRecovery: new RequestTenantAdminRecoveryHandler(
+        sessionStore,
+        userAccounts,
+        deps.tenantAccessChecker,
+        tenantAdminRecoveryRequests,
+        deps.membershipAuditTrail,
+        unitOfWork,
+        deps.clock,
+        deps.idGenerator,
+      ),
+      approveTenantAdminRecovery: new ApproveTenantAdminRecoveryHandler(
+        sessionStore,
+        tenantAdminRecoveryRequests,
+        userAccounts,
+        deps.tenantAccessChecker,
+        memberships,
+        roles,
+        deps.membershipAuditTrail,
         unitOfWork,
         deps.clock,
         deps.idGenerator,

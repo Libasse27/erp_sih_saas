@@ -154,6 +154,13 @@ describe('ADR-0001 §3.3 — garde-fou generique : toute table du schema platfor
     // SUPER_ADMIN — meme regime que MfaEnrollment/RefreshToken (concept d'administration
     // plateforme, jamais tenant-scope, aucun `tenantId` sur cet agregat).
     'SuperAdminBreakGlassRequest',
+    // Recuperation d'acces administrateur d'un tenant sans admin actif (03-open-decisions.md,
+    // "Membership — invitations ordinaires et recuperation d'acces") — meme regime que
+    // SuperAdminBreakGlassRequest : concept d'administration plateforme, acces controle par
+    // l'application (session PLATFORM + MFA, quorum a deux SUPER_ADMIN distincts), jamais
+    // tenant-scope malgre le `tenant_id` porte par la ligne (cible de la recuperation, pas un
+    // filtre RLS).
+    'TenantAdminRecoveryRequest',
   ]);
 
   beforeAll(async () => {
