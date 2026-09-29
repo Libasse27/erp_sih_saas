@@ -216,6 +216,16 @@ export function createApp(root: CompositionRoot): Express {
     asyncRoute(root.presentation.facilityController.rename),
   );
 
+  // Phase 1, deuxieme increment vertical (permission `membership:administer`) : consultation
+  // paginee des memberships de l'etablissement du tenant courant. `tenantId` n'est JAMAIS dans la
+  // query — toujours "mes propres memberships", derive du `ServerContext` serveur (voir
+  // MembershipController.ts). Lecture seule : pas de `parseJsonBody` (GET).
+  app.get(
+    '/api/v1/memberships',
+    root.presentation.requireAuthenticatedContext,
+    asyncRoute(root.presentation.membershipController.list),
+  );
+
   // Monte APRES toutes les routes (contrat Express des middlewares d'erreur) — voir
   // `createErrorHandler` ci-dessus pour le detail de ce qu'il couvre et pourquoi.
   app.use(createErrorHandler(root.logger));

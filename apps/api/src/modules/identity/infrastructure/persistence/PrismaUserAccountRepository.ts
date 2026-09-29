@@ -39,6 +39,15 @@ export class PrismaUserAccountRepository implements UserAccountRepository {
     return rows.map((row) => this.toDomain(row));
   }
 
+  async findByIds(ids: readonly UserAccountId[]): Promise<UserAccount[]> {
+    if (ids.length === 0) {
+      return [];
+    }
+    const client = resolvePrismaClient(this.prisma);
+    const rows = await client.userAccount.findMany({ where: { id: { in: ids.map((id) => id.toString()) } } });
+    return rows.map((row) => this.toDomain(row));
+  }
+
   /**
    * `createMany({ skipDuplicates: true })` (`INSERT ... ON CONFLICT DO NOTHING`) PLUTOT qu'un
    * `upsert()`/`create()` dont on rattraperait un `P2002` — meme idiome que

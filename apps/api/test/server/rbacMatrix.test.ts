@@ -6,6 +6,8 @@ import { authorizeAuditRead } from '../../src/modules/audit/application/Authoriz
 import type { AuditReadPrincipal } from '../../src/modules/audit/application/AuditReadPrincipal.js';
 import { authorizeTenantConfigAdminister } from '../../src/modules/tenant/application/AuthorizeTenantConfigAdminister.js';
 import type { TenantConfigPrincipal } from '../../src/modules/tenant/application/TenantConfigPrincipal.js';
+import { authorizeMembershipAdminister } from '../../src/modules/identity/application/AuthorizeMembershipAdminister.js';
+import type { MembershipAdminPrincipal } from '../../src/modules/identity/application/MembershipAdminPrincipal.js';
 import { ForceMfaReEnrollmentHandler, type ForceMfaReEnrollmentError } from '../../src/modules/identity/application/commands/ForceMfaReEnrollment.js';
 import { MfaEnrollment } from '../../src/modules/identity/domain/MfaEnrollment.js';
 import { UserAccount } from '../../src/modules/identity/domain/UserAccount.js';
@@ -39,7 +41,7 @@ import {
  * §"Criteres de sortie communs" : "RBAC — Chaque role non autorise est refuse sur chaque
  * operation").
  *
- * Perimetre couvert : les TROIS operations reellement gardees par une verification de
+ * Perimetre couvert : les QUATRE operations reellement gardees par une verification de
  * permission a ce stade du depot (verifie par recherche exhaustive de
  * `permissionCodes.includes(...)` dans src/) :
  *   1. `audit:read` — `authorizeAuditRead` (module audit), exposee par `GET /api/v1/audit-entries`.
@@ -48,20 +50,25 @@ import {
  *      operation metier reelle et gardee.
  *   3. `tenant-config:administer` — `authorizeTenantConfigAdminister` (module tenant, Phase 1
  *      premier increment vertical), exposee par `GET`/`PATCH /api/v1/facility`.
- * `GrantMembershipHandler`/`RevokeMembershipHandler` ne portent AUCUNE verification de permission
- * a ce stade (aucun endpoint interactif ne les invoque encore — seuls la Saga de provisioning et
- * des appels systeme le font) : les inclure ici produirait une matrice qui teste une regle qui
- * n'existe pas dans le code, contrairement a la consigne "base-toi sur le catalogue de permissions
- * REEL". A etendre des qu'un endpoint de gestion interactive des memberships/roles sera livre.
+ *   4. `membership:administer` — `authorizeMembershipAdminister` (module identity, Phase 1
+ *      deuxieme increment vertical), exposee par `GET /api/v1/memberships`.
+ * `GrantMembershipHandler`/`RevokeMembershipHandler` (mutations) ne portent AUCUNE verification
+ * de permission a ce stade (aucun endpoint interactif ne les invoque encore — seuls la Saga de
+ * provisioning et des appels systeme le font) : les inclure ici produirait une matrice qui teste
+ * une regle qui n'existe pas dans le code, contrairement a la consigne "base-toi sur le catalogue
+ * de permissions REEL". A etendre des qu'un endpoint de gestion interactive (grant/revoke/role)
+ * sera livre.
  *
  * `SUPER_ADMIN` est EXCLU de la boucle : il n'est JAMAIS rattache via un `UserTenantMembership`
  * (voir `SystemRoleCatalog.ts` et `UserAccount.ts` — son autorisation plateforme decoule de
  * `principal.kind === 'PLATFORM'`, jamais d'une permission testee dans une session TENANT). Le
- * refus (`tenant-config:administer`) OU bypass (`audit:read`/`mfa:reset`) PLATFORM des trois
- * operations ci-dessous est deja couvert par des tests dedies (`auditQueryIsolation.test.ts`,
- * `ForceMfaReEnrollment.test.ts` — cas "succes (acteur PLATFORM...)", `AuthorizeTenantConfigAdminister.test.ts`/
- * `facilityHttp.test.ts` — refus EXPLICITE, jamais un bypass) et n'a pas a etre reteste ici : cette
- * matrice porte specifiquement sur les 17 roles TENANT.
+ * refus (`tenant-config:administer`/`membership:administer`) OU bypass (`audit:read`/`mfa:reset`)
+ * PLATFORM des quatre operations ci-dessous est deja couvert par des tests dedies
+ * (`auditQueryIsolation.test.ts`, `ForceMfaReEnrollment.test.ts` — cas "succes (acteur
+ * PLATFORM...)", `AuthorizeTenantConfigAdminister.test.ts`/`facilityHttp.test.ts` — refus
+ * EXPLICITE, `AuthorizeMembershipAdminister.test.ts`/`membershipHttp.test.ts` — refus EXPLICITE,
+ * jamais un bypass) et n'a pas a etre reteste ici : cette matrice porte specifiquement sur les 17
+ * roles TENANT.
  *
  * Aucune I/O (doublures en memoire uniquement, memes classes REELLES que
  * `ForceMfaReEnrollment.test.ts`/`tenantAccessCheckerComposition.test.ts`) — la regle de decision
@@ -79,10 +86,11 @@ describe('Garde-fou catalogue — la matrice ne peut pas degenerer silencieuseme
     expect(TENANT_ROLES).toHaveLength(17);
   });
 
-  it('au moins un role TENANT porte audit:read, mfa:reset et tenant-config:administer (sinon la matrice refuserait tout, faussement verte)', () => {
+  it('au moins un role TENANT porte audit:read, mfa:reset, tenant-config:administer et membership:administer (sinon la matrice refuserait tout, faussement verte)', () => {
     expect(TENANT_ROLES.some((role) => role.permissionCodes.includes('audit:read'))).toBe(true);
     expect(TENANT_ROLES.some((role) => role.permissionCodes.includes('mfa:reset'))).toBe(true);
     expect(TENANT_ROLES.some((role) => role.permissionCodes.includes('tenant-config:administer'))).toBe(true);
+    expect(TENANT_ROLES.some((role) => role.permissionCodes.includes('membership:administer'))).toBe(true);
   });
 });
 
@@ -260,6 +268,48 @@ describe('Matrice RBAC — GET/PATCH /api/v1/facility (permission tenant-config:
 
   it('une session PLATFORM est TOUJOURS refusee, quel que soit tout permissionCodes hypothetique — branche nommee, jamais un fallthrough', () => {
     const result = authorizeTenantConfigAdminister({ kind: 'PLATFORM', actorUserId: uuidAt(1) });
+    expect(result.isFailure()).toBe(true);
+    expect(result.getError()).toBe('FORBIDDEN');
+  });
+});
+
+describe('Matrice RBAC — GET /api/v1/memberships (permission membership:administer, authorizeMembershipAdminister)', () => {
+  function principalFor(role: SystemRoleDefinition): MembershipAdminPrincipal {
+    return {
+      kind: 'TENANT',
+      actorUserId: uuidAt(1),
+      tenantId: uuidAt(2),
+      roleCodes: [role.code],
+      permissionCodes: role.permissionCodes,
+    };
+  }
+
+  for (const role of TENANT_ROLES) {
+    const expectAllowed = role.permissionCodes.includes('membership:administer');
+    it(`${role.code} — ${expectAllowed ? 'AUTORISE' : 'REFUSE'} (permissionCodes du catalogue : [${role.permissionCodes.join(', ')}])`, () => {
+      const result = authorizeMembershipAdminister(principalFor(role));
+      expect(result.isSuccess()).toBe(expectAllowed);
+      if (!expectAllowed) {
+        expect(result.isFailure() && result.getError()).toBe('FORBIDDEN');
+      }
+    });
+  }
+
+  it('un membership sans aucun role assigne (permissionCodes vide) est refuse — deni par defaut, jamais un acces implicite', () => {
+    const principal: MembershipAdminPrincipal = {
+      kind: 'TENANT',
+      actorUserId: uuidAt(1),
+      tenantId: uuidAt(2),
+      roleCodes: [],
+      permissionCodes: [],
+    };
+    const result = authorizeMembershipAdminister(principal);
+    expect(result.isFailure()).toBe(true);
+    expect(result.getError()).toBe('FORBIDDEN');
+  });
+
+  it('une session PLATFORM est TOUJOURS refusee, quel que soit tout permissionCodes hypothetique — branche nommee, jamais un fallthrough', () => {
+    const result = authorizeMembershipAdminister({ kind: 'PLATFORM', actorUserId: uuidAt(1) });
     expect(result.isFailure()).toBe(true);
     expect(result.getError()).toBe('FORBIDDEN');
   });

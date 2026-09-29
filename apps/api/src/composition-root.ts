@@ -34,6 +34,8 @@ import { AuditEntryController, type AuditHttpLocals } from './modules/audit/pres
 import { SessionController } from './modules/identity/presentation/http/SessionController.js';
 import { MfaEnrollmentController } from './modules/identity/presentation/http/MfaEnrollmentController.js';
 import { SuperAdminBreakGlassController } from './modules/identity/presentation/http/SuperAdminBreakGlassController.js';
+import { MembershipController } from './modules/identity/presentation/http/MembershipController.js';
+import type { MembershipAdminPrincipal } from './modules/identity/application/MembershipAdminPrincipal.js';
 import { RegistrationController } from './presentation/http/RegistrationController.js';
 import { RedisRateLimiter } from './shared-kernel/infrastructure/RedisRateLimiter.js';
 import { createRateLimitMiddleware } from './shared-kernel/infrastructure/RateLimitMiddleware.js';
@@ -396,12 +398,13 @@ class AuditModuleBackedBillingAuditTrail implements BillingAuditTrail {
  * `sessionId` depuis `Authorization: Bearer <sessionId>` (jamais un cookie, §8.3), appelle
  * `ServerContextResolver.resolve()` — LE point de passage obligatoire existant, jamais un second
  * chemin de resolution — et traduit :
- *   `SESSION_NOT_FOUND` -> 401 ; `MFA_REQUIRED` -> 403 `mfa_required` ; succes -> DEUX principaux
- *   attaches a `res.locals` (voir `AuditHttpLocals`/`FacilityHttpLocals`), jamais l'agregat
- *   `ServerContext` lui-meme (chaque module ne connait que son PROPRE type de principal —
- *   `AuditReadPrincipal` pour `audit`, `TenantConfigPrincipal` pour `tenant`, Phase 1 premier
- *   increment vertical). Les deux principaux portent structurellement les memes champs pour une
- *   session TENANT (`tenantId`/`roleCodes`/`permissionCodes`) : DEUX types nominaux distincts,
+ *   `SESSION_NOT_FOUND` -> 401 ; `MFA_REQUIRED` -> 403 `mfa_required` ; succes -> TROIS principaux
+ *   attaches a `res.locals` (voir `AuditHttpLocals`/`FacilityHttpLocals`/`MembershipHttpLocals`),
+ *   jamais l'agregat `ServerContext` lui-meme (chaque module ne connait que son PROPRE type de
+ *   principal — `AuditReadPrincipal` pour `audit`, `TenantConfigPrincipal` pour `tenant` (Phase 1
+ *   premier increment vertical), `MembershipAdminPrincipal` pour `identity` (Phase 1 deuxieme
+ *   increment vertical)). Les trois principaux portent structurellement les memes champs pour une
+ *   session TENANT (`tenantId`/`roleCodes`/`permissionCodes`) : TROIS types nominaux distincts,
  *   jamais un seul type partage entre modules (meme discipline que le reste de ce fichier).
  * Une session `MFA_PENDING` ne produit donc JAMAIS de principal : `ServerContextResolver.resolve()`
  * retourne `MFA_REQUIRED` AVANT toute construction d'objet porteur de tenant/acteur, aucune
@@ -459,10 +462,28 @@ function buildRequireAuthenticatedContext(serverContextResolver: ServerContextRe
               roleCodes: context.session.roleCodes,
               permissionCodes: context.session.permissionCodes,
             };
+      // Phase 1, deuxieme increment vertical (permission `membership:administer`) — TROISIEME
+      // type DISTINCT (`identity` ne reutilise jamais `AuditReadPrincipal`/`TenantConfigPrincipal`,
+      // meme si les champs coincident structurellement pour une session TENANT, voir le
+      // commentaire de tete de cette fonction).
+      const membershipAdminPrincipal: MembershipAdminPrincipal =
+        context.kind === 'PLATFORM'
+          ? { kind: 'PLATFORM', actorUserId: context.actorUserId }
+          : {
+              kind: 'TENANT',
+              actorUserId: context.actorUserId,
+              tenantId: context.tenantId.toString(),
+              roleCodes: context.session.roleCodes,
+              permissionCodes: context.session.permissionCodes,
+            };
 
-      const locals: AuditHttpLocals & { readonly tenantConfigPrincipal: TenantConfigPrincipal } = {
+      const locals: AuditHttpLocals & {
+        readonly tenantConfigPrincipal: TenantConfigPrincipal;
+        readonly membershipAdminPrincipal: MembershipAdminPrincipal;
+      } = {
         auditPrincipal,
         tenantConfigPrincipal,
+        membershipAdminPrincipal,
         sessionId,
       };
       Object.assign(res.locals, locals);
@@ -556,6 +577,8 @@ export interface CompositionRoot {
     readonly superAdminBreakGlassController: SuperAdminBreakGlassController;
     /** Phase 1, premier increment vertical (permission `tenant-config:administer`) — mono-module (tenant seul), derriere `requireAuthenticatedContext`. */
     readonly facilityController: FacilityController;
+    /** Phase 1, deuxieme increment vertical (permission `membership:administer`) — mono-module (identity seul), derriere `requireAuthenticatedContext`. */
+    readonly membershipController: MembershipController;
     /** ADR-0010 §8 — un middleware par famille de limite, valeurs dans shared-kernel/domain/RateLimitTuning.ts (non definitives). */
     readonly rateLimitRegistrations: RequestHandler;
     readonly rateLimitLogin: RequestHandler;
@@ -974,6 +997,9 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
     tenant.handlers.getHealthFacility,
     tenant.handlers.renameHealthFacility,
   );
+  // Phase 1, deuxieme increment vertical (permission `membership:administer`) — mono-module
+  // (identity SEUL), meme discipline de cablage que `facilityController` ci-dessus.
+  const membershipController = new MembershipController(identity.handlers.listTenantMemberships);
 
   // Limiteur de debit PARTAGE (ADR-0010 §8/§12 point 4) — port `RateLimiter` (shared-kernel),
   // implementation Redis REELLE construite plus haut (`rateLimiter`, avant meme le module
@@ -1059,6 +1085,7 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
       mfaEnrollmentController,
       superAdminBreakGlassController,
       facilityController,
+      membershipController,
       rateLimitRegistrations,
       rateLimitLogin,
       rateLimitMfa,

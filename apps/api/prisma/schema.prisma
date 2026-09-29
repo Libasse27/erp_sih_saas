@@ -118,6 +118,11 @@ model UserTenantMembership {
   // en plus du controle applicatif de GrantMembershipHandler).
   @@index([tenantId, status])
   @@index([userId, tenantId])
+  // Pagination keyset de `listByTenant` (GET /api/v1/memberships) : `[tenantId, status]` ci-dessus
+  // sert le filtre d'egalite mais ne couvre pas `ORDER BY joinedAt DESC, id DESC` — un index
+  // B-tree ne fournit un ordre que sur SES PROPRES colonnes. Meme motif que
+  // `AuditEntry_tenant_id_occurred_at_id_idx` (schema.prisma AuditEntry, module audit).
+  @@index([tenantId, joinedAt(sort: Desc), id(sort: Desc)])
   @@map("UserTenantMembership")
   @@schema("public")
 }

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
-  title: SIH SaaS API — Contrat HTTP complet de la Phase 0 (SaaS Core) et du premier increment de Phase 1
-  version: 0.4.0
+  title: SIH SaaS API — Contrat HTTP complet de la Phase 0 (SaaS Core) et des deux premiers increments de Phase 1
+  version: 0.5.0
   description: >
     Premier fichier OpenAPI de ce depot (Phase 0, etape 5/13 : confirmation de paiement
     d'abonnement SaaS serveur-a-serveur, O-25.5). Etendu a l'etape 11/13 (ADR-0009) avec le
@@ -13,7 +13,10 @@ info:
     Phase 1 (permission `tenant-config:administer`, decision de gouvernance 2026-09-28 sur le
     passage Phase 0 -> Phase 1) avec `GET`/`PATCH /api/v1/facility` : consultation et renommage de
     l'identite de l'etablissement du tenant courant (`HealthFacility`), PREMIER endpoint HTTP du
-    module `tenant`. Document PUREMENT DESCRIPTIF : aucune
+    module `tenant`. Etendu au deuxieme increment vertical de Phase 1 (permission
+    `membership:administer`, meme decision de gouvernance) avec `GET /api/v1/memberships` :
+    consultation paginee des memberships de l'etablissement du tenant courant, PREMIER endpoint
+    HTTP de ce type pour le module `identity`. Document PUREMENT DESCRIPTIF : aucune
     route ici n'introduit un comportement nouveau — chaque section reference l'ADR qui a
     reellement tranche le comportement documente, verifie par relecture du controleur et des
     tests d'integration existants (jamais suppose). Aucune route CRUD Payment/PlatformInvoice/
@@ -1187,6 +1190,96 @@ paths:
               example:
                 error: internal_error
 
+  /api/v1/memberships:
+    get:
+      operationId: listTenantMemberships
+      tags: [Memberships]
+      summary: Consulter les memberships de l'etablissement du tenant courant (Phase 1, deuxieme increment vertical)
+      description: >
+        DEUXIEME endpoint HTTP du module `identity` de ce type — permission
+        `membership:administer`, deja declaree au catalogue de roles (`SystemRoleCatalog.ts`,
+        role `ADMIN_ETABLISSEMENT`) mais jusqu'ici inutilisee par aucune route. `tenantId` n'est
+        JAMAIS lu depuis un parametre de requete : cette route retourne TOUJOURS "les memberships
+        de mon propre etablissement", derive exclusivement du `ServerContext` serveur
+        (`Authorization: Bearer`). Une session `PLATFORM` est refusee explicitement (`403`) —
+        cette permission est portee EXCLUSIVEMENT par un role TENANT (`ADMIN_ETABLISSEMENT`), une
+        session `PLATFORM` n'a structurellement aucun tenant sur lequel l'exercer. Pagination
+        `keyset` opaque (base64url, meme convention que `GET /api/v1/audit-entries`) — jamais un
+        `OFFSET`. Lecture seule, aucune entree d'audit n'est produite (convention du depot : seules
+        les mutations sont auditees).
+      security:
+        - bearerSessionAuth: []
+      parameters:
+        - name: status
+          in: query
+          description: Filtre sur le statut du membership.
+          schema:
+            type: string
+            enum: [ACTIVE, SUSPENDED, REVOKED]
+          example: ACTIVE
+        - name: cursor
+          in: query
+          description: Curseur opaque `keyset` (base64url) de la page precedente — jamais un `OFFSET`.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Defaut 50, plafond 200. Un depassement est un rejet explicite (`400`), jamais un plafonnement silencieux.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: Page de memberships de l'etablissement du tenant courant, les plus recemment rejoints en premier.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MembershipListResponse'
+              example:
+                memberships:
+                  - membershipId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    userId: 9c858901-8a57-4791-81fe-4c455b099bc9
+                    email: fatou.ndiaye@hopital-dakar.sn
+                    roleCodes: [MEDECIN]
+                    status: ACTIVE
+                    joinedAt: '2026-08-24T10:00:00.000Z'
+                    leftAt: null
+                nextCursor: null
+        '400':
+          description: Query malformee (`.strict()` — champ inconnu, notamment `tenantId`), curseur invalide, ou `limit` hors bornes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: invalid_request
+        '401':
+          description: Aucune session valide.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: unauthenticated
+        '403':
+          description: Authentifie mais non autorise — `membership:administer` absent, OU session `PLATFORM` (refus explicite, voir description).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: forbidden
+        '500':
+          description: Defaillance technique — jamais de detail interne expose.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: internal_error
+
 components:
   securitySchemes:
     bearerSessionAuth:
@@ -1450,3 +1543,46 @@ components:
         createdAt:
           type: string
           format: date-time
+
+    MembershipDto:
+      type: object
+      description: >
+        DTO explicite (jamais l'agregat `UserTenantMembership` ni une ligne Prisma brute exposee —
+        regle 6 du system prompt), Phase 1 deuxieme increment vertical — element de reponse de
+        `GET /api/v1/memberships` (`MembershipDto.ts`).
+      required: [membershipId, userId, email, roleCodes, status, joinedAt, leftAt]
+      properties:
+        membershipId:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        roleCodes:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+          enum: [ACTIVE, SUSPENDED, REVOKED]
+        joinedAt:
+          type: string
+          format: date-time
+        leftAt:
+          type: [string, 'null']
+          format: date-time
+
+    MembershipListResponse:
+      type: object
+      required: [memberships, nextCursor]
+      properties:
+        memberships:
+          type: array
+          items:
+            $ref: '#/components/schemas/MembershipDto'
+        nextCursor:
+          type: [string, 'null']
+          description: Curseur opaque (base64url) de la page suivante — `null` si la page courante est la derniere.

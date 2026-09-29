@@ -35,4 +35,14 @@ export interface UserAccountRepository {
    * 'SUPER_ADMIN'`", jamais un filtre supplementaire invente par anticipation.
    */
   findAllSuperAdmins(): Promise<readonly UserAccount[]>;
+
+  /**
+   * Lookup PAR LOT (Phase 1, deuxieme increment vertical — enrichissement de
+   * `GET /api/v1/memberships` avec l'email de chaque membre) — meme discipline que
+   * `RoleRepository.findByIds` (module identity, meme fichier de reference) : jamais une boucle
+   * de `findById()` en N+1 (anti-pattern §12 du system prompt). Ordre de retour non garanti ; un
+   * `id` sans compte correspondant (ou duplique) est simplement absent du resultat, jamais une
+   * erreur.
+   */
+  findByIds(ids: readonly UserAccountId[]): Promise<UserAccount[]>;
 }

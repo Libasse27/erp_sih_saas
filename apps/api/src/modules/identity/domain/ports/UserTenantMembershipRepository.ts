@@ -1,5 +1,7 @@
 import type { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantId.js';
+import type { MembershipPageRequest, UserTenantMembershipPage } from '../MembershipPage.js';
 import type { UserTenantMembership } from '../UserTenantMembership.js';
+import type { MembershipStatus } from '../value-objects/MembershipStatus.js';
 import type { RoleId } from '../value-objects/RoleId.js';
 import type { UserAccountId } from '../value-objects/UserAccountId.js';
 import type { UserTenantMembershipId } from '../value-objects/UserTenantMembershipId.js';
@@ -38,6 +40,21 @@ export interface UserTenantMembershipRepository {
    * que les autres methodes de ce port.
    */
   listActiveByTenantAndRole(tenantId: TenantId, roleId: RoleId): Promise<readonly UserTenantMembership[]>;
+
+  /**
+   * Liste PAGINEE (keyset `(joinedAt, id)` DESC, meme convention que
+   * `AuditEntryRepository.listForTenant`/`domain/AuditPage.ts`, module `audit` — voir
+   * `domain/MembershipCursor.ts`/`domain/MembershipPage.ts`) des memberships d'un tenant,
+   * filtrage optionnel par statut — Phase 1, deuxieme increment vertical (permission
+   * `membership:administer`). `tenantId` POSITIONNEL et OBLIGATOIRE (meme discipline que les
+   * autres methodes de ce port) : le RLS FORCE reste le filet de securite, jamais le seul filtre
+   * (couche 3, ADR-0001 §3.2).
+   */
+  listByTenant(
+    tenantId: TenantId,
+    filter: { readonly status?: MembershipStatus },
+    page: MembershipPageRequest,
+  ): Promise<UserTenantMembershipPage>;
 
   save(membership: UserTenantMembership, tenantId: TenantId): Promise<void>;
 }

@@ -1,9 +1,11 @@
-import type { PrismaClient } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
 import type { Clock } from '../../../../shared-kernel/domain/ports/Clock.js';
 import type { IdGenerator } from '../../../../shared-kernel/domain/ports/IdGenerator.js';
 import { TenantId } from '../../../../shared-kernel/domain/value-objects/TenantId.js';
 import type { UserTenantMembershipRepository } from '../../domain/ports/UserTenantMembershipRepository.js';
 import { UserTenantMembership } from '../../domain/UserTenantMembership.js';
+import { encodeMembershipCursor } from '../../domain/MembershipCursor.js';
+import { MEMBERSHIP_PAGE_MAX_LIMIT, type MembershipPageRequest, type UserTenantMembershipPage } from '../../domain/MembershipPage.js';
 import type { MembershipStatus } from '../../domain/value-objects/MembershipStatus.js';
 import { RoleId } from '../../domain/value-objects/RoleId.js';
 import { UserAccountId } from '../../domain/value-objects/UserAccountId.js';
@@ -84,6 +86,51 @@ export class PrismaUserTenantMembershipRepository implements UserTenantMembershi
       include: { roles: true },
     });
     return rows.map((row) => this.toDomain(row));
+  }
+
+  /**
+   * Coeur de pagination `keyset` (meme convention que `PrismaAuditEntryRepository.listInternal`,
+   * module `audit`) : tri `(joined_at DESC, id DESC)`, curseur OPAQUE deja decode par l'appelant
+   * (query handler) — le filtre `tenantId` est TOUJOURS reapplique ICI, en plus du curseur, a
+   * chaque page : "le curseur est une position, jamais une autorisation". `limit` est reborne
+   * DEFENSIVEMENT ici (`Math.min`, couche 3 de la defense en profondeur, ADR-0001 §3.2) meme si
+   * le query handler l'a deja valide — jamais une confiance aveugle dans l'appelant.
+   */
+  async listByTenant(
+    tenantId: TenantId,
+    filter: { readonly status?: MembershipStatus },
+    page: MembershipPageRequest,
+  ): Promise<UserTenantMembershipPage> {
+    const client = resolvePrismaClient(this.prisma);
+    const limit = Math.min(page.limit, MEMBERSHIP_PAGE_MAX_LIMIT);
+
+    const where: Prisma.UserTenantMembershipWhereInput = { tenantId: tenantId.toString() };
+    if (filter.status !== undefined) {
+      where.status = filter.status;
+    }
+    if (page.cursor !== null) {
+      where.OR = [
+        { joinedAt: { lt: page.cursor.joinedAt } },
+        { joinedAt: page.cursor.joinedAt, id: { lt: page.cursor.id } },
+      ];
+    }
+
+    const rows = await client.userTenantMembership.findMany({
+      where,
+      include: { roles: true },
+      orderBy: [{ joinedAt: 'desc' }, { id: 'desc' }],
+      take: limit + 1,
+    });
+
+    const hasMore = rows.length > limit;
+    const pageRows = hasMore ? rows.slice(0, limit) : rows;
+    const lastRow = pageRows[pageRows.length - 1];
+    const nextCursor =
+      hasMore && lastRow !== undefined
+        ? encodeMembershipCursor({ joinedAt: lastRow.joinedAt.toISOString(), id: lastRow.id })
+        : null;
+
+    return { memberships: pageRows.map((row) => this.toDomain(row)), nextCursor };
   }
 
   async save(membership: UserTenantMembership, tenantId: TenantId): Promise<void> {

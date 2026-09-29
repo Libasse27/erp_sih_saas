@@ -10,6 +10,7 @@ import { ConfirmMfaEnrollmentHandler } from '../application/commands/ConfirmMfaE
 import { CreateUserAccountHandler } from '../application/commands/CreateUserAccount.js';
 import { ForceMfaReEnrollmentHandler } from '../application/commands/ForceMfaReEnrollment.js';
 import { GrantMembershipHandler } from '../application/commands/GrantMembership.js';
+import { ListTenantMembershipsHandler } from '../application/queries/ListTenantMemberships.js';
 import { RegenerateMfaRecoveryCodesHandler } from '../application/commands/RegenerateMfaRecoveryCodes.js';
 import { ResolveTenantContextHandler } from '../application/commands/ResolveTenantContext.js';
 import { RevokeMembershipHandler } from '../application/commands/RevokeMembership.js';
@@ -89,6 +90,8 @@ export interface IdentityModule {
     readonly refreshSession: RefreshSessionHandler;
     readonly requestSuperAdminBreakGlass: RequestSuperAdminBreakGlassHandler;
     readonly approveSuperAdminBreakGlass: ApproveSuperAdminBreakGlassHandler;
+    /** Phase 1, deuxieme increment vertical (permission `membership:administer`). */
+    readonly listTenantMemberships: ListTenantMembershipsHandler;
   };
   /** Consommateurs Outbox exposes par ce module — cables UNIQUEMENT dans composition-root.ts. */
   readonly outboxHandlers: {
@@ -288,6 +291,7 @@ export function buildIdentityModule(deps: {
         deps.clock,
         deps.idGenerator,
       ),
+      listTenantMemberships: new ListTenantMembershipsHandler(memberships, userAccounts, roles, unitOfWork),
     },
     outboxHandlers: {
       grantOwnerMembershipOnSubscriptionStarted: createGrantOwnerMembershipOnSubscriptionStartedHandler({

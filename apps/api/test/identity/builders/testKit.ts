@@ -1,6 +1,6 @@
 import type { Clock } from '../../../src/shared-kernel/domain/ports/Clock.js';
 import type { IdGenerator } from '../../../src/shared-kernel/domain/ports/IdGenerator.js';
-import type { UnitOfWork } from '../../../src/shared-kernel/application/UnitOfWork.js';
+import type { UnitOfWork, UnitOfWorkContext } from '../../../src/shared-kernel/application/UnitOfWork.js';
 import type { TenantId } from '../../../src/shared-kernel/domain/value-objects/TenantId.js';
 import type { PasswordHasher } from '../../../src/modules/identity/domain/ports/PasswordHasher.js';
 import type { RoleRepository } from '../../../src/modules/identity/domain/ports/RoleRepository.js';
@@ -10,6 +10,9 @@ import type { UserTenantMembershipRepository } from '../../../src/modules/identi
 import type { UserAccount } from '../../../src/modules/identity/domain/UserAccount.js';
 import type { UserTenantMembership } from '../../../src/modules/identity/domain/UserTenantMembership.js';
 import type { Role } from '../../../src/modules/identity/domain/Role.js';
+import { encodeMembershipCursor } from '../../../src/modules/identity/domain/MembershipCursor.js';
+import { MEMBERSHIP_PAGE_MAX_LIMIT, type MembershipPageRequest, type UserTenantMembershipPage } from '../../../src/modules/identity/domain/MembershipPage.js';
+import type { MembershipStatus } from '../../../src/modules/identity/domain/value-objects/MembershipStatus.js';
 import { PasswordHash } from '../../../src/modules/identity/domain/value-objects/PasswordHash.js';
 import { UserAccountId } from '../../../src/modules/identity/domain/value-objects/UserAccountId.js';
 import { UserTenantMembershipId } from '../../../src/modules/identity/domain/value-objects/UserTenantMembershipId.js';
@@ -75,6 +78,15 @@ export function uuidAt(counter: number): string {
 
 export class InMemoryUnitOfWork implements UnitOfWork {
   /**
+   * Dernier `UnitOfWorkContext` recu par `withTransaction()` (ajoute pour `ListTenantMemberships.test.ts`
+   * — meme discipline que `test/tenant/builders/testKit.ts::InMemoryUnitOfWork.lastContext`,
+   * duplication deliberee, §9.2 : chaque module garde sa suite de test independante) — permet a un
+   * test unitaire de handler de prouver qu'une lecture tenant-scopee est bien passee par une
+   * transaction positionnant `tenantId` (RLS), sans I/O reelle.
+   */
+  public lastContext: UnitOfWorkContext | undefined;
+
+  /**
    * Profondeur de transaction courante (0 = hors transaction, incremente/decremente autour de
    * `work()`). Expose uniquement pour permettre a `InMemoryAuditTrail` (quand un test lui passe
    * CETTE MEME instance en construction) de detecter un appel `record()` hors transaction — c'est
@@ -88,7 +100,8 @@ export class InMemoryUnitOfWork implements UnitOfWork {
     return this.depth;
   }
 
-  async withTransaction<T>(work: () => Promise<T>): Promise<T> {
+  async withTransaction<T>(work: () => Promise<T>, context?: UnitOfWorkContext): Promise<T> {
+    this.lastContext = context;
     this.depth += 1;
     try {
       return await work();
@@ -120,6 +133,11 @@ export class InMemoryUserAccountRepository implements UserAccountRepository {
 
   async findAllSuperAdmins(): Promise<readonly UserAccount[]> {
     return [...this.byId.values()].filter((account) => account.isSuperAdmin());
+  }
+
+  async findByIds(ids: readonly UserAccountId[]): Promise<UserAccount[]> {
+    const wanted = new Set(ids.map((id) => id.toString()));
+    return [...this.byId.values()].filter((account) => wanted.has(account.id.toString()));
   }
 }
 
@@ -171,6 +189,58 @@ export class InMemoryUserTenantMembershipRepository implements UserTenantMembers
       }
     }
     return result;
+  }
+
+  /**
+   * Meme convention `keyset` `(joinedAt DESC, id DESC)` que `PrismaUserTenantMembershipRepository`
+   * (couple `(joinedAt, id)`, jamais un `OFFSET`) — mono-thread, tri/filtrage en memoire, aucune
+   * concurrence reelle possible en test unitaire (voir ce fichier pour la variante Postgres reelle,
+   * couverte par un test d'integration dedie).
+   */
+  async listByTenant(
+    tenantId: TenantId,
+    filter: { readonly status?: MembershipStatus },
+    page: MembershipPageRequest,
+  ): Promise<UserTenantMembershipPage> {
+    const limit = Math.min(page.limit, MEMBERSHIP_PAGE_MAX_LIMIT);
+
+    const filtered = [...this.byId.values()].filter((membership) => {
+      if (!membership.tenantId.equals(tenantId)) {
+        return false;
+      }
+      if (filter.status !== undefined && membership.status !== filter.status) {
+        return false;
+      }
+      if (page.cursor !== null) {
+        const cursorTime = page.cursor.joinedAt.getTime();
+        const membershipTime = membership.joinedAt.getTime();
+        if (membershipTime > cursorTime) {
+          return false;
+        }
+        if (membershipTime === cursorTime && membership.id.toString() >= page.cursor.id) {
+          return false;
+        }
+      }
+      return true;
+    });
+
+    filtered.sort((a, b) => {
+      const timeDiff = b.joinedAt.getTime() - a.joinedAt.getTime();
+      if (timeDiff !== 0) {
+        return timeDiff;
+      }
+      return b.id.toString().localeCompare(a.id.toString());
+    });
+
+    const hasMore = filtered.length > limit;
+    const pageRows = hasMore ? filtered.slice(0, limit) : filtered;
+    const lastRow = pageRows[pageRows.length - 1];
+    const nextCursor =
+      hasMore && lastRow !== undefined
+        ? encodeMembershipCursor({ joinedAt: lastRow.joinedAt.toISOString(), id: lastRow.id.toString() })
+        : null;
+
+    return { memberships: pageRows, nextCursor };
   }
 
   async save(membership: UserTenantMembership, tenantId: TenantId): Promise<void> {
