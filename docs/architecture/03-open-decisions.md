@@ -413,6 +413,51 @@ critère de sortie ni aucune règle de passage des phases suivantes.
 
 ---
 
+## Membership — invitations ordinaires et récupération d'accès (2026-09-29)
+
+Les décisions suivantes cadrent les futurs parcours de gestion des memberships. Elles ne
+modifient pas le provisioning initial du propriétaire défini par
+[ADR-0008 §1](adr/0008-saga-provisioning-etablissement.md) : ce parcours crée le premier
+`ADMIN_ETABLISSEMENT` lors de la création d'un établissement et n'est pas une invitation.
+
+### Invitations ordinaires
+
+- L'invitation vise un `UserAccount` existant. Le rôle est fixé à l'émission et ne peut pas être
+  choisi ou élargi lors de l'acceptation.
+- L'acceptation re-prouve l'identité par les identifiants du compte, sans ouvrir de session. Le
+  serveur retrouve l'invitation liée à ce compte et en déduit le tenant ; le client ne fournit
+  ni `userId` ni `tenantId`. Après acceptation, l'utilisateur suit l'authentification et la
+  sélection de contexte habituelles, avec la politique MFA existante.
+- Une invitation ordinaire ne peut attribuer aucun rôle portant une capacité de gestion des
+  accès ou des rôles, notamment `membership:administer` et `role:administer`, y compris si ces
+  permissions sont portées par un rôle personnalisé. `ADMIN_ETABLISSEMENT` est exclu de ce
+  parcours ; son attribution hors provisioning initial relève de la voie de récupération
+  plateforme ci-dessous.
+
+**Reste à décider avant d'implémenter l'émission d'invitations** : la liste produit explicite des
+rôles non privilégiés admissibles. En attendant cette liste, aucune allowlist de rôles ne doit
+être inventée dans le code.
+
+### Récupération d'un tenant sans administrateur
+
+- L'autorité applicative est réservée à des sessions `SUPER_ADMIN` de plateforme avec MFA
+  satisfaite. Le demandeur et l'approbateur applicatif sont deux personnes distinctes ; aucun
+  approbateur unique ni contournement applicatif n'est prévu.
+- L'identité du bénéficiaire est vérifiée hors bande par deux autres `SUPER_ADMIN` distincts du
+  demandeur et de l'approbateur : quatre personnes distinctes participent donc à une récupération.
+- La voie vise un compte existant et un tenant explicitement identifié par la demande ; le
+  bénéficiaire ne choisit pas son tenant à l'acceptation.
+
+**Reste à définir avant l'exploitation de cette voie** : la procédure opérationnelle concrète
+utilisée par les deux vérificateurs pour établir l'identité du bénéficiaire. Cette vérification
+est hors code ; aucun critère de preuve n'est présumé ici.
+
+Ces décisions ne définissent ni les rôles produit admissibles aux invitations, ni les critères
+opérationnels de vérification d'identité. Elles n'autorisent pas à les déduire implicitement du
+catalogue technique ou à les remplacer par un défaut permissif.
+
+---
+
 ## Bloquants Phase 2
 
 ### O-10 — Règle de détection de doublon patient
