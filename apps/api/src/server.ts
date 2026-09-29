@@ -6,6 +6,9 @@ import express, {
   type Response,
 } from 'express';
 import helmet from 'helmet';
+import { config as loadDotEnv } from 'dotenv';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { buildCompositionRoot, type CompositionRoot } from './composition-root.js';
 
 export interface ErrorHandlerLogger {
@@ -279,5 +282,8 @@ function main(): void {
 const isEntryPoint =
   process.argv[1]?.endsWith('server.ts') || process.argv[1]?.endsWith('server.js');
 if (isEntryPoint) {
+  // Charger le fichier local avant de construire la composition root. Le chemin est ancre sur
+  // src/server.ts (ou dist/server.js), pas sur le repertoire courant du processus.
+  loadDotEnv({ path: resolve(dirname(fileURLToPath(import.meta.url)), '..', '.env') });
   main();
 }
