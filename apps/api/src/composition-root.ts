@@ -61,6 +61,7 @@ import type { ProvisioningAuditRecordInput, ProvisioningAuditTrail } from './mod
 import type { TenantConfigAuditRecordInput, TenantConfigAuditTrail } from './modules/tenant/application/ports/TenantConfigAuditTrail.js';
 import type { TenantConfigPrincipal } from './modules/tenant/application/TenantConfigPrincipal.js';
 import { FacilityController } from './modules/tenant/presentation/http/FacilityController.js';
+import { FacilitySettingsController } from './modules/tenant/presentation/http/FacilitySettingsController.js';
 import type { SubscriptionRepository } from './modules/subscription/domain/ports/SubscriptionRepository.js';
 import type { SubscriptionAuditRecordInput, SubscriptionAuditTrail } from './modules/subscription/application/ports/SubscriptionAuditTrail.js';
 import {
@@ -579,6 +580,8 @@ export interface CompositionRoot {
     readonly facilityController: FacilityController;
     /** Phase 1, deuxieme increment vertical (permission `membership:administer`) — mono-module (identity seul), derriere `requireAuthenticatedContext`. */
     readonly membershipController: MembershipController;
+    /** Phase 1, troisieme increment vertical — MEME permission `tenant-config:administer` que `facilityController`, mono-module (tenant seul). */
+    readonly facilitySettingsController: FacilitySettingsController;
     /** ADR-0010 §8 — un middleware par famille de limite, valeurs dans shared-kernel/domain/RateLimitTuning.ts (non definitives). */
     readonly rateLimitRegistrations: RequestHandler;
     readonly rateLimitLogin: RequestHandler;
@@ -1000,6 +1003,9 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
   // Phase 1, deuxieme increment vertical (permission `membership:administer`) — mono-module
   // (identity SEUL), meme discipline de cablage que `facilityController` ci-dessus.
   const membershipController = new MembershipController(identity.handlers.listTenantMemberships);
+  // Phase 1, troisieme increment vertical — MEME permission `tenant-config:administer` que
+  // `facilityController` ci-dessus (aucune nouvelle permission introduite).
+  const facilitySettingsController = new FacilitySettingsController(tenant.handlers.getFacilitySettings);
 
   // Limiteur de debit PARTAGE (ADR-0010 §8/§12 point 4) — port `RateLimiter` (shared-kernel),
   // implementation Redis REELLE construite plus haut (`rateLimiter`, avant meme le module
@@ -1086,6 +1092,7 @@ export function buildCompositionRoot(source: NodeJS.ProcessEnv = process.env): C
       superAdminBreakGlassController,
       facilityController,
       membershipController,
+      facilitySettingsController,
       rateLimitRegistrations,
       rateLimitLogin,
       rateLimitMfa,

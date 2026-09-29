@@ -8,6 +8,7 @@ import { CompleteProvisioningHandler } from '../application/commands/CompletePro
 import { CreateHealthFacilityHandler } from '../application/commands/CreateHealthFacility.js';
 import { RenameHealthFacilityHandler } from '../application/commands/RenameHealthFacility.js';
 import { SeedFacilityConfigurationHandler } from '../application/commands/SeedFacilityConfiguration.js';
+import { GetFacilitySettingsHandler } from '../application/queries/GetFacilitySettings.js';
 import { GetHealthFacilityHandler } from '../application/queries/GetHealthFacility.js';
 import { createCompleteProvisioningOnFacilityConfigurationSeededHandler } from '../application/services/CompleteProvisioningOnFacilityConfigurationSeeded.js';
 import { createSeedFacilityConfigurationOnMembershipGrantedHandler } from '../application/services/SeedFacilityConfigurationOnMembershipGranted.js';
@@ -32,6 +33,8 @@ export interface TenantModule {
     /** Phase 1, premier increment vertical (permission `tenant-config:administer`). */
     readonly getHealthFacility: GetHealthFacilityHandler;
     readonly renameHealthFacility: RenameHealthFacilityHandler;
+    /** Phase 1, troisieme increment vertical — MEME permission `tenant-config:administer`. */
+    readonly getFacilitySettings: GetFacilitySettingsHandler;
   };
   /** Consommateurs Outbox exposes par ce module — cables UNIQUEMENT dans composition-root.ts. */
   readonly outboxHandlers: {
@@ -110,6 +113,7 @@ export function buildTenantModule(deps: {
         deps.idGenerator,
         deps.tenantConfigAuditTrail,
       ),
+      getFacilitySettings: new GetFacilitySettingsHandler(facilitySettings, unitOfWork),
     },
     outboxHandlers: {
       seedFacilityConfigurationOnMembershipGranted: createSeedFacilityConfigurationOnMembershipGrantedHandler({

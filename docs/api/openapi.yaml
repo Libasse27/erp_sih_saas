@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
-  title: SIH SaaS API — Contrat HTTP complet de la Phase 0 (SaaS Core) et des deux premiers increments de Phase 1
-  version: 0.5.0
+  title: SIH SaaS API — Contrat HTTP complet de la Phase 0 (SaaS Core) et des trois premiers increments de Phase 1
+  version: 0.6.0
   description: >
     Premier fichier OpenAPI de ce depot (Phase 0, etape 5/13 : confirmation de paiement
     d'abonnement SaaS serveur-a-serveur, O-25.5). Etendu a l'etape 11/13 (ADR-0009) avec le
@@ -1280,6 +1280,83 @@ paths:
               example:
                 error: internal_error
 
+  /api/v1/facility-settings:
+    get:
+      operationId: getFacilitySettings
+      tags: [Facility]
+      summary: Consulter les parametres regionaux de l'etablissement du tenant courant (Phase 1, troisieme increment vertical)
+      description: >
+        TROISIEME endpoint HTTP du module `tenant` — MEME permission `tenant-config:administer`
+        que `GET /api/v1/facility` (aucune nouvelle permission introduite). `tenantId` n'est
+        JAMAIS lu depuis un parametre de requete : cette route retourne TOUJOURS "les parametres
+        de mon propre etablissement", derive exclusivement du `ServerContext` serveur
+        (`Authorization: Bearer`). Une session `PLATFORM` est refusee explicitement (`403`).
+        Aucun parametre de requete legitime : le schema `.strict()` rejette tout champ, y compris
+        un `tenantId`/`role` force dans la query (`400`, mass-assignment — jamais ignore
+        silencieusement, meme si cette route derive de toute facon TOUJOURS le tenant du
+        `ServerContext`, jamais de la query). Lecture seule, aucune mutation exposee :
+        `FacilitySettings` n'a pas de commande de modification a ce jour. Aucune entree d'audit
+        n'est produite (convention du depot : seules les mutations sont auditees).
+      security:
+        - bearerSessionAuth: []
+      responses:
+        '200':
+          description: Parametres regionaux du tenant courant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FacilitySettingsResponse'
+              example:
+                tenantId: 7c8f0a2e-4b1d-4e9a-9f3e-1a2b3c4d5e6f
+                locale: fr-SN
+                timezone: Africa/Dakar
+                currency: XOF
+                phoneCountryCode: '+221'
+                createdAt: '2026-08-24T10:00:00.000Z'
+        '400':
+          description: Query non vide — champ inconnu (`.strict()`, mass-assignment, notamment `tenantId`/`role` forges).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: invalid_request
+        '401':
+          description: Aucune session valide.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: unauthenticated
+        '403':
+          description: Authentifie mais non autorise — `tenant-config:administer` absent, OU session `PLATFORM` (refus explicite, voir description).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: forbidden
+        '404':
+          description: >
+            Defensif : aucun `FacilitySettings` ne correspond au tenant du principal courant
+            (semee automatiquement en fin de Saga de provisioning, ADR-0008 §10 — ne devrait
+            survenir qu'en cours de provisioning ou en incident, voir `GetFacilitySettings.ts`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: not_found
+        '500':
+          description: Defaillance technique.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+              example:
+                error: internal_error
+
 components:
   securitySchemes:
     bearerSessionAuth:
@@ -1540,6 +1617,33 @@ components:
         status:
           type: string
           enum: [ACTIVE, SUSPENDED]
+        createdAt:
+          type: string
+          format: date-time
+
+    FacilitySettingsResponse:
+      type: object
+      description: >
+        DTO explicite (jamais l'agregat `FacilitySettings` ni une ligne Prisma brute exposee —
+        regle 6 du system prompt), Phase 1 troisieme increment vertical — reponse de
+        `GET /api/v1/facility-settings` (`FacilitySettingsDto.ts`).
+      required: [tenantId, locale, timezone, currency, phoneCountryCode, createdAt]
+      properties:
+        tenantId:
+          type: string
+          format: uuid
+        locale:
+          type: string
+          example: fr-SN
+        timezone:
+          type: string
+          example: Africa/Dakar
+        currency:
+          type: string
+          example: XOF
+        phoneCountryCode:
+          type: string
+          example: '+221'
         createdAt:
           type: string
           format: date-time

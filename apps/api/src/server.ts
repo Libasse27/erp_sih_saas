@@ -226,6 +226,15 @@ export function createApp(root: CompositionRoot): Express {
     asyncRoute(root.presentation.membershipController.list),
   );
 
+  // Phase 1, troisieme increment vertical — MEME permission `tenant-config:administer` que
+  // `/api/v1/facility` : consultation des parametres regionaux (locale/fuseau/devise/indicatif)
+  // du tenant courant. Lecture seule, aucune mutation exposee (voir FacilitySettingsController.ts).
+  app.get(
+    '/api/v1/facility-settings',
+    root.presentation.requireAuthenticatedContext,
+    asyncRoute(root.presentation.facilitySettingsController.get),
+  );
+
   // Monte APRES toutes les routes (contrat Express des middlewares d'erreur) — voir
   // `createErrorHandler` ci-dessus pour le detail de ce qu'il couvre et pourquoi.
   app.use(createErrorHandler(root.logger));
