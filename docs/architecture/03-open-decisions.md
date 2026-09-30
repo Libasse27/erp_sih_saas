@@ -384,6 +384,26 @@ indépendant, **non traité par cette décision**.
 
 ---
 
+### O-27 — Cahier des charges source absent du dépôt
+**GOUVERNANCE · Ouvert · Constat au 2026-09-30**
+
+Plusieurs documents d'architecture citent un cahier des charges par numéro de section,
+notamment pour les types d'établissement, les services, les rôles et les critères de sécurité.
+Le document source et ses annexes n'ont pas été retrouvés dans le dépôt ni dans les branches Git
+disponibles au 2026-09-30. Les références concernées incluent notamment les §7, §8, §9, §26,
+§27, §28, §30, §32, §33, §37, §38 et §39 cités dans `01-target-architecture.md`.
+
+**Conséquence** : le contenu de ces sections ne peut pas être vérifié à partir du dépôt. Les
+catalogues de types, de services et de rôles qui en dépendent ne doivent pas être considérés
+comme confirmés par cette source ni complétés par déduction.
+
+**À résoudre** : retrouver et référencer la version faisant autorité, ou faire confirmer par le
+responsable du projet qu'elle est indisponible et que les décisions concernées doivent être
+reprises explicitement. Jusque-là, aucune valeur produit manquante n'est déduite du code ou des
+références de section.
+
+---
+
 ## Passage Phase 0 → Phase 1 — décision de gouvernance (2026-09-28)
 
 **Décision** : Phase 1 peut démarrer alors que des résidus de Phase 0 restent ouverts, sous
